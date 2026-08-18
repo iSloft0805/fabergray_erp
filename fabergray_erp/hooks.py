@@ -167,6 +167,19 @@ app_license = "mit"
 # 	],
 # }
 
+# Fixtures
+# --------
+# Roles y permisos propios del módulo Bodega (fabergray_erp), versionados en
+# fabergray_erp/fixtures/. No se exportan roles/permisos de otras apps.
+
+fixtures = [
+	{"dt": "Role", "filters": [["name", "in", ["Bodega", "Jefe de Bodega"]]]},
+	{
+		"dt": "Custom DocPerm",
+		"filters": [["role", "in", ["Bodega", "Jefe de Bodega"]]],
+	},
+]
+
 # Testing
 # -------
 
