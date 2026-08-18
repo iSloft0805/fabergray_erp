@@ -1,0 +1,217 @@
+{
+ "actions": [],
+ "allow_bulk_edit": 1,
+ "allow_rename": 1,
+ "autoname": "FALT-.YYYY.-.#####",
+ "creation": "2026-08-18 15:08:39.685552",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "item_code",
+  "warehouse",
+  "column_break_links",
+  "sales_order",
+  "material_request",
+  "pick_list",
+  "pick_list_item",
+  "section_break_qty",
+  "qty_solicitada",
+  "qty_disponible",
+  "column_break_qty",
+  "qty_faltante",
+  "section_break_deteccion",
+  "detected_by",
+  "shortage_reason",
+  "column_break_deteccion",
+  "reported_by",
+  "reported_on",
+  "section_break_estado",
+  "status",
+  "resolution_note"
+ ],
+ "fields": [
+  {
+   "fieldname": "item_code",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Item",
+   "options": "Item",
+   "reqd": 1
+  },
+  {
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Almac\u00e9n",
+   "options": "Warehouse",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_links",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sales_order",
+   "fieldtype": "Link",
+   "label": "Orden de Venta",
+   "options": "Sales Order"
+  },
+  {
+   "fieldname": "material_request",
+   "fieldtype": "Link",
+   "label": "Solicitud de Material",
+   "options": "Material Request"
+  },
+  {
+   "fieldname": "pick_list",
+   "fieldtype": "Link",
+   "label": "Lista de Alistamiento",
+   "options": "Pick List"
+  },
+  {
+   "fieldname": "pick_list_item",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Fila de Pick List (ref)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_qty",
+   "fieldtype": "Section Break",
+   "label": "Cantidades"
+  },
+  {
+   "fieldname": "qty_solicitada",
+   "fieldtype": "Float",
+   "label": "Cantidad Solicitada",
+   "reqd": 1
+  },
+  {
+   "fieldname": "qty_disponible",
+   "fieldtype": "Float",
+   "label": "Cantidad Disponible",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_qty",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "qty_faltante",
+   "fieldtype": "Float",
+   "in_list_view": 1,
+   "label": "Cantidad Faltante",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_deteccion",
+   "fieldtype": "Section Break",
+   "label": "Detecci\u00f3n"
+  },
+  {
+   "default": "Bodega",
+   "description": "Fulfillment Engine: el faltante ya fue detectado antes de llegar a Bodega (motor a\u00fan no implementado). Bodega: discrepancia f\u00edsica encontrada durante el alistamiento.",
+   "fieldname": "detected_by",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Detectado Por",
+   "options": "Fulfillment Engine\nBodega",
+   "reqd": 1
+  },
+  {
+   "description": "Obligatorio cuando Detectado Por = Bodega.",
+   "fieldname": "shortage_reason",
+   "fieldtype": "Select",
+   "label": "Motivo del Faltante",
+   "mandatory_depends_on": "eval:doc.detected_by=='Bodega'",
+   "options": "\nStock f\u00edsico no encontrado\nStock insuficiente\nProducto da\u00f1ado\nError de inventario\nCompra pendiente\nProducci\u00f3n pendiente\nOtro"
+  },
+  {
+   "fieldname": "column_break_deteccion",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "reported_by",
+   "fieldtype": "Link",
+   "label": "Reportado Por",
+   "options": "User",
+   "reqd": 1
+  },
+  {
+   "fieldname": "reported_on",
+   "fieldtype": "Datetime",
+   "label": "Fecha de Detecci\u00f3n",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_estado",
+   "fieldtype": "Section Break",
+   "label": "Estado y Resoluci\u00f3n"
+  },
+  {
+   "default": "Abierto",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Estado",
+   "options": "Abierto\nEn Proceso\nResuelto",
+   "reqd": 1
+  },
+  {
+   "depends_on": "eval:doc.status=='Resuelto'",
+   "fieldname": "resolution_note",
+   "fieldtype": "Small Text",
+   "label": "Nota de Resoluci\u00f3n"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "links": [],
+ "modified": "2026-08-18 15:09:57.034055",
+ "modified_by": "Administrator",
+ "module": "Fabrigray ERP",
+ "name": "Reporte de Faltante",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Bodega",
+   "write": 1
+  },
+  {
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Jefe de Bodega",
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}
