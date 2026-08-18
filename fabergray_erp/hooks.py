@@ -178,6 +178,10 @@ fixtures = [
 		"dt": "Custom DocPerm",
 		"filters": [["role", "in", ["Bodega", "Jefe de Bodega"]]],
 	},
+	{
+		"dt": "Custom Field",
+		"filters": [["fieldname", "in", ["fg_started_by", "fg_started_on"]]],
+	},
 ]
 
 # Testing
