@@ -153,6 +153,21 @@ def get_queue():
 			)
 		)
 
+	# Line count / sales_order per Pick List, for card display. Pick List Item is a
+	# child table with no permission model of its own -- access is governed entirely
+	# by the parent, and `names` here is already the permission-filtered result of
+	# the frappe.get_list("Pick List", ...) call above, so frappe.get_all (which
+	# skips the -- inapplicable -- child-table permission check) is safe.
+	line_counts = {}
+	sales_order_by_pick_list = {}
+	if names:
+		for row in frappe.get_all(
+			"Pick List Item", filters={"parent": ["in", names]}, fields=["parent", "sales_order"]
+		):
+			line_counts[row.parent] = line_counts.get(row.parent, 0) + 1
+			if row.sales_order and row.parent not in sales_order_by_pick_list:
+				sales_order_by_pick_list[row.parent] = row.sales_order
+
 	buckets = {"listos": [], "con_faltantes": [], "en_alistamiento": [], "pendientes": []}
 	for pl in pick_lists:
 		entry = {
@@ -163,6 +178,8 @@ def get_queue():
 			"customer": pl.customer,
 			"fg_started_by": pl.fg_started_by,
 			"fg_started_on": pl.fg_started_on,
+			"item_count": line_counts.get(pl.name, 0),
+			"sales_order": sales_order_by_pick_list.get(pl.name),
 		}
 		if pl.docstatus == 1:
 			buckets["listos"].append(entry)
@@ -209,6 +226,8 @@ def get_pick_list(name):
 			}
 		)
 
+	sales_order = next((row.sales_order for row in pl.get("locations") if row.sales_order), None)
+
 	return {
 		"name": pl.name,
 		"docstatus": pl.docstatus,
@@ -216,6 +235,7 @@ def get_pick_list(name):
 		"purpose": pl.purpose,
 		"parent_warehouse": pl.parent_warehouse,
 		"customer": pl.customer,
+		"sales_order": sales_order,
 		"fg_started_by": pl.fg_started_by,
 		"fg_started_on": pl.fg_started_on,
 		"rows": rows,
