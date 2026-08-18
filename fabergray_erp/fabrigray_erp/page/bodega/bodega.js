@@ -15,13 +15,15 @@ frappe.pages["bodega"].on_page_load = function (wrapper) {
 // All server communication in this file goes through these six methods --
 // nothing here queries Bin, edits Pick List directly, computes permissions,
 // decides shortage rules, or touches Sales Order. That logic lives entirely
-// in fabergray_erp.api.bodega (see Commit 4).
+// in fabergray_erp.api.bodega (see Commit 4). Commit 5.1 only changes how
+// the same data is rendered (fg-* markup/CSS) -- no new business rules.
 fabergray_erp.Bodega = class Bodega {
 	constructor(page) {
 		this.page = page;
 		this.method_prefix = "fabergray_erp.api.bodega.";
 		this.pending_rows = new Set();
 		this.busy = false;
+		this.last_changed_row = null;
 		this.state = {
 			view: "queue",
 			queue: null,
@@ -30,8 +32,7 @@ fabergray_erp.Bodega = class Bodega {
 			detail: null,
 		};
 
-		this.inject_styles();
-		this.$app = $('<div class="bodega-app">').appendTo(this.page.body);
+		this.$app = $('<div class="fg-bodega">').appendTo(this.page.body);
 		this.render_shell();
 		this.load_queue();
 	}
@@ -45,6 +46,7 @@ fabergray_erp.Bodega = class Bodega {
 
 	load_queue() {
 		this.set_shell_busy(true);
+		if (this.$body) this.render_skeleton_queue();
 		return this.call("get_queue")
 			.then((data) => {
 				this.state.view = "queue";
@@ -58,6 +60,7 @@ fabergray_erp.Bodega = class Bodega {
 
 	load_detail(pick_list) {
 		this.set_shell_busy(true);
+		if (this.$body) this.render_skeleton_detail();
 		return this.call("get_pick_list", { name: pick_list })
 			.then((data) => {
 				this.state.view = "detail";
@@ -72,25 +75,27 @@ fabergray_erp.Bodega = class Bodega {
 	// Shell: header (logo, title, user, refresh) stays fixed across views.
 	// -------------------------------------------------------------------
 	render_shell() {
+		const fullname = frappe.session.user_fullname || frappe.session.user;
 		this.$app.html(`
-			<div class="bodega-header">
-				<div class="bodega-header-brand">
-					<span class="bodega-logo">FABRIGRAY</span>
-					<span class="bodega-title">${__("Bodega")}</span>
+			<div class="fg-header">
+				<div class="fg-header-brand">
+					<span class="fg-header-logo">FABRIGRAY</span>
+					<span class="fg-header-sep">|</span>
+					<span class="fg-header-title">${__("Bodega")}</span>
 				</div>
-				<div class="bodega-header-user">
-					<span class="bodega-username">${frappe.utils.escape_html(
-						frappe.session.user_fullname || frappe.session.user
-					)}</span>
-					<button class="btn btn-default bodega-refresh-btn" title="${__("Actualizar")}">
-						<svg class="icon icon-sm"><use href="#icon-refresh-cw"></use></svg>
-					</button>
+				<div class="fg-header-user">
+					<div class="fg-header-user-info">
+						<div class="fg-header-user-name">${frappe.utils.escape_html(fullname)}</div>
+						<div class="fg-header-user-role">${__("Bodega")}</div>
+					</div>
+					<div class="fg-header-avatar">${get_initials(fullname)}</div>
+					<button type="button" class="fg-refresh-btn" title="${__("Actualizar")}">${icon("refresh-cw")}</button>
 				</div>
 			</div>
-			<div class="bodega-body"></div>
+			<div class="fg-body"></div>
 		`);
-		this.$body = this.$app.find(".bodega-body");
-		this.$app.find(".bodega-refresh-btn").on("click", () => {
+		this.$body = this.$app.find(".fg-body");
+		this.$app.find(".fg-refresh-btn").on("click", () => {
 			if (this.state.view === "detail" && this.state.pick_list) {
 				this.load_detail(this.state.pick_list);
 			} else {
@@ -100,8 +105,8 @@ fabergray_erp.Bodega = class Bodega {
 	}
 
 	set_shell_busy(is_busy) {
-		this.$app.find(".bodega-refresh-btn").prop("disabled", is_busy);
-		this.$app.toggleClass("bodega-loading", !!is_busy);
+		this.$app.find(".fg-refresh-btn").prop("disabled", is_busy);
+		this.$app.toggleClass("fg-loading", !!is_busy);
 	}
 
 	render_body() {
@@ -112,15 +117,39 @@ fabergray_erp.Bodega = class Bodega {
 		}
 	}
 
+	render_skeleton_queue() {
+		this.$body.html(`
+			<div class="fg-skeleton-kpis">
+				<div class="fg-skeleton"></div><div class="fg-skeleton"></div>
+				<div class="fg-skeleton"></div><div class="fg-skeleton"></div>
+			</div>
+			<div class="fg-skeleton-cards">
+				<div class="fg-skeleton"></div><div class="fg-skeleton"></div><div class="fg-skeleton"></div>
+			</div>
+		`);
+	}
+
+	render_skeleton_detail() {
+		this.$body.html(`
+			<div class="fg-skeleton" style="height:88px;margin-bottom:22px;"></div>
+			<div class="fg-skeleton" style="height:104px;margin-bottom:22px;"></div>
+			<div class="fg-skeleton-cards">
+				<div class="fg-skeleton" style="height:108px;"></div>
+				<div class="fg-skeleton" style="height:108px;"></div>
+				<div class="fg-skeleton" style="height:108px;"></div>
+			</div>
+		`);
+	}
+
 	// -------------------------------------------------------------------
 	// Queue view
 	// -------------------------------------------------------------------
 	static bucket_meta() {
 		return {
-			pendientes: { label: __("Pendientes"), color: "gray" },
-			en_alistamiento: { label: __("En alistamiento"), color: "orange" },
-			con_faltantes: { label: __("Con faltantes"), color: "red" },
-			listos: { label: __("Listos"), color: "green" },
+			pendientes: { label: __("Pendientes"), icon: "clipboard-list" },
+			en_alistamiento: { label: __("En alistamiento"), icon: "clock" },
+			con_faltantes: { label: __("Con faltantes"), icon: "triangle-alert" },
+			listos: { label: __("Listos"), icon: "circle-check-big" },
 		};
 	}
 
@@ -129,103 +158,103 @@ fabergray_erp.Bodega = class Bodega {
 		const meta = Bodega.bucket_meta();
 		const order = ["con_faltantes", "en_alistamiento", "pendientes", "listos"];
 
-		const $indicators = $('<div class="bodega-indicators"></div>');
-		order.forEach((bucket) => {
-			const count = (queue[bucket] || []).length;
-			const active = this.state.filter_bucket === bucket;
-			$(`
-				<button type="button" class="bodega-indicator bodega-indicator-${meta[bucket].color} ${
-				active ? "is-active" : ""
-			}" data-bucket="${bucket}">
-					<span class="bodega-indicator-count">${count}</span>
-					<span class="bodega-indicator-label">${meta[bucket].label}</span>
-				</button>
-			`).appendTo($indicators);
-		});
-		$indicators.on("click", ".bodega-indicator", (e) => {
-			const bucket = $(e.currentTarget).data("bucket");
-			this.state.filter_bucket = this.state.filter_bucket === bucket ? null : bucket;
-			this.render_queue();
-		});
+		const kpi_html = order
+			.map((bucket) => {
+				const count = (queue[bucket] || []).length;
+				const active = this.state.filter_bucket === bucket;
+				return `
+					<button type="button" class="fg-kpi fg-kpi--${bucket} ${active ? "is-active" : ""}" data-bucket="${bucket}">
+						<div class="fg-kpi-icon">${icon(meta[bucket].icon)}</div>
+						<div class="fg-kpi-number">${count}</div>
+						<div class="fg-kpi-label">${meta[bucket].label}</div>
+						<span class="fg-kpi-link">${__("Ver pedidos")} ${icon("chevron-right", "fg-icon-sm")}</span>
+					</button>
+				`;
+			})
+			.join("");
 
 		const buckets_to_show = this.state.filter_bucket ? [this.state.filter_bucket] : order;
-		const total_shown = buckets_to_show.reduce((n, b) => n + (queue[b] || []).length, 0);
-
-		let sections_html = "";
-		if (!total_shown) {
-			sections_html = `<div class="bodega-empty">${__("No hay pedidos en este estado.")}</div>`;
-		} else {
-			buckets_to_show.forEach((bucket) => {
-				const items = queue[bucket] || [];
-				if (!items.length) return;
-				sections_html += `
-					<div class="bodega-section">
-						<div class="bodega-section-title">${meta[bucket].label} (${items.length})</div>
-						<div class="bodega-cards">
-							${items.map((pl) => this.render_queue_card(pl, bucket)).join("")}
-						</div>
-					</div>
-				`;
+		let cards_html = "";
+		let any = false;
+		buckets_to_show.forEach((bucket) => {
+			(queue[bucket] || []).forEach((pl) => {
+				any = true;
+				cards_html += this.render_queue_card(pl, bucket);
 			});
+		});
+		if (!any) {
+			cards_html = `<div class="fg-empty">${__("No hay pedidos en este estado.")}</div>`;
 		}
 
 		this.$body.html(`
-			<div class="bodega-queue">
-				${$indicators.prop("outerHTML")}
-				<div class="bodega-sections">${sections_html}</div>
+			<div class="fg-kpis">${kpi_html}</div>
+			<div class="fg-section-head">
+				<div>
+					<div class="fg-section-title">${__("Pedidos de hoy")}</div>
+					<div class="fg-section-date">${format_today_es()}</div>
+				</div>
 			</div>
+			<div class="fg-cards">${cards_html}</div>
+			${render_bottom_nav(queue)}
 		`);
 
-		this.$body.find(".bodega-indicator").on("click", (e) => {
+		this.$body.find(".fg-kpi").on("click", (e) => {
 			const bucket = $(e.currentTarget).data("bucket");
 			this.state.filter_bucket = this.state.filter_bucket === bucket ? null : bucket;
 			this.render_queue();
 		});
 
-		this.$body.find(".bodega-card").on("click", (e) => {
+		this.$body.find(".fg-order-card").on("click", (e) => {
 			const $card = $(e.currentTarget);
-			const pick_list = $card.data("name");
-			const bucket = $card.data("bucket");
-			this.open_pick_list(pick_list, bucket);
+			this.open_pick_list($card.data("name"), $card.data("bucket"));
 		});
 	}
 
 	render_queue_card(pl, bucket) {
 		const meta = Bodega.bucket_meta()[bucket];
 		const customer = pl.customer ? frappe.utils.escape_html(pl.customer) : __("Sin cliente");
-		const order_line = pl.sales_order
-			? `<div class="bodega-card-order">${__("Orden")}: ${frappe.utils.escape_html(pl.sales_order)}</div>`
-			: "";
 		const started_line =
 			bucket !== "pendientes" && pl.fg_started_by
-				? `<div class="bodega-card-started">${__("Iniciado por")} ${frappe.utils.escape_html(
+				? `<div class="fg-order-meta">${icon("user", "fg-icon-sm")} ${__("Iniciado por")} ${frappe.utils.escape_html(
 						pl.fg_started_by
 				  )}</div>`
 				: "";
 
 		let button_label = __("VER DETALLE");
-		let button_class = "btn-default";
+		let button_class = "fg-btn--outline-success";
 		if (bucket === "pendientes") {
 			button_label = __("INICIAR ALISTAMIENTO");
-			button_class = "btn-primary";
-		} else if (bucket === "en_alistamiento" || bucket === "con_faltantes") {
-			button_label = __("CONTINUAR ALISTAMIENTO");
-			button_class = "btn-primary";
+			button_class = "fg-btn--solid-primary";
+		} else if (bucket === "en_alistamiento") {
+			button_label = __("CONTINUAR");
+			button_class = "fg-btn--outline-warning";
+		} else if (bucket === "con_faltantes") {
+			button_label = __("VER FALTANTES");
+			button_class = "fg-btn--outline-danger";
 		}
 
 		return `
-			<div class="bodega-card" data-name="${frappe.utils.escape_html(pl.name)}" data-bucket="${bucket}">
-				<div class="bodega-card-top">
-					<span class="bodega-card-pedido">${__("PEDIDO")} #${frappe.utils.escape_html(pl.name)}</span>
-					<span class="indicator-pill ${meta.color}">${meta.label}</span>
+			<div class="fg-order-card fg-order-card--${bucket} fg-kpi--${bucket}" data-name="${frappe.utils.escape_html(
+			pl.name
+		)}" data-bucket="${bucket}">
+				<div class="fg-order-main">
+					<div class="fg-order-icon">${icon(meta.icon)}</div>
+					<div>
+						<div class="fg-order-id">${__("PEDIDO")} #${frappe.utils.escape_html(pl.name)}</div>
+						<div class="fg-order-customer">${customer}</div>
+					</div>
 				</div>
-				${order_line}
-				<div class="bodega-card-customer">${customer}</div>
-				<div class="bodega-card-meta">${pl.item_count} ${
+				<div class="fg-order-info">
+					<div class="fg-order-meta">${icon("package", "fg-icon-sm")} ${pl.item_count} ${
 			pl.item_count === 1 ? __("producto") : __("productos")
 		}</div>
-				${started_line}
-				<button type="button" class="btn ${button_class} btn-block bodega-card-btn">${button_label}</button>
+					${started_line}
+				</div>
+				<div class="fg-progress-block">
+					<span class="fg-badge fg-badge--${bucket}">${meta.label}</span>
+					${queue_progress_markup(bucket)}
+				</div>
+				<button type="button" class="fg-btn ${button_class} fg-order-card-btn">${button_label}</button>
 			</div>
 		`;
 	}
@@ -251,130 +280,178 @@ fabergray_erp.Bodega = class Bodega {
 
 		const is_open = detail.docstatus === 0;
 		const rows = detail.rows || [];
-		const picked_lines = rows.filter((r) => r.qty_alistada >= r.qty_solicitada).length;
+		const picked_lines = rows.filter((r) => flt(r.qty_alistada) >= flt(r.qty_solicitada)).length;
+		const pct = rows.length ? Math.round((picked_lines / rows.length) * 100) : 0;
 
 		const started_banner = detail.fg_started_by
 			? `
-				<div class="bodega-started-banner">
-					${__("Alistamiento iniciado por")} <b>${frappe.utils.escape_html(detail.fg_started_by)}</b>
-					<br><span class="text-muted">${__("Hora")}: ${frappe.datetime.str_to_user(detail.fg_started_on)}</span>
+				<div class="fg-started-banner">
+					${icon("user")} ${__("Alistamiento iniciado por")} <b>${frappe.utils.escape_html(detail.fg_started_by)}</b>
+					<span class="fg-started-banner-time">${
+						detail.fg_started_on ? frappe.datetime.str_to_user(detail.fg_started_on) : ""
+					}</span>
 				</div>
 			`
 			: "";
 
 		const done_banner = !is_open
-			? `<div class="bodega-done-banner">✓ ${__("Pedido alistado correctamente")}</div>`
+			? `<div class="fg-done-banner">${icon("circle-check-big")} ${__("Pedido alistado correctamente")}</div>`
 			: "";
 
+		const subtitle_parts = [];
+		if (detail.customer) subtitle_parts.push(frappe.utils.escape_html(detail.customer));
+		if (detail.parent_warehouse) subtitle_parts.push(frappe.utils.escape_html(detail.parent_warehouse));
+
 		this.$body.html(`
-			<div class="bodega-detail">
-				<div class="bodega-detail-header">
-					<button type="button" class="btn btn-default bodega-back-btn">&larr; ${__("Volver")}</button>
-					<div class="bodega-detail-title">${__("PEDIDO")} #${frappe.utils.escape_html(detail.name)}</div>
-					${
-						detail.sales_order
-							? `<div class="bodega-detail-order">${__("Orden de venta")}: ${frappe.utils.escape_html(
-									detail.sales_order
-							  )}</div>`
-							: ""
-					}
-					<div class="bodega-detail-customer">${__("Cliente")}: ${
-			detail.customer ? frappe.utils.escape_html(detail.customer) : "—"
-		}</div>
-					<div class="bodega-detail-progress">${__("Progreso")}: ${picked_lines}/${rows.length} ${__(
-			"líneas alistadas"
-		)}</div>
-					${started_banner}
-					${done_banner}
+			<div class="fg-detail-top">
+				<div>
+					<button type="button" class="fg-back-btn">${icon("arrow-left")} ${__("Volver a pedidos")}</button>
+					<div class="fg-detail-heading">
+						<div class="fg-detail-title">${__("PEDIDO")} #${frappe.utils.escape_html(detail.name)}</div>
+						<div class="fg-detail-subtitle">${subtitle_parts.join(" · ") || "—"}</div>
+					</div>
 				</div>
-				<div class="bodega-item-cards">
-					${rows.map((row) => this.render_item_card(row, is_open)).join("")}
-				</div>
-				${
-					is_open
-						? `<button type="button" class="btn btn-primary btn-block bodega-finish-btn">${__(
-								"TERMINAR ALISTAMIENTO"
-						  )}</button>`
-						: ""
-				}
+				${started_banner}${done_banner}
 			</div>
+
+			<div class="fg-progress-card">
+				<div>
+					<div class="fg-progress-card-head">${__("Progreso del alistamiento")}</div>
+					<div class="fg-progress-card-count">${picked_lines} / ${rows.length} <small>${__("productos")}</small></div>
+				</div>
+				<div class="fg-progress-card-bar">
+					<div class="fg-progress-track"><div class="fg-progress-fill" style="--fg-progress-width:${pct}%"></div></div>
+				</div>
+				<div class="fg-progress-card-pct">${pct}%</div>
+			</div>
+
+			<div class="fg-item-cards">${rows.map((row) => this.render_item_card(row, is_open)).join("")}</div>
+
+			${
+				is_open
+					? `
+				<div class="fg-finish-bar">
+					<button type="button" class="fg-finish-btn">${icon("circle-check-big")} ${__("TERMINAR ALISTAMIENTO")}</button>
+					<div class="fg-finish-note">${icon("lock", "fg-icon-sm")} ${__(
+							"Se validarán cantidades y faltantes antes de finalizar"
+					  )}</div>
+				</div>
+			`
+					: ""
+			}
 		`);
 
-		this.$body.find(".bodega-back-btn").on("click", () => this.load_queue());
+		this.last_changed_row = null;
+
+		this.$body.find(".fg-back-btn").on("click", () => this.load_queue());
 		if (is_open) {
 			this.bind_item_card_events();
-			this.$body.find(".bodega-finish-btn").on("click", () => this.finish_picking());
+			this.$body.find(".fg-finish-btn").on("click", () => this.finish_picking());
 		}
 	}
 
 	render_item_card(row, is_open) {
-		const shortfall = Math.max(flt(row.qty_solicitada) - flt(row.qty_disponible), 0);
-		const short_of_requested = flt(row.qty_alistada) < flt(row.qty_solicitada);
+		const solicitada = flt(row.qty_solicitada);
+		const disponible = flt(row.qty_disponible);
+		const alistada = flt(row.qty_alistada);
+		const uom = row.uom || "";
+		const complete = solicitada > 0 ? alistada >= solicitada : true;
+		const shortfall = Math.max(solicitada - alistada, 0);
+		const disponible_short = disponible < solicitada;
+		const flash = row.row_name === this.last_changed_row ? "fg-row-flash" : "";
 
-		let shortage_html = "";
+		let status_html;
 		if (row.has_shortage_report) {
-			shortage_html = `<div class="bodega-shortage-badge">⚠ ${__("Faltante reportado")}</div>`;
-		} else if (is_open && short_of_requested) {
-			shortage_html = `<button type="button" class="btn btn-danger btn-sm bodega-report-shortage-btn">${__(
-				"REPORTAR FALTANTE"
-			)}</button>`;
+			status_html = `<span class="fg-status-pill fg-status-pill--warn">${icon("triangle-alert", "fg-icon-sm")} ${__(
+				"Faltante reportado"
+			)}</span>`;
+		} else if (complete) {
+			status_html = `<span class="fg-status-pill fg-status-pill--ok">${icon("circle-check-big", "fg-icon-sm")} ${__(
+				"Completo"
+			)}</span>`;
+		} else if (is_open) {
+			status_html = `
+				<span class="fg-status-pill fg-status-pill--warn">${icon("triangle-alert", "fg-icon-sm")} ${__("Faltan")} ${format_qty(
+				shortfall
+			)} ${uom}</span>
+				<button type="button" class="fg-btn fg-btn--danger-sm fg-report-shortage-btn">${__("REPORTAR FALTANTE")}</button>
+			`;
+		} else {
+			status_html = `<span class="fg-status-pill fg-status-pill--warn">${icon("triangle-alert", "fg-icon-sm")} ${__(
+				"Faltan"
+			)} ${format_qty(shortfall)} ${uom}</span>`;
 		}
 
-		return `
-			<div class="bodega-item-card" data-row="${frappe.utils.escape_html(row.row_name)}">
-				<div class="bodega-item-name">${frappe.utils.escape_html(row.item_name || row.item_code)}</div>
-				<div class="bodega-item-code">${frappe.utils.escape_html(row.item_code)}</div>
-				<div class="bodega-item-qty-info">
-					<div><span class="text-muted">${__("Solicitado")}:</span> <b>${format_qty(row.qty_solicitada)} ${
-			row.uom || ""
-		}</b></div>
-					<div><span class="text-muted">${__("Disponible")}:</span> <b>${format_qty(row.qty_disponible)} ${
-			row.uom || ""
-		}</b></div>
-					${
-						shortfall > 0
-							? `<div class="bodega-item-missing"><span class="text-muted">${__(
-									"Faltan"
-							  )}:</span> <b>${format_qty(shortfall)} ${row.uom || ""}</b></div>`
-							: ""
-					}
+		const qty_cols = `
+			<div class="fg-qty-cols-mobile">
+				<div class="fg-qty-col">
+					<div class="fg-qty-col-label">${__("Solicitado")}</div>
+					<div class="fg-qty-col-value">${format_qty(solicitada)}</div>
+					<div class="fg-qty-col-unit">${uom}</div>
 				</div>
-				${
-					is_open
-						? `
-					<div class="bodega-qty-control">
-						<button type="button" class="bodega-qty-btn bodega-qty-minus" ${flt(row.qty_alistada) <= 0 ? "disabled" : ""}>&minus;</button>
-						<input type="number" inputmode="decimal" class="bodega-qty-input" value="${flt(row.qty_alistada)}" min="0">
-						<button type="button" class="bodega-qty-btn bodega-qty-plus">&plus;</button>
+				<div class="fg-qty-col">
+					<div class="fg-qty-col-label">${__("Disponible")}</div>
+					<div class="fg-qty-col-value ${disponible_short ? "fg-qty-col-value--short" : "fg-qty-col-value--ok"}">${format_qty(
+			disponible
+		)}</div>
+					<div class="fg-qty-col-unit">${uom}</div>
+				</div>
+				<div class="fg-qty-col fg-qty-col-alistado-desktop-only">
+					<div class="fg-qty-col-label">${__("Alistado")}</div>
+					<div class="fg-qty-col-value">${format_qty(alistada)}</div>
+					<div class="fg-qty-col-unit">${uom}</div>
+				</div>
+			</div>
+		`;
+
+		const control_html = is_open
+			? `
+				<div class="fg-stepper-label-mobile">${__("Alistado")}</div>
+				<div class="fg-stepper">
+					<button type="button" class="fg-stepper-btn fg-stepper-minus" ${alistada <= 0 ? "disabled" : ""}>${icon(
+					"minus"
+			  )}</button>
+					<input type="number" inputmode="decimal" class="fg-stepper-input" value="${alistada}" min="0">
+					<button type="button" class="fg-stepper-btn fg-stepper-plus">${icon("plus")}</button>
+				</div>
+			`
+			: `<div class="fg-item-readonly"><small>${__("Alistado")}</small>${format_qty(alistada)} ${uom}</div>`;
+
+		return `
+			<div class="fg-item-card ${flash}" data-row="${frappe.utils.escape_html(row.row_name)}">
+				<div class="fg-item-identity">
+					<div class="fg-item-thumb">${icon("package")}</div>
+					<div>
+						<div class="fg-item-name">${frappe.utils.escape_html(row.item_name || row.item_code)}</div>
+						<div class="fg-item-code">${frappe.utils.escape_html(row.item_code)}</div>
+						${uom ? `<span class="fg-item-uom">${frappe.utils.escape_html(uom)}</span>` : ""}
 					</div>
-				`
-						: `<div class="bodega-qty-readonly">${__("Alistado")}: <b>${format_qty(row.qty_alistada)} ${
-								row.uom || ""
-						  }</b></div>`
-				}
-				${shortage_html}
+				</div>
+				${qty_cols}
+				${control_html}
+				<div class="fg-item-status">${status_html}</div>
 			</div>
 		`;
 	}
 
 	bind_item_card_events() {
-		this.$body.find(".bodega-item-card").each((i, el) => {
+		this.$body.find(".fg-item-card").each((i, el) => {
 			const $card = $(el);
 			const row_name = $card.data("row");
-			const $input = $card.find(".bodega-qty-input");
+			const $input = $card.find(".fg-stepper-input");
 
-			$card.find(".bodega-qty-minus").on("click", () => {
+			$card.find(".fg-stepper-minus").on("click", () => {
 				const next = Math.max(flt($input.val()) - 1, 0);
 				this.commit_picked_qty(row_name, next, $card);
 			});
-			$card.find(".bodega-qty-plus").on("click", () => {
+			$card.find(".fg-stepper-plus").on("click", () => {
 				const next = flt($input.val()) + 1;
 				this.commit_picked_qty(row_name, next, $card);
 			});
 			$input.on("change", () => {
 				this.commit_picked_qty(row_name, flt($input.val()), $card);
 			});
-			$card.find(".bodega-report-shortage-btn").on("click", () => {
+			$card.find(".fg-report-shortage-btn").on("click", () => {
 				this.open_report_shortage_dialog(row_name, $card);
 			});
 		});
@@ -383,9 +460,10 @@ fabergray_erp.Bodega = class Bodega {
 	commit_picked_qty(row_name, qty, $card) {
 		if (this.pending_rows.has(row_name)) return;
 		this.pending_rows.add(row_name);
-		$card.addClass("bodega-row-busy");
-		$card.find(".bodega-qty-btn, .bodega-qty-input").prop("disabled", true);
+		$card.addClass("fg-row-busy");
+		$card.find(".fg-stepper-btn, .fg-stepper-input").prop("disabled", true);
 
+		this.last_changed_row = row_name;
 		this.call("set_picked_qty", { name: this.state.pick_list, row_name: row_name, qty: qty })
 			.then(() => this.load_detail(this.state.pick_list))
 			.catch(() => this.load_detail(this.state.pick_list))
@@ -399,17 +477,18 @@ fabergray_erp.Bodega = class Bodega {
 		if (!row) return;
 
 		frappe.model.with_doctype("Reporte de Faltante", () => {
-			const shortage_field = frappe.get_meta("Reporte de Faltante").fields.find(
-				(f) => f.fieldname === "shortage_reason"
-			);
+			const shortage_field = frappe
+				.get_meta("Reporte de Faltante")
+				.fields.find((f) => f.fieldname === "shortage_reason");
 			const reason_options = (shortage_field.options || "")
 				.split("\n")
 				.map((o) => o.trim())
 				.filter(Boolean);
 
 			const dialog = new frappe.ui.Dialog({
-				title: __("Reportar faltante") + " — " + (row.item_name || row.item_code),
+				title: __("Reportar faltante"),
 				fields: [
+					{ fieldtype: "HTML", fieldname: "summary_html" },
 					{
 						fieldtype: "Select",
 						fieldname: "shortage_reason",
@@ -430,7 +509,7 @@ fabergray_erp.Bodega = class Bodega {
 						label: __("Nota (opcional)"),
 					},
 				],
-				primary_action_label: __("Reportar faltante"),
+				primary_action_label: __("REPORTAR FALTANTE"),
 				primary_action: (values) => {
 					dialog.disable_primary_action();
 					this.call("report_shortage", {
@@ -442,7 +521,8 @@ fabergray_erp.Bodega = class Bodega {
 					})
 						.then(() => {
 							dialog.hide();
-							frappe.show_alert({ message: "⚠ " + __("Faltante reportado"), indicator: "orange" });
+							frappe.show_alert({ message: "✓ " + __("Faltante reportado"), indicator: "green" });
+							this.last_changed_row = row_name;
 							this.load_detail(this.state.pick_list);
 						})
 						.catch(() => {
@@ -450,6 +530,35 @@ fabergray_erp.Bodega = class Bodega {
 						});
 				},
 			});
+
+			dialog.$wrapper.addClass("fg-shortage-dialog");
+
+			const render_summary = () => {
+				const found = flt(dialog.get_value("qty_disponible"));
+				const faltante = Math.max(flt(row.qty_solicitada) - found, 0);
+				dialog.fields_dict.summary_html.$wrapper.html(`
+					<div class="fg-shortage-summary">
+						<div class="fg-shortage-summary-item">${frappe.utils.escape_html(row.item_name || row.item_code)}</div>
+						<div>
+							<div class="fg-shortage-summary-field-label">${__("Solicitado")}</div>
+							<div class="fg-shortage-summary-field-value">${format_qty(row.qty_solicitada)} ${row.uom || ""}</div>
+						</div>
+						<div>
+							<div class="fg-shortage-summary-field-label">${__("Encontrado")}</div>
+							<div class="fg-shortage-summary-field-value">${format_qty(found)} ${row.uom || ""}</div>
+						</div>
+						<div>
+							<div class="fg-shortage-summary-field-label">${__("Faltante")}</div>
+							<div class="fg-shortage-summary-field-value fg-shortage-summary-field-value--danger">${format_qty(
+								faltante
+							)} ${row.uom || ""}</div>
+						</div>
+					</div>
+				`);
+			};
+
+			render_summary();
+			dialog.fields_dict.qty_disponible.df.onchange = render_summary;
 			dialog.show();
 		});
 	}
@@ -458,7 +567,7 @@ fabergray_erp.Bodega = class Bodega {
 		if (this.busy) return;
 		frappe.confirm(__("¿Confirmas que terminaste de alistar este pedido?"), () => {
 			this.busy = true;
-			const $btn = this.$body.find(".bodega-finish-btn").prop("disabled", true).addClass("bodega-btn-loading");
+			const $btn = this.$body.find(".fg-finish-btn").prop("disabled", true).addClass("fg-btn--loading");
 			this.call("finish_picking", { name: this.state.pick_list })
 				.then(() => {
 					frappe.show_alert({ message: "✓ " + __("Pedido alistado correctamente"), indicator: "green" });
@@ -471,119 +580,75 @@ fabergray_erp.Bodega = class Bodega {
 				})
 				.finally(() => {
 					this.busy = false;
-					$btn.prop("disabled", false).removeClass("bodega-btn-loading");
+					$btn.prop("disabled", false).removeClass("fg-btn--loading");
 				});
 		});
 	}
-
-	// -------------------------------------------------------------------
-	// Styles -- scoped to .bodega-app, reuses Frappe's own theme variables
-	// and indicator-pill component instead of hardcoded colors.
-	// -------------------------------------------------------------------
-	inject_styles() {
-		if (document.getElementById("bodega-page-styles")) return;
-		const style = document.createElement("style");
-		style.id = "bodega-page-styles";
-		style.textContent = `
-			.bodega-app { max-width: 960px; margin: 0 auto; }
-			.bodega-header {
-				display: flex; align-items: center; justify-content: space-between;
-				padding: var(--padding-md); background: var(--card-bg);
-				border: 1px solid var(--border-color); border-radius: var(--border-radius, 8px);
-				margin-bottom: var(--margin-md); flex-wrap: wrap; gap: var(--margin-sm);
-			}
-			.bodega-header-brand { display: flex; align-items: baseline; gap: var(--margin-sm); }
-			.bodega-logo { font-weight: 700; letter-spacing: 0.05em; color: var(--text-muted); font-size: 0.8rem; }
-			.bodega-title { font-weight: 700; font-size: 1.25rem; color: var(--text-color); }
-			.bodega-header-user { display: flex; align-items: center; gap: var(--margin-sm); }
-			.bodega-username { color: var(--text-muted); font-size: 0.9rem; }
-			.bodega-refresh-btn { min-height: 44px; min-width: 44px; }
-			.bodega-loading { opacity: 0.6; pointer-events: none; }
-
-			.bodega-indicators {
-				display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--margin-sm);
-				margin-bottom: var(--margin-md);
-			}
-			.bodega-indicator {
-				display: flex; flex-direction: column; align-items: center; justify-content: center;
-				padding: var(--padding-md) var(--padding-sm); border-radius: var(--border-radius, 8px);
-				border: 2px solid transparent; cursor: pointer; min-height: 64px;
-			}
-			.bodega-indicator-count { font-size: 1.5rem; font-weight: 700; line-height: 1.1; }
-			.bodega-indicator-label { font-size: 0.75rem; margin-top: 2px; text-align: center; }
-			.bodega-indicator-gray { background: var(--bg-gray); color: var(--text-on-gray); }
-			.bodega-indicator-orange { background: var(--bg-orange); color: var(--text-on-orange); }
-			.bodega-indicator-red { background: var(--bg-red); color: var(--text-on-red); }
-			.bodega-indicator-green { background: var(--bg-green); color: var(--text-on-green); }
-			.bodega-indicator.is-active { border-color: currentColor; }
-
-			.bodega-section-title { font-weight: 600; color: var(--text-muted); margin: var(--margin-md) 0 var(--margin-sm); }
-			.bodega-empty { text-align: center; color: var(--text-muted); padding: var(--padding-2xl) 0; }
-
-			.bodega-cards {
-				display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: var(--margin-md);
-			}
-			.bodega-card {
-				background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--border-radius, 8px);
-				box-shadow: var(--card-shadow); padding: var(--padding-md); cursor: pointer;
-				display: flex; flex-direction: column; gap: 6px;
-			}
-			.bodega-card-top { display: flex; align-items: center; justify-content: space-between; gap: var(--margin-sm); }
-			.bodega-card-pedido { font-weight: 700; }
-			.bodega-card-order, .bodega-card-started { font-size: 0.8rem; color: var(--text-muted); }
-			.bodega-card-customer { font-size: 1rem; }
-			.bodega-card-meta { color: var(--text-muted); font-size: 0.85rem; }
-			.bodega-card-btn { min-height: 44px; margin-top: var(--margin-sm); }
-
-			.bodega-detail-header {
-				background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--border-radius, 8px);
-				padding: var(--padding-md); margin-bottom: var(--margin-md);
-			}
-			.bodega-back-btn { min-height: 44px; margin-bottom: var(--margin-sm); }
-			.bodega-detail-title { font-size: 1.3rem; font-weight: 700; }
-			.bodega-detail-order, .bodega-detail-customer, .bodega-detail-progress { color: var(--text-muted); margin-top: 2px; }
-			.bodega-started-banner { margin-top: var(--margin-sm); padding: var(--padding-sm); background: var(--bg-orange); color: var(--text-on-orange); border-radius: var(--border-radius, 8px); }
-			.bodega-done-banner { margin-top: var(--margin-sm); padding: var(--padding-sm); background: var(--bg-green); color: var(--text-on-green); border-radius: var(--border-radius, 8px); font-weight: 600; }
-
-			.bodega-item-cards { display: flex; flex-direction: column; gap: var(--margin-sm); margin-bottom: var(--margin-md); }
-			.bodega-item-card {
-				background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--border-radius, 8px);
-				box-shadow: var(--card-shadow); padding: var(--padding-md);
-			}
-			.bodega-item-card.bodega-row-busy { opacity: 0.5; }
-			.bodega-item-name { font-weight: 700; font-size: 1.05rem; }
-			.bodega-item-code { color: var(--text-muted); font-size: 0.8rem; margin-bottom: 6px; }
-			.bodega-item-qty-info { display: flex; flex-wrap: wrap; gap: var(--margin-md); font-size: 0.95rem; margin-bottom: var(--margin-sm); }
-			.bodega-item-missing { color: var(--text-on-red); }
-
-			.bodega-qty-control { display: flex; align-items: center; gap: var(--margin-sm); }
-			.bodega-qty-btn {
-				min-width: 44px; min-height: 44px; font-size: 1.4rem; line-height: 1;
-				border: 1px solid var(--border-color); background: var(--control-bg); border-radius: var(--border-radius, 8px);
-				cursor: pointer;
-			}
-			.bodega-qty-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-			.bodega-qty-input {
-				width: 90px; min-height: 44px; text-align: center; font-size: 1.3rem; font-weight: 700;
-				border: 1px solid var(--border-color); border-radius: var(--border-radius, 8px); background: var(--fg-color); color: var(--text-color);
-			}
-			.bodega-qty-readonly { font-size: 1.1rem; }
-
-			.bodega-shortage-badge { margin-top: var(--margin-sm); color: var(--text-on-red); font-weight: 600; }
-			.bodega-report-shortage-btn { margin-top: var(--margin-sm); min-height: 44px; }
-
-			.bodega-finish-btn { min-height: 56px; font-size: 1.1rem; font-weight: 700; }
-			.bodega-btn-loading { opacity: 0.7; }
-
-			@media (max-width: 600px) {
-				.bodega-indicators { grid-template-columns: repeat(2, 1fr); }
-				.bodega-cards { grid-template-columns: 1fr; }
-				.bodega-header { flex-direction: column; align-items: flex-start; }
-			}
-		`;
-		document.head.appendChild(style);
-	}
 };
+
+// -------------------------------------------------------------------------
+// Small render helpers -- pure presentation, no server calls, no state.
+// -------------------------------------------------------------------------
+function icon(name, extra_class) {
+	return `<svg class="fg-icon ${extra_class || ""}"><use href="#icon-${name}"></use></svg>`;
+}
+
+function get_initials(name) {
+	const parts = (name || "").trim().split(/\s+/).filter(Boolean);
+	if (!parts.length) return "?";
+	const first = parts[0][0] || "";
+	const second = parts.length > 1 ? parts[1][0] : "";
+	return (first + second).toUpperCase();
+}
+
+function format_today_es() {
+	const d = new Date();
+	try {
+		const label = d.toLocaleDateString("es-CO", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+		return label.charAt(0).toUpperCase() + label.slice(1);
+	} catch (e) {
+		return frappe.datetime.str_to_user(frappe.datetime.nowdate());
+	}
+}
+
+function queue_progress_markup(bucket) {
+	if (bucket === "pendientes") {
+		return `
+			<div class="fg-progress-label-row"><span>${__("Progreso")}</span><span class="fg-progress-pct">0%</span></div>
+			<div class="fg-progress-track"><div class="fg-progress-fill" style="--fg-progress-width:0%"></div></div>
+		`;
+	}
+	if (bucket === "listos") {
+		return `
+			<div class="fg-progress-label-row"><span>${__("Progreso")}</span><span class="fg-progress-pct">100%</span></div>
+			<div class="fg-progress-track"><div class="fg-progress-fill" style="--fg-progress-width:100%"></div></div>
+		`;
+	}
+	// en_alistamiento / con_faltantes: get_queue() does not return per-order
+	// qty_alistada/qty_solicitada, so no numeric percentage is invented here --
+	// only an indeterminate bar + status label. The exact % is shown in the
+	// detail view, where get_pick_list() provides real per-line quantities.
+	const label = bucket === "con_faltantes" ? __("Con faltantes") : __("En progreso");
+	return `
+		<div class="fg-progress-label-row"><span>${__("Progreso")}</span><span class="fg-progress-pct">${label}</span></div>
+		<div class="fg-progress-track"><div class="fg-progress-fill fg-progress-fill--indeterminate"></div></div>
+	`;
+}
+
+function render_bottom_nav(queue) {
+	const faltantes_count = ((queue || {}).con_faltantes || []).length;
+	return `
+		<div class="fg-bottom-nav">
+			<div class="fg-nav-item is-active">${icon("house")}<span>${__("Inicio")}</span></div>
+			<div class="fg-nav-item">${icon("clipboard-list")}<span>${__("Pedidos")}</span></div>
+			<div class="fg-nav-item">${icon("triangle-alert")}<span>${__("Faltantes")}</span>${
+		faltantes_count ? `<span class="fg-nav-badge">${faltantes_count}</span>` : ""
+	}</div>
+			<div class="fg-nav-item">${icon("clock")}<span>${__("Historial")}</span></div>
+			<div class="fg-nav-item">${icon("ellipsis")}<span>${__("Más")}</span></div>
+		</div>
+	`;
+}
 
 function flt(v) {
 	return frappe.utils.flt ? frappe.utils.flt(v) : parseFloat(v) || 0;
