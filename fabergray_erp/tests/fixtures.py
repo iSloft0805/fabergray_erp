@@ -90,18 +90,19 @@ class TestWorld:
 		doc.insert()
 		return self._track(doc)
 
-	def item(self, item_code, stock_uom=UOM):
+	def item(self, item_code, stock_uom=UOM, default_material_request_type=None):
 		self._ensure_leaf_item_group()
-		doc = frappe.get_doc(
-			{
-				"doctype": "Item",
-				"item_code": item_code,
-				"item_name": item_code,
-				"item_group": _ITEM_GROUP,
-				"stock_uom": stock_uom,
-				"is_stock_item": 1,
-			}
-		)
+		item_dict = {
+			"doctype": "Item",
+			"item_code": item_code,
+			"item_name": item_code,
+			"item_group": _ITEM_GROUP,
+			"stock_uom": stock_uom,
+			"is_stock_item": 1,
+		}
+		if default_material_request_type:
+			item_dict["default_material_request_type"] = default_material_request_type
+		doc = frappe.get_doc(item_dict)
 		doc.insert()
 		return self._track(doc)
 
@@ -210,6 +211,29 @@ class TestWorld:
 				"items": [
 					{"item_code": item_code, "warehouse": warehouse, "qty": qty, "valuation_rate": rate}
 				],
+			}
+		)
+		doc.insert()
+		doc.submit()
+		return self._track(doc)
+
+	# -- Manufacturing (Commit 12) -------------------------------------------
+
+	def bom_for(self, item_code, raw_material_item_code, qty=1, rate=10):
+		"""A minimal, submitted, active BOM for item_code -- for
+		analyzer.get_default_bom() lookups. is_active/is_default both default
+		to 1 on a fresh BOM (bom.py), so the first one created for an item is
+		automatically its default -- no extra field needed."""
+		currency = frappe.db.get_value("Company", COMPANY, "default_currency")
+		doc = frappe.get_doc(
+			{
+				"doctype": "BOM",
+				"item": item_code,
+				"quantity": 1,
+				"company": COMPANY,
+				"currency": currency,
+				"conversion_rate": 1,
+				"items": [{"item_code": raw_material_item_code, "qty": qty, "uom": UOM, "rate": rate}],
 			}
 		)
 		doc.insert()
