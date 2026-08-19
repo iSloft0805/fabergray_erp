@@ -72,45 +72,54 @@ def _get_shortage_report_rows(pick_list_item_names, statuses=None):
 	)
 
 
-def _create_shortage_report(pick_list_doc, row, qty_disponible, shortage_reason=None,
-							detected_by="Bodega", resolution_note=None):
-	"""Shared creator for Reporte de Faltante -- the Fulfillment Engine extension point.
+def _insert_shortage_report(
+	item_code,
+	warehouse,
+	qty_solicitada,
+	qty_disponible,
+	detected_by,
+	sales_order=None,
+	material_request=None,
+	pick_list=None,
+	pick_list_item=None,
+	shortage_reason=None,
+	resolution_note=None,
+):
+	"""The single place that inserts a Reporte de Faltante -- the Fulfillment
+	Engine extension point (Commit 9). Full contract documented in
+	FULFILLMENT_ENGINE_CONTRACT.md at the app root; read that before wiring up
+	a new caller.
 
-	Used today by report_shortage() (detected_by="Bodega", physical discrepancy
-	found while picking). Deliberately kept generic (detected_by is a parameter,
-	not hardcoded): a future Fulfillment Engine reuses this exact function with
-	detected_by="Fulfillment Engine" instead of duplicating this logic. Full
-	contract documented in FULFILLMENT_ENGINE_CONTRACT.md at the app root
-	(Commit 7) -- read that before wiring up a caller. Building the engine
-	itself is out of scope of that commit too; only this shared entry point
-	and its contract are.
+	Takes already-resolved values, not a Pick List row -- it has no idea
+	where they came from, and never will. That is deliberate: this is the
+	*only* function in the app that may call
+	`frappe.get_doc({"doctype": "Reporte de Faltante", ...}).insert()`. Every
+	caller (today: _create_shortage_report() deriving from a Pick List row;
+	in the future: the Fulfillment Engine deriving from a Sales Order Item)
+	is a thin adapter that resolves its own fields and hands them here --
+	never a second, parallel insert path. `pick_list`/`pick_list_item` are
+	optional (the doctype itself never required them, see Commit 2/7) so a
+	report with detected_by="Fulfillment Engine" and no Pick List at all is
+	already valid today, with zero doctype or permission changes.
 
-	Known limitation (documented, not solved here): this function requires an
-	already-loaded Pick List document and one of its `locations` rows, so it
-	only covers a shortage detected against an existing Pick List. A shortage
-	detected upstream -- e.g. at Material Request stage, before any Pick List
-	exists -- cannot go through this signature yet; that needs a deliberate
-	signature extension in a later commit, not a bypass of this function.
-
-	Item/Warehouse/Sales Order/Material Request are always derived from the
-	validated Pick List row, never accepted as free-form input, and
-	shortage_reason's "required when Bodega" rule is enforced by the doctype's
-	own validate() (Commit 2), not duplicated here. Creates exactly one document;
-	never touches Stock Ledger, Bin, Sales Order, Material Request, Purchase
-	Order or Work Order -- no stock reservation, no automation, ever.
+	shortage_reason's "required when Bodega" rule is enforced by the
+	doctype's own validate() (Commit 2), not duplicated here. Creates exactly
+	one document; never touches Stock Ledger, Bin, Sales Order, Material
+	Request, Purchase Order or Work Order -- no stock reservation, no
+	automation, ever.
 	"""
 	frappe.has_permission("Reporte de Faltante", "create", throw=True)
 
 	report = frappe.get_doc(
 		{
 			"doctype": "Reporte de Faltante",
-			"item_code": row.item_code,
-			"warehouse": row.warehouse,
-			"sales_order": row.sales_order or None,
-			"material_request": row.material_request or pick_list_doc.material_request or None,
-			"pick_list": pick_list_doc.name,
-			"pick_list_item": row.name,
-			"qty_solicitada": row.stock_qty,
+			"item_code": item_code,
+			"warehouse": warehouse,
+			"sales_order": sales_order,
+			"material_request": material_request,
+			"pick_list": pick_list,
+			"pick_list_item": pick_list_item,
+			"qty_solicitada": qty_solicitada,
 			"qty_disponible": qty_disponible,
 			"detected_by": detected_by,
 			"shortage_reason": shortage_reason,
@@ -119,6 +128,33 @@ def _create_shortage_report(pick_list_doc, row, qty_disponible, shortage_reason=
 	)
 	report.insert()
 	return report.name
+
+
+def _create_shortage_report(pick_list_doc, row, qty_disponible, shortage_reason=None,
+							detected_by="Bodega", resolution_note=None):
+	"""Bodega/Pick List adapter over _insert_shortage_report() -- the only
+	role of this function is deriving fields from an already-validated Pick
+	List row and its parent document; it does not insert anything itself.
+
+	Used today by report_shortage() (detected_by="Bodega", physical
+	discrepancy found while picking). Item/Warehouse/Sales Order/Material
+	Request are always derived from the validated Pick List row, never
+	accepted as free-form input -- this function's entire job is that
+	derivation, nothing else.
+	"""
+	return _insert_shortage_report(
+		item_code=row.item_code,
+		warehouse=row.warehouse,
+		qty_solicitada=row.stock_qty,
+		qty_disponible=qty_disponible,
+		detected_by=detected_by,
+		sales_order=row.sales_order or None,
+		material_request=row.material_request or pick_list_doc.material_request or None,
+		pick_list=pick_list_doc.name,
+		pick_list_item=row.name,
+		shortage_reason=shortage_reason,
+		resolution_note=resolution_note,
+	)
 
 
 @frappe.whitelist()

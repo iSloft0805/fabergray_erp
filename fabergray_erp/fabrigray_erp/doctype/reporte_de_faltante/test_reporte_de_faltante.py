@@ -15,9 +15,11 @@ IGNORE_TEST_RECORD_DEPENDENCIES = []  # eg. ["User"]
 
 
 class IntegrationTestReportedeFaltante(IntegrationTestCase):
-	"""Commit 8 -- Section 3: detected_by / shortage_reason contract and the
-	server-side guarantees of _create_shortage_report(), documented in
-	FULFILLMENT_ENGINE_CONTRACT.md (Commit 7) and verified here.
+	"""Commit 8 -- Section 3: detected_by / shortage_reason contract, the
+	server-side guarantees of Reporte de Faltante creation, and (Commit 9)
+	the generic _insert_shortage_report() core plus the _create_shortage_report()
+	Pick List adapter built on top of it. Documented in
+	FULFILLMENT_ENGINE_CONTRACT.md and verified here.
 	"""
 
 	@classmethod
@@ -127,3 +129,54 @@ class IntegrationTestReportedeFaltante(IntegrationTestCase):
 		self.assertEqual(doc.pick_list, self.pl.name)
 		self.assertEqual(doc.pick_list_item, row.name)
 		self.assertEqual(doc.qty_solicitada, row.stock_qty)
+
+	def test_insert_shortage_report_core_accepts_fulfillment_engine_without_pick_list(self):
+		"""Commit 9: the generic core (_insert_shortage_report) must accept
+		detected_by="Fulfillment Engine" with pick_list=None and
+		pick_list_item=None -- proving a future engine can create a Reporte
+		de Faltante before any Pick List exists, through the same single
+		insert path _create_shortage_report() uses, with zero doctype or
+		permission change. This does NOT implement automatic detection --
+		it only demonstrates the core function's contract directly."""
+		name = bodega._insert_shortage_report(
+			item_code=self.item.name,
+			warehouse=self.wh.name,
+			qty_solicitada=10,
+			qty_disponible=4,
+			detected_by="Fulfillment Engine",
+			sales_order=None,
+			material_request=None,
+			pick_list=None,
+			pick_list_item=None,
+		)
+		self.world.track_existing("Reporte de Faltante", name)
+
+		doc = frappe.get_doc("Reporte de Faltante", name)
+		self.assertEqual(doc.detected_by, "Fulfillment Engine")
+		self.assertFalse(doc.pick_list)
+		self.assertFalse(doc.pick_list_item)
+		self.assertFalse(doc.shortage_reason)  # not required for this detected_by
+		self.assertEqual(doc.qty_faltante, 6)  # still computed server-side
+
+	def test_insert_shortage_report_core_links_sales_order_without_pick_list(self):
+		"""The realistic future-engine shape: it knows the Sales Order (and
+		would know the Sales Order Item) it's looking at, but there is no
+		Pick List yet -- sales_order must round-trip while pick_list stays
+		empty."""
+		so = self.world.submitted_sales_order(self.item.name, self.wh.name, 5, self.customer.name)
+		name = bodega._insert_shortage_report(
+			item_code=self.item.name,
+			warehouse=self.wh.name,
+			qty_solicitada=5,
+			qty_disponible=0,
+			detected_by="Fulfillment Engine",
+			sales_order=so.name,
+			pick_list=None,
+			pick_list_item=None,
+		)
+		self.world.track_existing("Reporte de Faltante", name)
+
+		doc = frappe.get_doc("Reporte de Faltante", name)
+		self.assertEqual(doc.sales_order, so.name)
+		self.assertFalse(doc.pick_list)
+		self.assertFalse(doc.pick_list_item)

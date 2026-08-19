@@ -90,6 +90,40 @@ class TestStaticGuardrails(IntegrationTestCase):
 			"never by assigning docstatus directly",
 		)
 
+	def test_only_one_reporte_de_faltante_insert_path_exists(self):
+		"""Commit 9: _insert_shortage_report() must be the only place in
+		api/bodega.py that builds a Reporte de Faltante doc for .insert() --
+		_create_shortage_report() (and any future Fulfillment Engine adapter)
+		must derive fields and delegate to it, never insert a second, parallel
+		copy of this doctype. AST-based (not a text/regex search) so mentioning
+		this exact dict shape in a docstring -- as _insert_shortage_report()'s
+		own docstring deliberately does, to spell out the rule -- can never
+		produce a false positive here.
+		"""
+		tree = ast.parse(inspect.getsource(bodega))
+		matches = []
+		for node in ast.walk(tree):
+			if not (isinstance(node, ast.Call) and _CallCollector._dotted_name(node.func) == "frappe.get_doc"):
+				continue
+			if not node.args or not isinstance(node.args[0], ast.Dict):
+				continue
+			for key, value in zip(node.args[0].keys, node.args[0].values, strict=False):
+				if (
+					isinstance(key, ast.Constant)
+					and key.value == "doctype"
+					and isinstance(value, ast.Constant)
+					and value.value == "Reporte de Faltante"
+				):
+					matches.append(node.lineno)
+
+		self.assertEqual(
+			len(matches),
+			1,
+			f"Found {len(matches)} frappe.get_doc({{'doctype': 'Reporte de Faltante', ...}}) call(s) "
+			f"in api/bodega.py at line(s) {matches} -- there must be exactly one, inside "
+			"_insert_shortage_report()",
+		)
+
 
 class TestFullFlowRegression(IntegrationTestCase):
 	"""Live regression: the same full-pick flow as Section 2, focused
