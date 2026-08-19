@@ -8,6 +8,19 @@ from frappe.utils import flt, now_datetime
 
 
 class ReportedeFaltante(Document):
+	"""detected_by/shortage_reason contract (Commit 7): see
+	FULFILLMENT_ENGINE_CONTRACT.md at the app root for the full write-up aimed
+	at a future Fulfillment Engine. In short: detected_by="Bodega" is a human,
+	physical discrepancy found while picking (report_shortage() in
+	api/bodega.py) and always requires shortage_reason (enforced below, not
+	duplicated by any caller); detected_by="Fulfillment Engine" is reserved for
+	an upstream, non-physical detection -- no code path sets it yet -- and is
+	not required to give a shortage_reason. Any future creator must go through
+	api.bodega._create_shortage_report() rather than inserting this doctype
+	directly, so this validation and the Item/Warehouse/order derivation stay
+	in one place.
+	"""
+
 	def validate(self):
 		self.set_missing_detection_fields()
 		self.calculate_qty_faltante()

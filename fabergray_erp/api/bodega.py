@@ -74,20 +74,30 @@ def _get_shortage_report_rows(pick_list_item_names, statuses=None):
 
 def _create_shortage_report(pick_list_doc, row, qty_disponible, shortage_reason=None,
 							detected_by="Bodega", resolution_note=None):
-	"""Shared creator for Reporte de Faltante.
+	"""Shared creator for Reporte de Faltante -- the Fulfillment Engine extension point.
 
 	Used today by report_shortage() (detected_by="Bodega", physical discrepancy
 	found while picking). Deliberately kept generic (detected_by is a parameter,
-	not hardcoded) so a future Fulfillment Engine can call this same function
-	with detected_by="Fulfillment Engine" instead of duplicating this logic --
-	see Commit 7. Building that engine is out of scope here; only the shared
-	entry point is.
+	not hardcoded): a future Fulfillment Engine reuses this exact function with
+	detected_by="Fulfillment Engine" instead of duplicating this logic. Full
+	contract documented in FULFILLMENT_ENGINE_CONTRACT.md at the app root
+	(Commit 7) -- read that before wiring up a caller. Building the engine
+	itself is out of scope of that commit too; only this shared entry point
+	and its contract are.
+
+	Known limitation (documented, not solved here): this function requires an
+	already-loaded Pick List document and one of its `locations` rows, so it
+	only covers a shortage detected against an existing Pick List. A shortage
+	detected upstream -- e.g. at Material Request stage, before any Pick List
+	exists -- cannot go through this signature yet; that needs a deliberate
+	signature extension in a later commit, not a bypass of this function.
 
 	Item/Warehouse/Sales Order/Material Request are always derived from the
 	validated Pick List row, never accepted as free-form input, and
 	shortage_reason's "required when Bodega" rule is enforced by the doctype's
 	own validate() (Commit 2), not duplicated here. Creates exactly one document;
-	never touches Stock Ledger, Bin or any inventory record.
+	never touches Stock Ledger, Bin, Sales Order, Material Request, Purchase
+	Order or Work Order -- no stock reservation, no automation, ever.
 	"""
 	frappe.has_permission("Reporte de Faltante", "create", throw=True)
 
