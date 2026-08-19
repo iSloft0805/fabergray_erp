@@ -12,6 +12,7 @@
   "warehouse",
   "column_break_links",
   "sales_order",
+  "sales_order_item",
   "material_request",
   "pick_list",
   "pick_list_item",
@@ -58,6 +59,14 @@
    "fieldtype": "Link",
    "label": "Orden de Venta",
    "options": "Sales Order"
+  },
+  {
+   "description": "Referencia exacta a la fila de Sales Order Item (Commit 14) -- identifica la línea sin ambigüedad cuando el mismo Item aparece dos veces en la misma Orden de Venta (distintos Warehouse u otras condiciones). Mismo estilo que pick_list_item: Data, no Link, por consistencia con esa referencia ya existente a una fila de tabla hija.",
+   "fieldname": "sales_order_item",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Fila de Sales Order Item (ref)",
+   "read_only": 1
   },
   {
    "fieldname": "material_request",
@@ -123,12 +132,12 @@
    "reqd": 1
   },
   {
-   "description": "Obligatorio cuando Detectado Por = Bodega.",
+   "description": "Obligatorio cuando Detectado Por = Bodega. 'Configuraci\u00f3n incompleta' (Commit 14): usado por el Fulfillment Engine cuando procurement_route='Blocked' (p.ej. Manufacture sin BOM) -- ninguna opci\u00f3n existente expresaba correctamente un bloqueo por datos maestros incompletos, y 'Otro' era demasiado vago para que alguien revisando el reporte supiera qu\u00e9 corregir.",
    "fieldname": "shortage_reason",
    "fieldtype": "Select",
    "label": "Motivo del Faltante",
    "mandatory_depends_on": "eval:doc.detected_by=='Bodega'",
-   "options": "\nStock f\u00edsico no encontrado\nStock insuficiente\nProducto da\u00f1ado\nError de inventario\nCompra pendiente\nProducci\u00f3n pendiente\nOtro"
+   "options": "\nStock f\u00edsico no encontrado\nStock insuficiente\nProducto da\u00f1ado\nError de inventario\nCompra pendiente\nProducci\u00f3n pendiente\nConfiguraci\u00f3n incompleta\nOtro"
   },
   {
    "fieldname": "column_break_deteccion",

@@ -20,6 +20,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import flt
 
 from fabergray_erp.api import bodega, jefe_bodega
+from fabergray_erp.fulfillment import shortage_service
 from fabergray_erp.tests import fixtures as fx
 
 EXTRA_TEST_RECORD_DEPENDENCIES = []
@@ -122,6 +123,36 @@ class TestStaticGuardrails(IntegrationTestCase):
 			f"Found {len(matches)} frappe.get_doc({{'doctype': 'Reporte de Faltante', ...}}) call(s) "
 			f"in api/bodega.py at line(s) {matches} -- there must be exactly one, inside "
 			"_insert_shortage_report()",
+		)
+
+	def test_shortage_service_never_inserts_reporte_de_faltante_directly(self):
+		"""Commit 14: sync_shortage_reports_for_sales_order() must go through
+		_insert_shortage_report() (Commit 9's one approved insert path) or a
+		plain .save() on an existing report it already found -- never build a
+		second, parallel Reporte de Faltante doc of its own. Same AST check as
+		the bodega.py guardrail above, applied to the new module, expecting
+		zero matches here instead of exactly one."""
+		tree = ast.parse(inspect.getsource(shortage_service))
+		matches = []
+		for node in ast.walk(tree):
+			if not (isinstance(node, ast.Call) and _CallCollector._dotted_name(node.func) == "frappe.get_doc"):
+				continue
+			if not node.args or not isinstance(node.args[0], ast.Dict):
+				continue
+			for key, value in zip(node.args[0].keys, node.args[0].values, strict=False):
+				if (
+					isinstance(key, ast.Constant)
+					and key.value == "doctype"
+					and isinstance(value, ast.Constant)
+					and value.value == "Reporte de Faltante"
+				):
+					matches.append(node.lineno)
+
+		self.assertEqual(
+			matches,
+			[],
+			f"fulfillment/shortage_service.py must never build a Reporte de Faltante doc "
+			f"directly -- found at line(s) {matches}",
 		)
 
 

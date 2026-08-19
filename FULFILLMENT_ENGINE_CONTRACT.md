@@ -1,4 +1,4 @@
-# Fulfillment Engine -- extension contract (Commit 7, revised Commit 9, extended Commit 12/13)
+# Fulfillment Engine -- extension contract (Commit 7, revised Commit 9, extended Commit 12/13/14)
 
 **This document does not implement the Fulfillment Engine.** It records the
 contract a future engine must follow so it can create `Reporte de Faltante`
@@ -318,3 +318,108 @@ physical pick would come up short of what the Pick List suggests, and the
 existing, already-tested `report_shortage()`/`finish_picking()` disclosure
 flow (Commit 8) is exactly the mechanism that already handles "the paper
 said more than what's really on the shelf."
+
+## Commit 14 -- automatic shortage detection: sync_shortage_reports_for_sales_order()
+
+`fabergray_erp/fulfillment/shortage_service.py`,
+`sync_shortage_reports_for_sales_order(sales_order)`, closes the other half
+of Commit 13's flow: Sales Order -> `analyze_sales_order()` -> stock
+disponible -> Pick List (Commit 13) **and** `qty_shortage > 0` -> Reporte
+de Faltante (Commit 14). Every report it creates or updates goes through
+`_insert_shortage_report()` (Commit 9's one approved insert path) or a
+plain `.save()` on a report this function already found -- never a second
+insert path (enforced by a new AST guardrail test mirroring the existing
+one for `api/bodega.py`).
+
+**`sales_order_item` -- decision: add it, as `Data`, not `Link`.**
+`Reporte de Faltante` had no way to reference one exact Sales Order Item
+row before this commit -- `item_code` + `warehouse` alone is ambiguous the
+moment the same Item appears on two lines of the same Sales Order (e.g.
+two different destination warehouses). Added `sales_order_item` (`Data`,
+hidden, read-only -- same style as the existing `pick_list_item` reference,
+for consistency with an already-established pattern in this exact
+doctype, not a Link, for the same reason that field isn't one either).
+Used for both idempotency (Commit 14) and traceability -- and wired
+through `_create_shortage_report()` too (the Bodega/Pick List adapter),
+since `Pick List Item.sales_order_item` is already a native field
+populated by `create_pick_list()`'s own mapper, so Bodega-created reports
+get the same exact-line reference at zero extra cost, with zero change to
+when or how they're created. Existing reports (created before this
+commit) simply have this field empty -- nothing required it, nothing
+breaks.
+
+**Idempotency:** `_find_open_engine_report()` looks up an existing report
+by `sales_order_item` + `detected_by="Fulfillment Engine"` +
+`status in (Abierto, En Proceso)` -- a single, unambiguous native relation,
+no hash. Reports created by Bodega are structurally invisible to every
+query in this module (all scoped to `detected_by="Fulfillment Engine"`),
+so they are never read, updated, or resolved by this service.
+
+**Update vs. resolve, for V1 (as instructed):** if the shortage for a line
+is still open but its quantity changed (8 -> 3), the existing open Engine
+report is updated in place (`qty_solicitada`/`qty_disponible`/
+`shortage_reason`), not resolved-and-recreated -- one continuous "episode"
+stays one document, with `track_changes` (already on this doctype since
+Commit 2) recording the history. If a line's shortage clears entirely, its
+open Engine report is marked `Resuelto` with an automatic, evidence-bearing
+note (`"disponible (X) ya cubre lo solicitado (Y)"`) -- Bodega-created
+reports are never touched by this transition.
+
+**A real interaction with Commit 13, found the same way Commit 13's own
+gap was found -- via a failing test, not assumed correct.** The literal
+field mapping given for this commit (`qty_solicitada = qty_remaining`,
+`qty_disponible = qty_available_for_pick`, straight from
+`analyze_sales_order()`) breaks exactly the required integration
+invariant ("Pick List qty + shortage qty = the line's real pending need")
+the moment this service runs *after* `create_pick_list_for_available_stock()`
+has already claimed part of a line -- which is the realistic, expected
+order of operations, and the one the mandatory integration test exercises.
+Reason: `qty_remaining` is deliberately delivery-only (Commit 12, on
+purpose) and does not shrink just because an open Pick List already
+claims part of it, so a line fully claimed by a fresh Pick List still
+shows a raw `qty_shortage > 0` -- correct for the analyzer's own read-only
+purpose, wrong if copied verbatim into a report that's about to tell
+someone to buy or manufacture stock that is, in truth, already sitting in
+a Pick List waiting for delivery.
+
+Fixed the same way Commit 13 fixed its own analogous gap -- reusing (via
+plain Python import, zero modification to `pick_list_service.py`) its
+`_qty_already_claimed_by_open_pick_lists_for_so_item()`:
+```
+qty_pending               = max(qty_remaining - qty_already_claimed_by_open_pick_lists_for_this_so_item, 0)
+qty_procurement_shortage  = max(qty_pending - qty_available_for_pick, 0)
+```
+`qty_solicitada`/`qty_disponible` on the report are `qty_pending`/
+`qty_available_for_pick`, so the doctype's own computed `qty_faltante`
+always equals `qty_procurement_shortage`. When there is no pre-existing
+open Pick List for the line (true for every scenario except the Commit 13
+integration case), `qty_already_claimed = 0` and this reduces exactly to
+the literal instruction (`qty_pending = qty_remaining`,
+`qty_procurement_shortage = qty_shortage`) -- verified by every other
+test in this suite still passing unchanged. This is a deliberate,
+flagged deviation from the letter of "qty_solicitada = qty_remaining",
+not a silent one -- surfaced here and in the Commit 14 delivery report for
+the user to confirm or override.
+
+**`shortage_reason` for automatic reports (V1, explicit, no inference):**
+
+| `procurement_route` | `shortage_reason` |
+|---|---|
+| `Purchase` | `Compra pendiente` |
+| `Manufacture` | `Producción pendiente` |
+| `Blocked` | `Configuración incompleta` (**new option, added this commit**) |
+
+`Blocked` needed a genuinely new option: none of the existing ones
+(`Stock físico no encontrado`, `Stock insuficiente`, `Producto dañado`,
+`Error de inventario`, `Compra pendiente`, `Producción pendiente`, `Otro`)
+correctly describes "this line is short because its master data is
+incomplete (e.g. Manufacture policy with no default BOM), not because of
+a physical or purchasing issue" -- `Otro` was considered and rejected as
+too vague for someone reviewing the report to know what to fix. Purely
+additive to the `Select` field's options (existing values/records
+untouched); the doctype's own `shortage_reason` mandatory-for-Bodega rule
+is unaffected.
+
+**Not done in this commit (explicitly out of scope):** Material Request,
+Purchase Order, Work Order, Production Plan, any Sales Order hook,
+background job, `fg_fulfillment_status`, or a Ventas Page.

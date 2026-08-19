@@ -79,6 +79,7 @@ def _insert_shortage_report(
 	qty_disponible,
 	detected_by,
 	sales_order=None,
+	sales_order_item=None,
 	material_request=None,
 	pick_list=None,
 	pick_list_item=None,
@@ -95,12 +96,15 @@ def _insert_shortage_report(
 	*only* function in the app that may call
 	`frappe.get_doc({"doctype": "Reporte de Faltante", ...}).insert()`. Every
 	caller (today: _create_shortage_report() deriving from a Pick List row;
-	in the future: the Fulfillment Engine deriving from a Sales Order Item)
-	is a thin adapter that resolves its own fields and hands them here --
-	never a second, parallel insert path. `pick_list`/`pick_list_item` are
-	optional (the doctype itself never required them, see Commit 2/7) so a
-	report with detected_by="Fulfillment Engine" and no Pick List at all is
-	already valid today, with zero doctype or permission changes.
+	fabergray_erp.fulfillment.shortage_service deriving from a Sales Order
+	Item, Commit 14) is a thin adapter that resolves its own fields and hands
+	them here -- never a second, parallel insert path. `pick_list`/
+	`pick_list_item` are optional (the doctype itself never required them,
+	see Commit 2/7) so a report with detected_by="Fulfillment Engine" and no
+	Pick List at all is already valid today, with zero doctype or permission
+	changes. `sales_order_item` (Commit 14) is the exact Sales Order Item row
+	reference -- optional here too, since a Bodega-derived report may not
+	always have a clean one-to-one Sales Order Item (e.g. product bundles).
 
 	shortage_reason's "required when Bodega" rule is enforced by the
 	doctype's own validate() (Commit 2), not duplicated here. Creates exactly
@@ -116,6 +120,7 @@ def _insert_shortage_report(
 			"item_code": item_code,
 			"warehouse": warehouse,
 			"sales_order": sales_order,
+			"sales_order_item": sales_order_item,
 			"material_request": material_request,
 			"pick_list": pick_list,
 			"pick_list_item": pick_list_item,
@@ -140,7 +145,12 @@ def _create_shortage_report(pick_list_doc, row, qty_disponible, shortage_reason=
 	discrepancy found while picking). Item/Warehouse/Sales Order/Material
 	Request are always derived from the validated Pick List row, never
 	accepted as free-form input -- this function's entire job is that
-	derivation, nothing else.
+	derivation, nothing else. `sales_order_item` is read off the row the
+	same way -- Pick List Item.sales_order_item is already a native field
+	(set by create_pick_list()'s own mapper), so this costs nothing new and
+	gives Bodega-created reports the same exact-line traceability Commit 14
+	added for the Fulfillment Engine, without changing anything about when
+	or how these reports get created.
 	"""
 	return _insert_shortage_report(
 		item_code=row.item_code,
@@ -149,6 +159,7 @@ def _create_shortage_report(pick_list_doc, row, qty_disponible, shortage_reason=
 		qty_disponible=qty_disponible,
 		detected_by=detected_by,
 		sales_order=row.sales_order or None,
+		sales_order_item=row.sales_order_item or None,
 		material_request=row.material_request or pick_list_doc.material_request or None,
 		pick_list=pick_list_doc.name,
 		pick_list_item=row.name,
