@@ -1,4 +1,4 @@
-# Fulfillment Engine -- extension contract (Commit 7, revised Commit 9, extended Commit 12)
+# Fulfillment Engine -- extension contract (Commit 7, revised Commit 9, extended Commit 12/13)
 
 **This document does not implement the Fulfillment Engine.** It records the
 contract a future engine must follow so it can create `Reporte de Faltante`
@@ -207,3 +207,114 @@ keeps being excluded too (`picked_qty - delivered_qty`), proven by
 `test_partially_picked_sales_order_reflects_real_picked_qty` -- stock a
 Pick List has already claimed does not become "available" again just
 because that Pick List is now submitted; only a Delivery Note releases it.
+
+## Commit 13 -- the first write: create_pick_list_for_available_stock()
+
+`fabergray_erp/fulfillment/pick_list_service.py`,
+`create_pick_list_for_available_stock(sales_order)`, closes Sales Order ->
+`analyze_sales_order()` -> Pick List -> `/app/bodega`. It creates exactly
+one native Pick List (ERPNext's own `create_pick_list()` mapper -- the same
+function behind the "Create Pick List" button and already used by this
+app's own test fixtures), capped at what is genuinely pickable, and hands
+it back already inserted so the existing Bodega flow
+(`get_queue`/`get_pick_list`/`start_picking`/`set_picked_qty`/
+`report_shortage`/`finish_picking`) operates on it completely unchanged.
+Still not wired to `on_submit`, a hook, a job, or any Page -- callable only
+directly, exactly like `analyze_sales_order()` itself.
+
+**Per-line quantity:**
+```
+qty_still_needed = max(qty_remaining - qty_already_claimed_by_open_pick_lists_for_this_so_item, 0)
+qty_to_pick      = min(qty_still_needed, qty_available_for_pick)
+```
+`qty_remaining` and `qty_available_for_pick` come straight from
+`analyze_sales_order()` -- no parallel availability formula. The one new
+piece Commit 13 adds is `qty_already_claimed_by_open_pick_lists_for_this_so_item`
+(`_qty_already_claimed_by_open_pick_lists_for_so_item()`), and it exists
+for a real reason, not by accident: `analyze_sales_order()`'s
+`qty_remaining` is deliberately delivery-only (Commit 12 proved this on
+purpose -- it does not shrink just because *some* Pick List already exists
+for the line, since a shortage still needs to be visible as a shortage
+even while a Pick List is in flight for part of it). Commit 13's own
+idempotency needs the opposite question answered: how much of *this exact
+line* has already been handed to an open Pick List, so a second run never
+hands out the same paper twice. Answered via the same native relation
+(`Pick List Item.sales_order_item`) and the same open-Pick-List query
+shape the analyzer already uses -- reused, not reinvented, and scoped
+narrower (one Sales Order Item, not one item+warehouse across every Sales
+Order) because that is a genuinely different question from the one the
+analyzer answers.
+
+Discovered the hard way, via a failing test caught before commit rather
+than assumed correct: without this per-line cap, a Sales Order with an
+existing *open* (unsubmitted) Pick List for part of its stock, followed by
+more stock arriving, would let a second run claim up to the full remaining
+*ordered* quantity from the newly-available stock -- on top of what the
+first Pick List already claimed -- over-committing beyond what the
+customer actually ordered. `create_pick_list()`'s own native
+`qty - max(picked_qty, delivered_qty)` target formula has no visibility
+into a *sibling still-open* Pick List for the same line (only into
+`picked_qty`, which doesn't move until submit); this app has to close that
+gap itself for its own idempotency, since ERPNext's own mapper doesn't.
+
+**Behaviour with existing Pick Lists (all proven by tests):**
+- an existing *open* (draft) Pick List for the same line: a second run
+  offers only the genuine remainder -- current availability minus what
+  that draft already claims, capped by what the order still needs net of
+  that claim;
+- an existing *submitted* Pick List: `Sales Order Item.picked_qty` has
+  advanced, and the submitted row's own `picked_qty - delivered_qty` is
+  excluded the same way an open draft's `stock_qty` would be;
+- a partially delivered Sales Order: `qty_remaining` already reflects
+  `delivered_qty`, so a re-run never re-offers what already shipped;
+- two Sales Orders competing for the same item+warehouse: unaffected by
+  the per-line cap (it is scoped to one `sales_order_item`, so a
+  competing order's own open Pick List never counts against it) -- the
+  cross-order protection is exactly `analyze_sales_order()`'s own
+  `qty_available_for_pick`, unchanged from Commit 12.
+
+**Idempotency, in one sentence:** no new technical field was added
+(matching the standing instruction from Commit 9's architectural ruling to
+prefer native relations/deterministic checks over a dedicated idempotency
+field until proven necessary) -- `Pick List Item.sales_order_item`,
+`picked_qty`, `delivered_qty`, and Pick List `status` are enough, and
+every required scenario has a passing test proving it.
+
+**Commit 13 -- known concurrency window (documented, not closed).**
+`Pick List.before_save()` (`pick_list.py`) unconditionally re-runs
+`set_item_locations()` against live state right before writing, every
+time the document is saved -- not only at `create_pick_list()`'s build
+time. `create_pick_list_for_available_stock()` uses this: it checks for an
+empty `locations` table *after* `insert()`, not before, and deletes the
+draft it just created if the live re-derivation at write time found
+nothing left. A test
+(`test_concurrency_race_self_corrects_within_one_connection_not_proof_of_true_concurrency_safety`)
+proves this self-corrects two calls sharing one database
+connection/transaction -- which is all `bench run-tests` can actually
+drive.
+
+What this does **not** prove, and what remains genuinely open: two
+independent, truly concurrent database transactions each get their own
+MVCC read snapshot under Frappe/MySQL's default isolation. Neither has to
+see the other's not-yet-committed (or even already-committed-after-its-
+own-snapshot) insert. Two real concurrent callers could each
+independently compute "N units available" and both successfully insert,
+over-committing stock across two different Pick Lists for a moment. This
+is not unique to this function -- the native "Create Pick List" button has
+the exact same unlocked read-then-write race today, for the exact same
+reason. The one native mechanism that closes this kind of race cleanly
+(`Stock Reservation Entry.get_available_qty_to_reserve()`, which does use
+`for_update()` row locking) was already evaluated and rejected in Commits
+10/11, specifically because reserving via either Sales Order or Pick List
+blocks this app's own Pick List submission outright. Bolting a lock onto
+only this function, when the native mapper it depends on does not use one
+and the one mechanism that does was ruled out for other reasons, would not
+actually close the window (a concurrent call to the plain "Create Pick
+List" button would still race unprotected) -- so, per the explicit
+instruction to avoid ad hoc fixes for a window that cannot be closed
+cleanly in this commit, none was added. The practical consequence if this
+window is ever hit is bounded and already has a safety net: Bodega's
+physical pick would come up short of what the Pick List suggests, and the
+existing, already-tested `report_shortage()`/`finish_picking()` disclosure
+flow (Commit 8) is exactly the mechanism that already handles "the paper
+said more than what's really on the shelf."
