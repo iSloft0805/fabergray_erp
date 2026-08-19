@@ -1,0 +1,583 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Commit 6 -- shared, page-agnostic design system, extracted verbatim from
+ * the .fg-bodega scope approved in Commit 5.1 (page/bodega/bodega.css).
+ * Every rule here is scoped under .fg-shell so nothing leaks into the rest
+ * of Desk. bodega.css is NOT modified and does NOT consume this file --
+ * it remains fully self-contained as approved. This file exists so a
+ * second Page (Jefe de Bodega) can reuse the same visual language without
+ * being coupled to bodega.css.
+ *
+ * Loaded globally via hooks.py app_include_css so any Page can opt in by
+ * wrapping its markup in a <div class="fg-shell">. No business logic lives
+ * here -- pure presentation, identical values to the approved design.
+ */
+
+.fg-shell {
+	--fg-primary: #2b7be4;
+	--fg-primary-dark: #1e63c4;
+	--fg-primary-tint: #eaf2fd;
+	--fg-success: #34c759;
+	--fg-success-dark: #1f9c46;
+	--fg-success-tint: #e9f9ee;
+	--fg-aqua: #22c3c9;
+	--fg-purple: #8b5cf6;
+	--fg-warning: #ffc53d;
+	--fg-warning-dark: #b45309;
+	--fg-warning-tint: #fff7e0;
+	--fg-danger: #dc2626;
+	--fg-danger-tint: #fdecec;
+	--fg-bg: #f8fafc;
+	--fg-card: #ffffff;
+	--fg-border: #e5e9f0;
+	--fg-text: #101828;
+	--fg-text-muted: #667085;
+	--fg-text-faint: #98a2b3;
+	--fg-radius-lg: 18px;
+	--fg-radius-md: 14px;
+	--fg-radius-sm: 10px;
+	--fg-radius-pill: 999px;
+	--fg-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 12px rgba(16, 24, 40, 0.05);
+	--fg-shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+	--fg-transition: 200ms ease;
+	--fg-touch: 44px;
+
+	max-width: 1180px;
+	margin: 0 auto;
+	padding: 20px 20px 32px;
+	background: var(--fg-bg);
+	color: var(--fg-text);
+	font-family: var(--font-stack, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif);
+}
+
+.fg-shell * {
+	box-sizing: border-box;
+}
+
+.fg-shell button {
+	font-family: inherit;
+}
+
+.fg-shell .fg-visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* Header                                                              */
+/* ------------------------------------------------------------------ */
+.fg-shell .fg-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 14px 20px;
+	margin-bottom: 20px;
+	flex-wrap: wrap;
+}
+
+.fg-shell .fg-header-brand {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-shell .fg-header-logo {
+	font-weight: 800;
+	font-size: 1.05rem;
+	letter-spacing: 0.02em;
+	color: var(--fg-text);
+}
+
+.fg-shell .fg-header-sep {
+	color: var(--fg-border);
+	font-weight: 300;
+}
+
+.fg-shell .fg-header-title {
+	font-weight: 600;
+	font-size: 0.95rem;
+	color: var(--fg-text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.fg-shell .fg-header-user {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+
+.fg-shell .fg-header-user-info {
+	text-align: right;
+	line-height: 1.25;
+}
+
+.fg-shell .fg-header-user-name {
+	font-weight: 600;
+	font-size: 0.9rem;
+	color: var(--fg-text);
+}
+
+.fg-shell .fg-header-user-role {
+	font-size: 0.78rem;
+	color: var(--fg-text-faint);
+}
+
+.fg-shell .fg-header-avatar {
+	width: 40px;
+	height: 40px;
+	border-radius: 50%;
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+	font-weight: 700;
+	font-size: 0.85rem;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+.fg-shell .fg-refresh-btn {
+	width: var(--fg-touch);
+	height: var(--fg-touch);
+	border-radius: 50%;
+	border: 1px solid var(--fg-border);
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	transition: transform var(--fg-transition), background var(--fg-transition);
+	flex-shrink: 0;
+}
+
+.fg-shell .fg-refresh-btn:hover {
+	background: var(--fg-primary);
+	color: #fff;
+}
+
+.fg-shell .fg-refresh-btn:active {
+	transform: scale(0.94);
+}
+
+.fg-shell .fg-refresh-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+	transform: none;
+}
+
+.fg-shell.fg-loading .fg-refresh-btn svg {
+	animation: fg-shell-spin 0.8s linear infinite;
+}
+
+@keyframes fg-shell-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.fg-shell .fg-icon {
+	width: 18px;
+	height: 18px;
+	stroke: currentColor;
+	fill: none;
+	flex-shrink: 0;
+}
+
+.fg-shell .fg-icon-sm {
+	width: 13px;
+	height: 13px;
+}
+
+/* ------------------------------------------------------------------ */
+/* KPI cards                                                           */
+/* ------------------------------------------------------------------ */
+.fg-shell .fg-kpis {
+	display: grid;
+	grid-template-columns: repeat(5, 1fr);
+	gap: 16px;
+	margin-bottom: 28px;
+}
+
+.fg-shell .fg-kpi {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 18px 18px 16px;
+	text-align: left;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	transition: box-shadow var(--fg-transition), border-color var(--fg-transition), transform var(--fg-transition);
+}
+
+.fg-shell button.fg-kpi {
+	cursor: pointer;
+}
+
+.fg-shell button.fg-kpi:hover {
+	box-shadow: var(--fg-shadow);
+	transform: translateY(-1px);
+}
+
+.fg-shell button.fg-kpi:active {
+	transform: translateY(0);
+}
+
+.fg-shell .fg-kpi.is-active {
+	border-color: var(--fg-kpi-color, var(--fg-primary));
+}
+
+.fg-shell .fg-kpi-icon {
+	width: 44px;
+	height: 44px;
+	border-radius: 50%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--fg-kpi-tint);
+	color: var(--fg-kpi-color);
+}
+
+.fg-shell .fg-kpi-number {
+	font-size: 1.9rem;
+	font-weight: 800;
+	line-height: 1;
+	color: var(--fg-kpi-color);
+}
+
+.fg-shell .fg-kpi-label {
+	font-size: 0.85rem;
+	color: var(--fg-text-muted);
+	font-weight: 500;
+}
+
+.fg-shell .fg-kpi-link {
+	font-size: 0.8rem;
+	font-weight: 600;
+	color: var(--fg-primary);
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.fg-shell .fg-kpi--pendientes {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-shell .fg-kpi--en_alistamiento {
+	--fg-kpi-color: #d97706;
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-shell .fg-kpi--con_faltantes {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+.fg-shell .fg-kpi--listos {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+/* New in Commit 6 -- same danger semantics as con_faltantes, not present in
+ * bodega.css since the Bodega queue view has no "faltantes abiertos" KPI. */
+.fg-shell .fg-kpi--faltantes_abiertos {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Section header / empty state                                        */
+/* ------------------------------------------------------------------ */
+.fg-shell .fg-section-head {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	margin-bottom: 16px;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.fg-shell .fg-section-title {
+	font-size: 1.3rem;
+	font-weight: 700;
+}
+
+.fg-shell .fg-section-date {
+	font-size: 0.85rem;
+	color: var(--fg-text-muted);
+	text-transform: capitalize;
+}
+
+.fg-shell .fg-empty {
+	text-align: center;
+	color: var(--fg-text-muted);
+	padding: 48px 0;
+	background: var(--fg-card);
+	border: 1px dashed var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+}
+
+/* ------------------------------------------------------------------ */
+/* Badges / status pills                                               */
+/* ------------------------------------------------------------------ */
+.fg-shell .fg-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 10px;
+	border-radius: var(--fg-radius-pill);
+	font-size: 0.7rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	white-space: nowrap;
+}
+
+.fg-shell .fg-badge--pendientes {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-shell .fg-badge--en_alistamiento {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-shell .fg-badge--con_faltantes,
+.fg-shell .fg-badge--faltantes_abiertos {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+.fg-shell .fg-badge--listos {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-shell .fg-status-pill {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 0.8rem;
+	font-weight: 700;
+	padding: 5px 12px;
+	border-radius: var(--fg-radius-pill);
+}
+
+.fg-shell .fg-status-pill--ok {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-shell .fg-status-pill--warn {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+/* ------------------------------------------------------------------ */
+/* Progress (exact values only -- callers must never pass an invented %) */
+/* ------------------------------------------------------------------ */
+.fg-shell .fg-progress-block {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.fg-shell .fg-progress-label-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	font-size: 0.78rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-shell .fg-progress-pct {
+	font-weight: 700;
+	color: var(--fg-progress-color, var(--fg-primary));
+}
+
+.fg-shell .fg-progress-track {
+	height: 8px;
+	border-radius: var(--fg-radius-pill);
+	background: #eef1f6;
+	overflow: hidden;
+}
+
+.fg-shell .fg-progress-fill {
+	height: 100%;
+	border-radius: var(--fg-radius-pill);
+	background: var(--fg-progress-color, var(--fg-primary));
+	width: var(--fg-progress-width, 0%);
+	transition: width 260ms ease;
+}
+
+/* ------------------------------------------------------------------ */
+/* Buttons                                                              */
+/* ------------------------------------------------------------------ */
+.fg-shell .fg-btn {
+	appearance: none;
+	border-radius: var(--fg-radius-sm);
+	font-weight: 700;
+	font-size: 0.82rem;
+	letter-spacing: 0.01em;
+	padding: 0 18px;
+	height: var(--fg-touch);
+	min-width: 44px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	cursor: pointer;
+	border: 1.5px solid transparent;
+	transition: background var(--fg-transition), transform 120ms ease, opacity var(--fg-transition);
+	white-space: nowrap;
+}
+
+.fg-shell .fg-btn:active {
+	transform: scale(0.97);
+}
+
+.fg-shell .fg-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+	transform: none;
+}
+
+.fg-shell .fg-btn--solid-primary {
+	background: var(--fg-primary);
+	border-color: var(--fg-primary);
+	color: #fff;
+}
+
+.fg-shell .fg-btn--solid-primary:hover:not(:disabled) {
+	background: var(--fg-primary-dark);
+}
+
+.fg-shell .fg-btn--outline-success {
+	background: #fff;
+	border-color: var(--fg-success-dark);
+	color: var(--fg-success-dark);
+}
+
+.fg-shell .fg-btn--outline-success:hover:not(:disabled) {
+	background: var(--fg-success-tint);
+}
+
+.fg-shell .fg-btn--outline-danger {
+	background: #fff;
+	border-color: var(--fg-danger);
+	color: var(--fg-danger);
+}
+
+.fg-shell .fg-btn--outline-danger:hover:not(:disabled) {
+	background: var(--fg-danger-tint);
+}
+
+.fg-shell .fg-btn--ghost {
+	background: transparent;
+	border-color: transparent;
+	color: var(--fg-primary);
+	padding: 0 10px;
+}
+
+.fg-shell .fg-btn--ghost:hover:not(:disabled) {
+	background: var(--fg-primary-tint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Skeleton loading                                                    */
+/* ------------------------------------------------------------------ */
+.fg-shell .fg-skeleton {
+	background: linear-gradient(90deg, #eef1f6 25%, #f5f7fa 37%, #eef1f6 63%);
+	background-size: 400% 100%;
+	animation: fg-shell-shimmer 1.4s ease infinite;
+	border-radius: var(--fg-radius-md);
+}
+
+@keyframes fg-shell-shimmer {
+	0% {
+		background-position: 100% 50%;
+	}
+	100% {
+		background-position: 0 50%;
+	}
+}
+
+.fg-shell .fg-skeleton-kpis {
+	display: grid;
+	grid-template-columns: repeat(5, 1fr);
+	gap: 16px;
+	margin-bottom: 28px;
+}
+
+.fg-shell .fg-skeleton-kpis .fg-skeleton {
+	height: 108px;
+}
+
+.fg-shell .fg-skeleton-cards {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.fg-shell .fg-skeleton-cards .fg-skeleton {
+	height: 96px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive                                                          */
+/* ------------------------------------------------------------------ */
+@media (max-width: 1024px) {
+	.fg-shell {
+		padding: 16px 16px 28px;
+	}
+}
+
+@media (max-width: 860px) {
+	.fg-shell .fg-kpis,
+	.fg-shell .fg-skeleton-kpis {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+
+@media (max-width: 640px) {
+	.fg-shell {
+		padding: 12px 12px 24px;
+	}
+
+	.fg-shell .fg-header {
+		padding: 12px 14px;
+	}
+
+	.fg-shell .fg-header-user-info {
+		display: none;
+	}
+
+	.fg-shell .fg-kpis,
+	.fg-shell .fg-skeleton-kpis {
+		grid-template-columns: repeat(2, 1fr);
+		gap: 10px;
+	}
+
+	.fg-shell .fg-kpi {
+		padding: 14px;
+	}
+
+	.fg-shell .fg-kpi-number {
+		font-size: 1.5rem;
+	}
+}

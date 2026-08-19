@@ -1,0 +1,202 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Commit 6 -- Jefe de Bodega Page. Everything generic (header, KPI cards,
+ * badges, buttons, status pills, skeleton loaders, design tokens) comes
+ * from the shared fg_shell.css (loaded globally via app_include_css) --
+ * this file only styles what is genuinely new for this Page: the shortage
+ * report cards, the active pick-list rows and the quick-access bar. Scoped
+ * under .fg-jefe-bodega so nothing leaks outside this Page.
+ */
+
+.fg-jefe-bodega .fg-body {
+	display: flex;
+	flex-direction: column;
+}
+
+/* ------------------------------------------------------------------ */
+/* Requieren atención -- shortage cards                                */
+/* ------------------------------------------------------------------ */
+.fg-jefe-bodega .fg-attention-grid {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 16px;
+	margin-bottom: 28px;
+}
+
+.fg-jefe-bodega .fg-shortage-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-left: 4px solid var(--fg-danger);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 18px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.fg-jefe-bodega .fg-shortage-card-head {
+	margin-bottom: 2px;
+}
+
+.fg-jefe-bodega .fg-shortage-card-title {
+	font-weight: 700;
+	font-size: 1rem;
+	color: var(--fg-text);
+}
+
+.fg-jefe-bodega .fg-shortage-card-meta {
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-jefe-bodega .fg-shortage-card-qty {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 10px;
+	background: var(--fg-bg);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 12px 14px;
+	margin: 6px 0;
+}
+
+.fg-jefe-bodega .fg-shortage-card-qty-label {
+	font-size: 0.68rem;
+	color: var(--fg-text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+}
+
+.fg-jefe-bodega .fg-shortage-card-qty-value {
+	font-size: 1.05rem;
+	font-weight: 700;
+	color: var(--fg-text);
+}
+
+.fg-jefe-bodega .fg-shortage-card-qty-value--danger {
+	color: var(--fg-danger);
+}
+
+.fg-jefe-bodega .fg-shortage-card-footer {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	font-size: 0.78rem;
+	color: var(--fg-text-faint);
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.fg-jefe-bodega .fg-shortage-card-footer span {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+}
+
+.fg-jefe-bodega .fg-shortage-card-btn {
+	margin-top: 4px;
+	align-self: flex-start;
+}
+
+/* ------------------------------------------------------------------ */
+/* Alistamientos activos                                               */
+/* ------------------------------------------------------------------ */
+.fg-jefe-bodega .fg-active-list {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	margin-bottom: 28px;
+}
+
+.fg-jefe-bodega .fg-active-row {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-left: 4px solid #d97706;
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 20px;
+	display: grid;
+	grid-template-columns: minmax(180px, 1.2fr) minmax(220px, 1.4fr) minmax(140px, 0.8fr) auto;
+	align-items: center;
+	gap: 18px;
+}
+
+.fg-jefe-bodega .fg-active-row-id {
+	font-weight: 700;
+	font-size: 0.98rem;
+}
+
+.fg-jefe-bodega .fg-active-row-customer {
+	font-size: 0.85rem;
+	color: var(--fg-text-muted);
+	margin-top: 2px;
+}
+
+.fg-jefe-bodega .fg-active-row-meta {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.fg-jefe-bodega .fg-active-row-meta div {
+	display: flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.fg-jefe-bodega .fg-active-row-progress {
+	font-size: 0.88rem;
+	font-weight: 700;
+	color: var(--fg-text);
+	white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* Accesos rápidos                                                     */
+/* ------------------------------------------------------------------ */
+.fg-jefe-bodega .fg-quick-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 12px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive -- desktop first, then tablet (~860px), then mobile (~640px),  */
+/* matching the same breakpoints already approved for /app/bodega.     */
+/* ------------------------------------------------------------------ */
+@media (max-width: 860px) {
+	.fg-jefe-bodega .fg-attention-grid {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-jefe-bodega .fg-active-row {
+		grid-template-columns: 1fr;
+		gap: 10px;
+	}
+
+	.fg-jefe-bodega .fg-active-row > .fg-btn {
+		width: 100%;
+	}
+}
+
+@media (max-width: 640px) {
+	.fg-jefe-bodega .fg-attention-grid {
+		grid-template-columns: 1fr;
+	}
+
+	.fg-jefe-bodega .fg-shortage-card-btn {
+		width: 100%;
+	}
+
+	.fg-jefe-bodega .fg-quick-actions {
+		flex-direction: column;
+	}
+
+	.fg-jefe-bodega .fg-quick-actions .fg-btn {
+		width: 100%;
+	}
+}

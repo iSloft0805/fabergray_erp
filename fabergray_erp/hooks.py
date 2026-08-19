@@ -25,7 +25,11 @@ app_license = "mit"
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = "/assets/fabergray_erp/css/fabergray_erp.css"
+# Commit 6: shared, page-agnostic design system (design tokens + generic
+# components) extracted from the approved /app/bodega look, so the Jefe de
+# Bodega Page can reuse it without depending on bodega.css. Scoped entirely
+# under .fg-shell -- see public/css/fg_shell.css.
+app_include_css = "/assets/fabergray_erp/css/fg_shell.css"
 # app_include_js = "/assets/fabergray_erp/js/fabergray_erp.js"
 
 # include js, css files in header of web template
