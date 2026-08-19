@@ -47,6 +47,16 @@ COMPANY = "fabrigraysas"
 UOM = "Nos"
 TERRITORY = "All Territories"
 
+#: No "Stock Adjustment"/"Temporary" account exists in this company's (real,
+#: PUC-based) chart of accounts, and Company.stock_adjustment_account is
+#: unset -- so a real Stock Reconciliation (stock_up_real(), Commit 10) needs
+#: an explicit expense_account. Stock Ledger Entries already exist for this
+#: company and purpose is never "Opening Stock" here, so
+#: validate_expense_account() only requires *some* valid account, not a
+#: specific report_type -- an existing Stock-type account is accepted.
+STOCK_ADJUSTMENT_ACCOUNT = "149910 - Para diferencia de inventario físico - FG"
+COST_CENTER = "Principal - FG"
+
 _ITEM_GROUP = "FG8 Test Item Group"
 _CUSTOMER_GROUP = "FG8 Test Customer Group"
 
@@ -169,6 +179,43 @@ class TestWorld:
 		bin_doc.save()
 		return self._track(bin_doc)
 
+	def stock_up_real(self, item_code, warehouse, qty, rate=100):
+		"""Seed stock through a real, submitted Stock Reconciliation --
+		unlike stock_up() (Bin.actual_qty only), this is required for Stock
+		Reservation Entry tests (Commit 10): get_available_qty_to_reserve()
+		calls ERPNext's own get_stock_balance(), which reads real Stock
+		Ledger Entries via get_previous_sle() -- Bin.actual_qty alone is not
+		enough for Stock Reservation to see anything as available (confirmed
+		empirically; stock_up() would silently reserve 0).
+
+		This reintroduces the two consequences stock_up()'s docstring
+		describes avoiding: frappe.db.commit() fires internally during
+		submit, and cancelling this Stock Reconciliation in cleanup() will
+		not delete its Stock Ledger Entry rows. cleanup() below handles the
+		second one directly (purging cancelled SLE/GL Entry rows for a
+		Warehouse this same TestWorld created, right before deleting it --
+		never touching a warehouse this suite didn't create itself); the
+		first one is why every warehouse/item created for a Stock Reservation
+        test must go through this TestWorld's explicit cleanup(), the same
+		as every other suite in this app -- nothing here is new risk, just a
+		second confirmed instance of the same root cause.
+		"""
+		doc = frappe.get_doc(
+			{
+				"doctype": "Stock Reconciliation",
+				"company": COMPANY,
+				"purpose": "Stock Reconciliation",
+				"expense_account": STOCK_ADJUSTMENT_ACCOUNT,
+				"cost_center": COST_CENTER,
+				"items": [
+					{"item_code": item_code, "warehouse": warehouse, "qty": qty, "valuation_rate": rate}
+				],
+			}
+		)
+		doc.insert()
+		doc.submit()
+		return self._track(doc)
+
 	# -- Selling / picking ---------------------------------------------------
 
 	def submitted_sales_order(self, item_code, warehouse, qty, customer, rate=100):
@@ -250,8 +297,38 @@ class TestWorld:
 			doc = frappe.get_doc(doctype, name)
 			if doc.meta.is_submittable and doc.docstatus == 1:
 				doc.cancel()
+			if doctype == "Warehouse":
+				self._purge_stock_ledger_for_warehouse(name)
 			frappe.delete_doc(doctype, name, ignore_permissions=True, force=True)
 		frappe.db.commit()
+
+	@staticmethod
+	def _purge_stock_ledger_for_warehouse(warehouse):
+		"""Test-teardown only (see stock_up_real()'s docstring): a Warehouse
+		that had a real, now-cancelled stock movement can never be deleted
+		through the normal API -- ERPNext preserves cancelled Stock Ledger
+		Entries as an audit trail by design, and Warehouse.on_trash() blocks
+		on their mere existence, regardless of docstatus. Every Stock
+		Ledger/GL Entry this suite ever posts is against a warehouse this
+		same TestWorld created and is about to delete entirely, so purging
+		them here never touches any real accounting history -- only this
+		run's own throwaway test transactions. No-op (three empty deletes)
+		for a warehouse that only ever used stock_up() (Bin-only, no real
+		Stock Ledger Entry) or stock_up() (never called), so it's always
+		safe to call unconditionally before deleting any Warehouse.
+		"""
+		vouchers = frappe.get_all(
+			"Stock Ledger Entry",
+			filters={"warehouse": warehouse},
+			fields=["voucher_type", "voucher_no"],
+			distinct=True,
+		)
+		for voucher in vouchers:
+			frappe.db.delete(
+				"GL Entry", {"voucher_type": voucher.voucher_type, "voucher_no": voucher.voucher_no}
+			)
+		frappe.db.delete("Stock Ledger Entry", {"warehouse": warehouse})
+		frappe.db.delete("Bin", {"warehouse": warehouse})
 
 
 @contextmanager
@@ -264,3 +341,25 @@ def as_user(user):
 		yield
 	finally:
 		frappe.set_user(previous)
+
+
+@contextmanager
+def stock_settings(**overrides):
+	"""Temporarily override Stock Settings singleton fields (e.g.
+	enable_stock_reservation, auto_reserve_stock), restoring the original
+	values afterwards -- even if the block raises. Stock Settings is a
+	site-wide Single, not scoped to a transaction, so tests that need a
+	specific value active must restore it deterministically rather than
+	relying on IntegrationTestCase's (unreliable, see TestWorld's docstring)
+	rollback. frappe.clear_cache() is called after every write since some
+	native code paths read this via frappe.get_cached_value(...)."""
+	originals = {field: frappe.db.get_single_value("Stock Settings", field) for field in overrides}
+	try:
+		for field, value in overrides.items():
+			frappe.db.set_single_value("Stock Settings", field, value)
+		frappe.clear_cache(doctype="Stock Settings")
+		yield
+	finally:
+		for field, value in originals.items():
+			frappe.db.set_single_value("Stock Settings", field, value)
+		frappe.clear_cache(doctype="Stock Settings")
