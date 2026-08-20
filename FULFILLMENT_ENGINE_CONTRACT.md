@@ -1076,3 +1076,95 @@ pre-existing caller, needed for `search_items()`'s own filter).
 Full suite: 158/158 passing across two consecutive runs (138 as of
 Commit 18.1 + 19 new Commit 18.2 tests + 1 new Commit 18.2 static
 guardrail -- 158 total), zero DB residue, Stock Settings unchanged.
+
+## Commit 18.3 -- Page Ventas (frontend)
+
+`fabergray_erp/fabrigray_erp/page/ventas/` (`ventas.json`, `ventas.js`,
+`ventas.css`, `__init__.py`) -- a bespoke Frappe Page at `/app/ventas`
+(roles: Vendedora, System Manager), same module pattern as `page/bodega`
+and `page/jefe_de_bodega`. Pure presentation: every server call in
+`ventas.js` goes through the six `fabergray_erp.api.ventas.*` endpoints
+approved in Commit 18.2 -- nothing here queries a doctype directly, computes
+pricing, or calls the Fulfillment Engine. No existing file was modified
+(no `hooks.py` change needed -- a Page's `roles` live in its own JSON,
+auto-synced by `bench migrate` the same way Bodega/Jefe de Bodega already
+are); `git status` for this commit shows only the new `page/ventas/`
+directory.
+
+Two views inside one Page instance (`fabergray_erp.Ventas`, `state.view`):
+- **Dashboard**: 4 KPI cards (Pedidos de hoy/Pendientes/Entregados/
+  Cancelados) from `get_sales_summary()` only; clicking one applies a
+  client-side filter to the "Mis pedidos" list below (mirrors
+  `get_sales_summary()`'s own bucket rules -- `transaction_date==today`,
+  `status in [...]` -- re-applied only to filter the already-fetched
+  `get_my_orders()` array, never to compute a KPI number itself). Order
+  cards show number/cliente/fecha/# referencias/unidades/estado/fecha de
+  entrega/observaciones -- zero economic fields, matching `get_my_orders()`'s
+  own response shape exactly (nothing rendered that the endpoint doesn't
+  return).
+- **Nuevo pedido**: Paso 1 (buscar/seleccionar cliente via
+  `search_customers()`, debounced 300ms, race-guarded with a monotonic
+  sequence counter), Paso 2 (buscar productos via `search_items()`, same
+  debounce/race-guard; each result card's `qty_disponible` comes from a
+  parallel `get_item_info()` call per row, cached per item_code for the
+  session -- `search_items()` itself never returns availability, by
+  design, Commit 18.2), Paso 3 (live resumen -- # referencias/# unidades
+  computed client-side from the in-memory cart, never from a server
+  total). The qty stepper (`[-] cantidad [+]`, same 44px touch target and
+  visual pattern as `page/bodega/bodega.css`'s own picking stepper,
+  reproduced not imported, same reasoning as Commit 6/`jefe_de_bodega.css`)
+  is never disabled by low/zero `qty_disponible` -- availability is
+  informational only, confirmed by a real over-stock manual run (see
+  below).
+
+**Security, enforced by construction, not by review after the fact**:
+`build_order_payload()` is the one function in this file that assembles a
+`create_and_submit_sales_order()` request body -- it builds each line as a
+literal `{item_code, qty}` object, so there is no code path elsewhere that
+could smuggle in a `rate`/`price_list_rate`/`discount`/`amount`/`taxes`/
+`grand_total` key even by accident. No other function in `ventas.js`
+constructs a request body at all. Confirmed by reading the whole file,
+not just this function -- no economic field name appears anywhere in
+`ventas.js`.
+
+**Manual validation -- functional, not screenshot-based**: this environment's
+headless Chromium is missing a system shared library (`libnspr4`/`libnss3`)
+and this session has no sudo; the user chose to proceed without browser
+screenshots rather than grant sudo access. Validated instead by driving
+the exact same six endpoints `ventas.js` calls, with the exact same
+payload shapes, directly against a real (throwaway) Vendedora session via
+`bench console`, followed by full cleanup:
+- `search_customers`/`search_items`/`get_item_info` return exactly the
+  allowlisted fields, no economic data.
+- `create_and_submit_sales_order()` with one line at full stock (qty 5 of
+  50 available) and one line ABOVE available stock (qty 10 of only 2
+  available, the exact "cantidad superior al stock disponible" scenario
+  from the required manual test) -- not blocked client-side or
+  server-side, submits successfully.
+- The real `on_submit` hook created a Pick List (5 units of the first
+  item, 2 of the second -- capped to what's physically available, per
+  Commit 11/13) and a Reporte de Faltante (`qty_faltante=8`,
+  `shortage_reason="Compra pendiente"`, matching the second item's
+  `default_material_request_type`).
+- `fg_observations` round-tripped correctly end to end (set via
+  `create_and_submit_sales_order()`, read back via `get_my_orders()`).
+- A real Bodega session's `get_queue()` shows the new Pick List in
+  `pendientes`; a real Jefe de Bodega session's `get_open_shortage_reports()`
+  shows the new report, `reported_by`/`reported_by_fullname` correctly
+  showing the Vendedora (never a substituted identity).
+- The Vendedora's own session still has `has_permission("Pick List",
+  "read") == False` and the same for Reporte de Faltante, on her own
+  order's own artifacts.
+- Cancelling the Sales Order afterward (to test cleanup) exercised the
+  real Commit 17 `on_cancel` path live: the draft Pick List was deleted
+  and the Reporte de Faltante was auto-marked `Resuelto` with its
+  standard note -- both confirmed directly, not assumed.
+- All throwaway fixtures (Item/Customer/Warehouse/Users/Sales
+  Order/Pick List/Reporte de Faltante/Item Group/Customer Group) were
+  then fully deleted; zero residue confirmed by direct SQL count
+  afterward; real `PRUEBA-*` data and Stock Settings confirmed untouched.
+
+Full existing suite re-run after this commit: 158/158 passing, zero DB
+residue. No new automated tests were added for this commit -- consistent
+with `page/bodega`/`page/jefe_de_bodega`, this app has no existing
+precedent for automated frontend tests, and this commit invents none.

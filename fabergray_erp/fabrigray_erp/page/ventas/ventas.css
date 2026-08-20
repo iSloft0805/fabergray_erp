@@ -1,0 +1,681 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Commit 18.3 -- Page Ventas. Everything generic (header, KPI card shell,
+ * badge shell, buttons, skeleton loaders, design tokens) comes from the
+ * shared fg_shell.css (loaded globally via app_include_css, same file
+ * Jefe de Bodega already uses) -- this file only styles what is genuinely
+ * new here: the Ventas-specific KPI/status colors, "Mis pedidos" cards, the
+ * customer/product search boxes, product cards and the cart/resumen list.
+ * Scoped under .fg-ventas so nothing leaks outside this Page; bodega.css/
+ * jefe_de_bodega.css are not touched or depended on.
+ */
+
+.fg-ventas .fg-body {
+	display: flex;
+	flex-direction: column;
+}
+
+.fg-ventas .fg-btn--lg {
+	height: 52px;
+	padding: 0 26px;
+	font-size: 0.92rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Button loading spinner -- same pattern as page/bodega/bodega.css,   */
+/* not present in the shared fg_shell.css (Jefe de Bodega has no       */
+/* writes, so it never needed this).                                   */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-btn--loading {
+	position: relative;
+	color: transparent !important;
+}
+
+.fg-ventas .fg-btn--loading::after {
+	content: "";
+	position: absolute;
+	width: 16px;
+	height: 16px;
+	border-radius: 50%;
+	border: 2px solid rgba(255, 255, 255, 0.55);
+	border-top-color: #fff;
+	animation: fg-ventas-spin 0.7s linear infinite;
+}
+
+@keyframes fg-ventas-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* KPI colors specific to Ventas (Sales Order status buckets) --        */
+/* distinct modifier names from fg_shell.css's own --pendientes/etc.   */
+/* (those describe Pick List buckets, a different meaning) so nothing  */
+/* collides with the Bodega/Jefe de Bodega Pages that share this file. */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-kpi--ventas-hoy {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-ventas .fg-kpi--ventas-pendientes {
+	--fg-kpi-color: var(--fg-warning-dark);
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-ventas .fg-kpi--ventas-entregados {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+.fg-ventas .fg-kpi--ventas-cancelados {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+.fg-ventas .fg-kpi-sub {
+	font-size: 0.76rem;
+	color: var(--fg-text-faint);
+	margin-top: -6px;
+}
+
+.fg-ventas.fg-shell .fg-kpis--ventas {
+	grid-template-columns: repeat(4, 1fr);
+}
+
+/* ------------------------------------------------------------------ */
+/* Nuevo pedido CTA                                                     */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-np-cta-row {
+	margin-bottom: 28px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Filter chip (KPI -> Mis pedidos filter)                              */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-filter-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+	border-radius: var(--fg-radius-pill);
+	padding: 6px 8px 6px 14px;
+	font-size: 0.82rem;
+	margin-bottom: 14px;
+}
+
+.fg-ventas .fg-filter-chip-clear {
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	border: none;
+	background: rgba(255, 255, 255, 0.6);
+	color: inherit;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+/* ------------------------------------------------------------------ */
+/* Mis pedidos -- order cards                                          */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-order-list {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	margin-bottom: 8px;
+}
+
+.fg-ventas .fg-order-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.fg-ventas .fg-order-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+
+.fg-ventas .fg-order-card-id {
+	font-weight: 700;
+	font-size: 1rem;
+}
+
+.fg-ventas .fg-order-card-customer {
+	font-size: 0.88rem;
+	color: var(--fg-text);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.fg-ventas .fg-order-card-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 16px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-ventas .fg-order-card-meta span {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.fg-ventas .fg-order-card-counts {
+	display: flex;
+	gap: 16px;
+	font-size: 0.82rem;
+	font-weight: 600;
+	color: var(--fg-text);
+}
+
+.fg-ventas .fg-order-card-obs {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-sm);
+	padding: 8px 10px;
+}
+
+.fg-ventas .fg-empty--sm {
+	padding: 24px 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Status badges (Sales Order.status)                                  */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-badge--so-draft,
+.fg-ventas .fg-badge--so-onhold,
+.fg-ventas .fg-badge--so-closed {
+	background: #f1f5f9;
+	color: #475569;
+}
+
+.fg-ventas .fg-badge--so-topay,
+.fg-ventas .fg-badge--so-tobill,
+.fg-ventas .fg-badge--so-todeliver,
+.fg-ventas .fg-badge--so-todeliverbill {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-ventas .fg-badge--so-completed {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-ventas .fg-badge--so-cancelled {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+/* ------------------------------------------------------------------ */
+/* Nuevo pedido -- header, sections                                    */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-np-header {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	margin-bottom: 20px;
+}
+
+.fg-ventas .fg-np-back {
+	appearance: none;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	height: var(--fg-touch);
+	padding: 0 16px;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 600;
+	font-size: 0.85rem;
+	color: var(--fg-text);
+	cursor: pointer;
+}
+
+.fg-ventas .fg-np-back:hover {
+	background: var(--fg-bg);
+}
+
+.fg-ventas .fg-np-title {
+	font-size: 1.3rem;
+	font-weight: 700;
+}
+
+.fg-ventas .fg-np-section {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 20px;
+	margin-bottom: 20px;
+}
+
+.fg-ventas .fg-np-section-title {
+	font-weight: 700;
+	font-size: 1rem;
+	margin-bottom: 14px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Search box / dropdown (Cliente, Producto)                           */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-search-box {
+	position: relative;
+	display: flex;
+	align-items: center;
+}
+
+.fg-ventas .fg-search-box .fg-icon {
+	position: absolute;
+	left: 14px;
+	color: var(--fg-text-faint);
+	pointer-events: none;
+}
+
+.fg-ventas .fg-search-input {
+	width: 100%;
+	height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 0 14px 0 40px;
+	font-size: 0.9rem;
+	background: var(--fg-card);
+	color: var(--fg-text);
+}
+
+.fg-ventas .fg-search-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+.fg-ventas .fg-np-customer-area {
+	position: relative;
+}
+
+.fg-ventas .fg-search-dropdown {
+	display: none;
+	position: relative;
+	margin-top: 6px;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	box-shadow: var(--fg-shadow);
+	max-height: 260px;
+	overflow-y: auto;
+}
+
+.fg-ventas .fg-search-dropdown.is-open {
+	display: block;
+}
+
+.fg-ventas .fg-search-result {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 12px 14px;
+	font-size: 0.88rem;
+	cursor: pointer;
+	border-bottom: 1px solid var(--fg-border);
+}
+
+.fg-ventas .fg-search-result:last-child {
+	border-bottom: none;
+}
+
+.fg-ventas .fg-search-result:hover {
+	background: var(--fg-bg);
+}
+
+.fg-ventas .fg-selected-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+	border-radius: var(--fg-radius-pill);
+	padding: 8px 10px 8px 16px;
+	font-weight: 600;
+	font-size: 0.9rem;
+}
+
+.fg-ventas .fg-chip-remove {
+	width: 28px;
+	height: 28px;
+	border-radius: 50%;
+	border: none;
+	background: rgba(255, 255, 255, 0.65);
+	color: inherit;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Product results grid                                                */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-item-results {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: 12px;
+	margin-top: 16px;
+}
+
+.fg-ventas .fg-product-skeleton {
+	height: 84px;
+}
+
+.fg-ventas .fg-product-card {
+	background: var(--fg-bg);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 14px;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	transition: border-color var(--fg-transition), background var(--fg-transition);
+}
+
+.fg-ventas .fg-product-card--in-cart {
+	border-color: var(--fg-primary);
+	background: var(--fg-primary-tint);
+}
+
+.fg-ventas .fg-product-thumb {
+	width: 52px;
+	height: 52px;
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	color: var(--fg-text-faint);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	overflow: hidden;
+}
+
+.fg-ventas .fg-product-thumb .fg-icon {
+	width: 24px;
+	height: 24px;
+}
+
+.fg-ventas .fg-product-thumb-img {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+}
+
+.fg-ventas .fg-product-info {
+	flex: 1;
+	min-width: 0;
+}
+
+.fg-ventas .fg-product-name {
+	font-weight: 700;
+	font-size: 0.9rem;
+	line-height: 1.25;
+	overflow-wrap: anywhere;
+}
+
+.fg-ventas .fg-product-code {
+	font-size: 0.76rem;
+	color: var(--fg-text-faint);
+	margin-top: 1px;
+}
+
+.fg-ventas .fg-product-meta {
+	display: flex;
+	gap: 10px;
+	font-size: 0.76rem;
+	color: var(--fg-text-muted);
+	margin-top: 4px;
+	flex-wrap: wrap;
+}
+
+.fg-ventas .fg-product-avail--ok {
+	color: var(--fg-success-dark);
+	font-weight: 600;
+}
+
+.fg-ventas .fg-product-avail--zero {
+	color: var(--fg-text-faint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Stepper -- reproduced from page/bodega/bodega.css (same values,     */
+/* scoped here under .fg-ventas rather than importing that file).      */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-stepper {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	flex-shrink: 0;
+}
+
+.fg-ventas .fg-stepper-btn {
+	width: var(--fg-touch);
+	height: var(--fg-touch);
+	border-radius: var(--fg-radius-sm);
+	border: none;
+	font-size: 1.2rem;
+	line-height: 1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	flex-shrink: 0;
+	transition: background var(--fg-transition), transform 120ms ease;
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-ventas .fg-stepper-btn:active {
+	transform: scale(0.92);
+}
+
+.fg-ventas .fg-stepper-plus {
+	background: var(--fg-primary);
+	color: #fff;
+}
+
+.fg-ventas .fg-stepper-plus:hover:not(:disabled) {
+	background: var(--fg-primary-dark);
+}
+
+.fg-ventas .fg-stepper-minus:hover:not(:disabled) {
+	background: #d9e9fc;
+}
+
+.fg-ventas .fg-stepper-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.fg-ventas .fg-stepper-input {
+	width: 48px;
+	height: var(--fg-touch);
+	text-align: center;
+	font-size: 1rem;
+	font-weight: 700;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	-moz-appearance: textfield;
+}
+
+.fg-ventas .fg-stepper-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+.fg-ventas .fg-stepper--sm .fg-stepper-btn,
+.fg-ventas .fg-stepper--sm .fg-stepper-input {
+	width: 36px;
+	height: 36px;
+	font-size: 0.95rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Resumen / carrito                                                   */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-np-summary-counts {
+	font-weight: 700;
+	font-size: 0.98rem;
+	margin-bottom: 14px;
+}
+
+.fg-ventas .fg-cart-list {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	margin-bottom: 18px;
+}
+
+.fg-ventas .fg-cart-line {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	background: var(--fg-bg);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 10px 12px;
+	flex-wrap: wrap;
+}
+
+.fg-ventas .fg-cart-line-name {
+	font-size: 0.88rem;
+	font-weight: 600;
+	flex: 1;
+	min-width: 160px;
+	overflow-wrap: anywhere;
+}
+
+.fg-ventas .fg-cart-line-controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-ventas .fg-cart-line-remove {
+	width: 36px;
+	height: 36px;
+	border-radius: 50%;
+	border: 1px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-danger);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+.fg-ventas .fg-cart-line-remove:hover {
+	background: var(--fg-danger-tint);
+}
+
+.fg-ventas .fg-np-observaciones {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-bottom: 18px;
+}
+
+.fg-ventas .fg-np-observaciones label {
+	font-size: 0.82rem;
+	font-weight: 600;
+	color: var(--fg-text-muted);
+}
+
+.fg-ventas .fg-observations-input {
+	width: 100%;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 10px 12px;
+	font-size: 0.88rem;
+	font-family: inherit;
+	color: var(--fg-text);
+	resize: vertical;
+	min-height: 72px;
+}
+
+.fg-ventas .fg-observations-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+.fg-ventas .fg-np-summary .fg-confirm-btn {
+	width: 100%;
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive -- desktop first, then tablet (~860px), then mobile      */
+/* (~640px), matching the breakpoints already approved for /app/bodega */
+/* and /app/jefe-de-bodega.                                             */
+/* ------------------------------------------------------------------ */
+@media (max-width: 860px) {
+	.fg-ventas.fg-shell .fg-kpis--ventas {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-ventas .fg-item-results {
+		grid-template-columns: 1fr;
+	}
+
+	.fg-ventas .fg-order-card-meta {
+		gap: 10px;
+	}
+}
+
+@media (max-width: 640px) {
+	.fg-ventas.fg-shell .fg-kpis--ventas {
+		grid-template-columns: 1fr 1fr;
+		gap: 10px;
+	}
+
+	.fg-ventas .fg-np-section {
+		padding: 16px;
+	}
+
+	.fg-ventas .fg-np-header {
+		flex-wrap: wrap;
+	}
+
+	.fg-ventas .fg-cart-line {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.fg-ventas .fg-cart-line-controls {
+		justify-content: space-between;
+	}
+
+	.fg-ventas .fg-np-cta-row .fg-btn {
+		width: 100%;
+	}
+}
