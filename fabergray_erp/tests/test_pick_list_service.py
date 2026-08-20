@@ -291,3 +291,92 @@ class TestPickListService(IntegrationTestCase):
 			so.name,
 		)[0][0]
 		self.assertEqual(float(total_claimed), 10.0)  # no over-claim in this same-connection simulation
+
+	# -- Paridad obligatoria (Commit 18.1): adaptador interno vs create_pick_list() nativo --
+
+	def test_internal_adapter_matches_native_create_pick_list_mapping(self):
+		"""Mandatory parity test for
+		fulfillment.pick_list_service._create_pick_list_ignoring_permissions()
+		(Commit 18.1's ERPNext compatibility adapter, needed only because
+		the native create_pick_list() hardcodes ignore_permissions=False
+		inside its own call to get_mapped_doc() -- see that function's
+		docstring for the full investigation). Run here, as this test
+		class's own default privileged session (IntegrationTestCase,
+		Administrator), driving BOTH the real native
+		erpnext...sales_order.create_pick_list() and our adapter against
+		two separately-built but line-for-line equivalent Sales Orders --
+		this is the drift detector: if a future ERPNext upgrade changes
+		create_pick_list()'s mapping in a way that matters, this fails
+		loudly instead of the two implementations silently diverging."""
+		from erpnext.selling.doctype.sales_order.sales_order import create_pick_list as native_create_pick_list
+
+		from fabergray_erp.fulfillment.pick_list_service import _create_pick_list_ignoring_permissions
+
+		# Deliberately separate warehouses (not just separate Sales Orders)
+		# for the native vs. adapter runs -- same item_code in the same
+		# warehouse would make the two compete for the same physical stock,
+		# since create_pick_list()'s own set_item_locations() correctly
+		# (Commits 11/13) excludes whatever the *other* run's own Pick List
+		# already claims. That would make the comparison meaningless (each
+		# run would see different availability *because of the other run*,
+		# not because of any real difference between native and adapter).
+		# Separate warehouses make the two runs fully independent, so any
+		# difference in the result can only come from the mapping itself.
+		wh_native = self.world.warehouse("FG13 Parity Native")
+		wh_adapter = self.world.warehouse("FG13 Parity Adapter")
+		item_a = self.world.item("FG13-PARITY-A")
+		item_b = self.world.item("FG13-PARITY-B")
+		customer = self.world.customer("FG13 Parity Customer")
+		for wh in (wh_native, wh_adapter):
+			self.world.stock_up_real(item_a.name, wh.name, 10)
+			self.world.stock_up_real(item_b.name, wh.name, 10)
+
+		def _items_for(wh):
+			return [
+				{"item_code": item_a.name, "warehouse": wh.name, "qty": 6, "rate": 100},
+				{"item_code": item_b.name, "warehouse": wh.name, "qty": 4, "rate": 100},
+			]
+
+		so_native = self.world.multi_item_sales_order(customer.name, _items_for(wh_native))
+		so_adapter = self.world.multi_item_sales_order(customer.name, _items_for(wh_adapter))
+
+		pl_native = native_create_pick_list(so_native.name)
+		pl_native.insert()
+		self.world.track_existing("Pick List", pl_native.name)
+
+		pl_adapter = _create_pick_list_ignoring_permissions(so_adapter.name)
+		pl_adapter.insert()
+		self.world.track_existing("Pick List", pl_adapter.name)
+
+		def _summarize(pick_list):
+			rows = [
+				{
+					"item_code": row.item_code,
+					"qty": frappe.utils.flt(row.qty),
+					"stock_qty": frappe.utils.flt(row.stock_qty),
+					"uom": row.uom,
+				}
+				for row in pick_list.get("locations")
+			]
+			rows.sort(key=lambda r: r["item_code"])
+			return rows
+
+		native_rows = _summarize(pl_native)
+		adapter_rows = _summarize(pl_adapter)
+
+		self.assertEqual(len(native_rows), 2)  # both lines mapped -- number of lines matches
+		self.assertEqual(native_rows, adapter_rows)  # item_code/qty/stock_qty/uom, identical
+
+		# header + parent/child references + warehouse, checked per document
+		# (warehouse values necessarily differ between the two -- separate
+		# Warehouse fixtures by design -- what matters is that each is
+		# internally correct the same way)
+		for pl, so, wh in ((pl_native, so_native, wh_native), (pl_adapter, so_adapter, wh_adapter)):
+			self.assertEqual(pl.parent_warehouse, wh.name)
+			self.assertEqual(pl.purpose, "Delivery")
+			self.assertEqual(len(pl.get("locations")), 2)
+			for row in pl.get("locations"):
+				self.assertEqual(row.sales_order, so.name)
+				self.assertEqual(row.warehouse, wh.name)
+				matching_item = next(i for i in so.items if i.item_code == row.item_code)
+				self.assertEqual(row.sales_order_item, matching_item.name)

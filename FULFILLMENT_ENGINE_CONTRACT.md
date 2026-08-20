@@ -909,3 +909,68 @@ No Page Vendedora, no Material Request/Purchase Order/Work Order/
 Production Plan, no automatic Delivery Note/Sales Invoice, no
 `fg_fulfillment_status`. `api/bodega.py`/`api/jefe_bodega.py` and the
 `/app/bodega`/`/app/jefe-de-bodega` Pages were not touched.
+
+## Commit 18.1 -- minimal Engine-only permission elevation for the Vendedora role
+
+Adds the `Vendedora` role (`fixtures/role.json` + `custom_docperm.json`):
+read on Customer/Item/Address/Contact, `select`-only on Account (needed
+for `Sales Order.validate()`'s own `set_payment_schedule()` ->
+`account_perm_check()`, confirmed by reading `erpnext/accounts/party.py`
+directly -- `select` is enough, `read` would over-grant), and
+create/read/write/submit on Sales Order scoped `if_owner=1`. **Zero
+permission on Pick List or Reporte de Faltante, by design** -- both
+remain entirely native-role-gated, exactly like every other doctype this
+app doesn't explicitly grant.
+
+That last fact collided with a real, verified problem: `on_submit` (and
+`on_cancel`) run synchronously inside the submitting/cancelling user's
+own session (Commit 16/17's own transactional guarantee depends on this
+-- see above). A Vendedora submitting her own Sales Order with zero
+Pick List/Reporte de Faltante permission made the Fulfillment Engine's
+own internal reads/writes against those doctypes fail outright.
+
+**Fix, minimal and Engine-only, `frappe.session.user` never touched:**
+- `fabergray_erp/api/bodega.py`'s `_insert_shortage_report()` gained one
+  internal-only parameter, `via_fulfillment_engine=False` -- when True
+  (only ever passed by `shortage_service.py`'s own call site, never by
+  the interactive `_create_shortage_report()`/`report_shortage()` path),
+  the explicit create-permission check is skipped and the insert runs
+  with `ignore_permissions=True`. Not `@frappe.whitelist()`-ed; no
+  client can reach this parameter.
+- `shortage_service.py` (100% Engine-only, never called by an
+  interactive API) uses `frappe.get_all()` instead of `frappe.get_list()`
+  for its own report lookup, and `ignore_permissions=True` on its own
+  `.save()` calls.
+- `cancellation_service.py` (100% Engine-only) uses
+  `ignore_permissions=True` on its `frappe.delete_doc()`/`.save()` calls.
+- `pick_list_service.py` needed one more thing, found only by actually
+  running the real E2E scenario: the native
+  `erpnext...sales_order.create_pick_list()` wraps
+  `frappe.model.mapper.get_mapped_doc()` with `ignore_permissions`
+  hardcoded `False` (confirmed by reading `mapper.py` directly -- no
+  global flag anywhere in that chain provides an escape hatch). A new
+  private adapter, `_create_pick_list_ignoring_permissions()`, calls
+  `get_mapped_doc(..., ignore_permissions=True)` directly, importing (not
+  duplicating) `get_bin_details`/`is_product_bundle`/`get_mapped_doc`
+  itself, and reproducing only the ~33 effective lines that are not
+  importable (three local closures + the "Sales Order"/"Sales Order
+  Item" table_map -- the "Packed Item"/product-bundle table_map is
+  deliberately not reproduced, consistent with this Engine never having
+  handled bundles at any stage). `set_item_locations()` and everything
+  about warehouse/Bin availability stay fully native, unduplicated.
+  Guarded by a mandatory parity test
+  (`test_internal_adapter_matches_native_create_pick_list_mapping`)
+  instead of a source hash, so a future ERPNext upgrade fails loudly
+  here if the mapping ever changes, rather than silently drifting.
+
+Every one of these bypasses is unreachable from any `@frappe.whitelist()`
+surface (`test_no_interactive_api_can_enable_fulfillment_bypass`,
+`test_engine_internal_functions_are_not_whitelisted`) and Bodega's own
+interactive `report_shortage()` still enforces real permissions exactly
+as before (`test_shared_insert_function_still_requires_real_permission_by_default`).
+Proven end-to-end: a Vendedora with zero Pick List/Reporte de Faltante
+permission submits her own Sales Order; the Engine creates both
+correctly (visible to Bodega via `get_queue()` and Jefe de Bodega via
+`get_open_shortage_reports()`); `owner` on every resulting document is
+still her, not a substituted identity; she still cannot read either
+document directly afterward.

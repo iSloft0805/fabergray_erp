@@ -85,6 +85,7 @@ def _insert_shortage_report(
 	pick_list_item=None,
 	shortage_reason=None,
 	resolution_note=None,
+	via_fulfillment_engine=False,
 ):
 	"""The single place that inserts a Reporte de Faltante -- the Fulfillment
 	Engine extension point (Commit 9). Full contract documented in
@@ -111,8 +112,29 @@ def _insert_shortage_report(
 	one document; never touches Stock Ledger, Bin, Sales Order, Material
 	Request, Purchase Order or Work Order -- no stock reservation, no
 	automation, ever.
+
+	`via_fulfillment_engine` (Commit 18.1) -- the ONE, narrow, documented
+	exception to "always check real permissions": this is the only shared
+	frontier between Bodega's interactive report_shortage() (via
+	_create_shortage_report(), which never passes this) and the Fulfillment
+	Engine's own automated sync_shortage_reports_for_sales_order() (which
+	always passes True). When True, the explicit create-permission check
+	below is skipped and the insert itself runs with
+	ignore_permissions=True -- exactly the native ERPNext pattern used for
+	automated side effects of an already-authorized action (e.g.
+	erpnext/accounts/general_ledger.py's `gle.flags.ignore_permissions = 1`
+	when a Sales User submits a Sales Invoice they have no GL Entry
+	permission for). This function is never `@frappe.whitelist()`-ed and
+	this parameter is never read from a client request -- only
+	shortage_service.py's own internal call site ever passes True, and only
+	after analyze_sales_order()/native Sales Order permission checks have
+	already authorized the underlying Sales Order action that triggered it.
+	frappe.session.user is never touched -- the resulting document's
+	`owner` is still whoever's session is actually running (e.g. the
+	Vendedora who submitted the Sales Order), not a substituted identity.
 	"""
-	frappe.has_permission("Reporte de Faltante", "create", throw=True)
+	if not via_fulfillment_engine:
+		frappe.has_permission("Reporte de Faltante", "create", throw=True)
 
 	report = frappe.get_doc(
 		{
@@ -131,7 +153,7 @@ def _insert_shortage_report(
 			"resolution_note": resolution_note,
 		}
 	)
-	report.insert()
+	report.insert(ignore_permissions=via_fulfillment_engine)
 	return report.name
 
 

@@ -11,6 +11,24 @@ pending need -- nothing is silently dropped between the two.
 
 Still creates nothing beyond Reporte de Faltante: no Material Request, no
 Work Order, no Production Plan, no hook, no job, no fg_fulfillment_status.
+
+Commit 18.1 -- this entire module is Fulfillment Engine automation only,
+never called by an interactive, user-facing API (Bodega's own
+report_shortage() goes through a separate adapter, _create_shortage_report(),
+which never touches this file). Because of that, every read and write in
+here uses the native "ignore this session's own permissions" mechanisms
+(frappe.get_all() instead of frappe.get_list(); .save(ignore_permissions=True);
+_insert_shortage_report(..., via_fulfillment_engine=True)) -- the same
+pattern ERPNext's own core uses for automated side effects of an
+already-authorized action (e.g. GL Entry creation from a Sales Invoice
+submit a Sales User has no GL Entry permission for). This is required for
+the real, tested scenario of a Vendedora submitting her own Sales Order:
+she is intentionally granted zero permission on Pick List or Reporte de
+Faltante, yet the Engine must still be able to create/update/resolve
+these on her behalf as a consequence of her already-authorized Sales
+Order submit. frappe.session.user is never touched anywhere in this
+module -- the resulting documents' `owner` field still correctly reflects
+whoever actually submitted the Sales Order.
 """
 
 import frappe
@@ -43,11 +61,23 @@ def _find_open_engine_report(sales_order_item):
     warehouses or otherwise) resolves correctly for free because each
     line has its own distinct sales_order_item row name.
 
-    frappe.get_list(), not get_all(), matching this app's existing
-    convention (_get_shortage_report_rows() in this same module) of never
-    reading past the current user's own permissions by default.
+    frappe.get_all() (Commit 18.1, was frappe.get_list()): this whole
+    module only ever runs as Fulfillment Engine automation (called from
+    process_sales_order()/the on_submit hook, or directly by a trusted
+    manual reprocess -- never by an interactive, user-facing API), and it
+    now has to work correctly even when the session actually running it
+    (e.g. a Vendedora submitting her own Sales Order, Commit 18.1) has no
+    Reporte de Faltante permission at all -- frappe.get_list() wouldn't
+    silently filter that down to an empty result, it would raise
+    PermissionError outright and break the whole submit. get_all() is
+    frappe.get_list() with ignore_permissions=True already built in
+    (frappe/__init__.py) -- the native, documented way to read without
+    regard to the calling user's permissions, used here instead of
+    api/jefe_bodega.py's opposite convention (get_list only) because that
+    rule is specifically for interactive, permission-scoped APIs, which
+    this module is not.
     """
-    names = frappe.get_list(
+    names = frappe.get_all(
         "Reporte de Faltante",
         filters={
             "sales_order_item": sales_order_item,
@@ -171,7 +201,7 @@ def sync_shortage_reports_for_sales_order(sales_order):
                 existing.resolution_note = _resolution_note_for_cleared_shortage(
                     qty_available, flt(line["qty_remaining"])
                 )
-                existing.save()
+                existing.save(ignore_permissions=True)  # Commit 18.1 -- see module docstring
                 summary["resolved"].append(existing.name)
             continue
 
@@ -185,7 +215,7 @@ def sync_shortage_reports_for_sales_order(sales_order):
             if existing:
                 existing.status = "Resuelto"
                 existing.resolution_note = _resolution_note_for_cleared_shortage(qty_available, qty_pending)
-                existing.save()
+                existing.save(ignore_permissions=True)  # Commit 18.1 -- see module docstring
                 summary["resolved"].append(existing.name)
             continue
 
@@ -201,7 +231,7 @@ def sync_shortage_reports_for_sales_order(sales_order):
                 existing.qty_solicitada = qty_pending
                 existing.qty_disponible = qty_available
                 existing.shortage_reason = shortage_reason
-                existing.save()
+                existing.save(ignore_permissions=True)  # Commit 18.1 -- see module docstring
                 summary["updated"].append(existing.name)
             report_name = existing.name
         else:
@@ -214,6 +244,7 @@ def sync_shortage_reports_for_sales_order(sales_order):
                 sales_order=so_name,
                 sales_order_item=line["sales_order_item"],
                 shortage_reason=shortage_reason,
+                via_fulfillment_engine=True,  # Commit 18.1 -- see api/bodega.py's docstring
             )
             summary["created"].append(report_name)
 

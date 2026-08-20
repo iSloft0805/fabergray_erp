@@ -99,12 +99,16 @@ def cleanup_fulfillment_for_cancelled_sales_order(sales_order):
 
     removed_pick_lists = []
     for name in _draft_pick_lists_for(so_name):
-        # No ignore_permissions=True: the current user must genuinely be
-        # able to delete a Pick List for this to succeed -- if they
-        # can't, that PermissionError propagates and, per the
-        # transactional behaviour above, rolls back the whole
-        # cancellation rather than silently leaving a stale draft behind.
-        frappe.delete_doc("Pick List", name)
+        # ignore_permissions=True (Commit 18.1): this function is
+        # Fulfillment Engine automation only, never called by an
+        # interactive API -- required for the real, tested scenario of a
+        # Vendedora cancelling her own Sales Order: she is intentionally
+        # granted zero permission on Pick List, yet this cleanup must
+        # still succeed as a consequence of her already-authorized Sales
+        # Order cancel. Same native pattern as shortage_service.py (see
+        # its module docstring for the full writeup and the ERPNext core
+        # precedent) -- frappe.session.user is never touched.
+        frappe.delete_doc("Pick List", name, ignore_permissions=True)
         removed_pick_lists.append(name)
 
     resolved_reports = []
@@ -112,7 +116,7 @@ def cleanup_fulfillment_for_cancelled_sales_order(sales_order):
         report = frappe.get_doc("Reporte de Faltante", name)
         report.status = RESOLVED_STATUS
         report.resolution_note = CANCELLATION_RESOLUTION_NOTE
-        report.save()
+        report.save(ignore_permissions=True)
         resolved_reports.append(name)
 
     return {"removed_pick_lists": removed_pick_lists, "resolved_reports": resolved_reports}

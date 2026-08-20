@@ -13,7 +13,6 @@ Two kinds of check on purpose:
 
 import ast
 import inspect
-import re
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -26,7 +25,50 @@ from fabergray_erp.tests import fixtures as fx
 EXTRA_TEST_RECORD_DEPENDENCIES = []
 IGNORE_TEST_RECORD_DEPENDENCIES = []
 
-IGNORE_PERMISSIONS_PATTERN = re.compile(r"ignore_permissions\s*=\s*(True|1)\b")
+
+def _is_true_literal(node) -> bool:
+	return isinstance(node, ast.Constant) and node.value in (True, 1)
+
+
+def _hardcodes_ignore_permissions_true(module) -> bool:
+	"""AST-based (not text/regex) so mentioning `ignore_permissions=True` in
+	a docstring -- to document a parameterized exception elsewhere, exactly
+	as api/bodega.py's own _insert_shortage_report() now deliberately does
+	(Commit 18.1) -- can never produce a false positive. Only a literal
+	`True`/`1` constant passed as `ignore_permissions=...` to a call, or
+	assigned to a `.ignore_permissions` attribute, counts as a real
+	violation. `ignore_permissions=via_fulfillment_engine` (a Name, not a
+	Constant) does not match -- its value is controlled by the callee's own
+	non-whitelisted, non-client-reachable logic, never hardcoded here."""
+	tree = ast.parse(inspect.getsource(module))
+	for node in ast.walk(tree):
+		if isinstance(node, ast.Call):
+			for kw in node.keywords:
+				if kw.arg == "ignore_permissions" and _is_true_literal(kw.value):
+					return True
+		elif isinstance(node, ast.Assign):
+			for target in node.targets:
+				if isinstance(target, ast.Attribute) and target.attr == "ignore_permissions" and _is_true_literal(
+					node.value
+				):
+					return True
+	return False
+
+
+def _passes_via_fulfillment_engine_true(module) -> bool:
+	"""AST-based check for the other half of the Commit 18.1 boundary:
+	`via_fulfillment_engine=True` (a literal, hardcoded True) must never
+	appear in an interactive API module -- only shortage_service.py's own
+	internal call to _insert_shortage_report() may pass it, and only as a
+	literal there because that call site *is* the Fulfillment Engine, not
+	a caller of it."""
+	tree = ast.parse(inspect.getsource(module))
+	for node in ast.walk(tree):
+		if isinstance(node, ast.Call):
+			for kw in node.keywords:
+				if kw.arg == "via_fulfillment_engine" and _is_true_literal(kw.value):
+					return True
+	return False
 
 
 class _CallCollector(ast.NodeVisitor):
@@ -59,18 +101,57 @@ class TestStaticGuardrails(IntegrationTestCase):
 	"""No Pick List/Reporte de Faltante data needed -- these read source code."""
 
 	def test_bodega_api_never_sets_ignore_permissions_true(self):
-		source = inspect.getsource(bodega)
-		self.assertIsNone(
-			IGNORE_PERMISSIONS_PATTERN.search(source),
-			"api/bodega.py must never use ignore_permissions=True in production code",
+		"""api/bodega.py may take a `via_fulfillment_engine` parameter on
+		_insert_shortage_report() (Commit 18.1) that ultimately controls
+		`ignore_permissions=via_fulfillment_engine` -- but never a
+		hardcoded, literal `ignore_permissions=True` of its own."""
+		self.assertFalse(
+			_hardcodes_ignore_permissions_true(bodega),
+			"api/bodega.py must never hardcode ignore_permissions=True in production code",
 		)
 
 	def test_jefe_bodega_api_never_sets_ignore_permissions_true(self):
-		source = inspect.getsource(jefe_bodega)
-		self.assertIsNone(
-			IGNORE_PERMISSIONS_PATTERN.search(source),
-			"api/jefe_bodega.py must never use ignore_permissions=True in production code",
+		self.assertFalse(
+			_hardcodes_ignore_permissions_true(jefe_bodega),
+			"api/jefe_bodega.py must never hardcode ignore_permissions=True in production code",
 		)
+
+	def test_no_interactive_api_can_enable_fulfillment_bypass(self):
+		"""Commit 18.1 guardrail #9: no interactive, whitelisted-function
+		module may hardcode `ignore_permissions=True` or
+		`via_fulfillment_engine=True` -- the only two knobs that unlock the
+		Fulfillment Engine's internal permission bypass. Checked directly
+		against api/bodega.py and api/jefe_bodega.py (api/ventas.py does
+		not exist yet -- Commit 18.2/18.3 -- and must be added to this list
+		when it does)."""
+		for module in (bodega, jefe_bodega):
+			self.assertFalse(
+				_hardcodes_ignore_permissions_true(module),
+				f"{module.__name__} must never hardcode ignore_permissions=True",
+			)
+			self.assertFalse(
+				_passes_via_fulfillment_engine_true(module),
+				f"{module.__name__} must never hardcode via_fulfillment_engine=True",
+			)
+
+		# and no @frappe.whitelist()-decorated function anywhere accepts
+		# either name as one of its own parameters, so a client could never
+		# supply the value over HTTP even indirectly.
+		for module in (bodega, jefe_bodega):
+			tree = ast.parse(inspect.getsource(module))
+			for node in ast.walk(tree):
+				if not isinstance(node, ast.FunctionDef):
+					continue
+				is_whitelisted = any(
+					(isinstance(d, ast.Call) and _CallCollector._dotted_name(d.func) == "frappe.whitelist")
+					or (isinstance(d, ast.Attribute) and _CallCollector._dotted_name(d) == "frappe.whitelist")
+					for d in node.decorator_list
+				)
+				if not is_whitelisted:
+					continue
+				param_names = {a.arg for a in node.args.args + node.args.kwonlyargs}
+				self.assertNotIn("ignore_permissions", param_names, f"{module.__name__}.{node.name}")
+				self.assertNotIn("via_fulfillment_engine", param_names, f"{module.__name__}.{node.name}")
 
 	def test_jefe_bodega_api_never_calls_get_all(self):
 		calls = _dotted_calls_in(jefe_bodega)

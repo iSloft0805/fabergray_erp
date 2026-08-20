@@ -178,14 +178,15 @@ doc_events = {
 
 # Fixtures
 # --------
-# Roles y permisos propios del módulo Bodega (fabergray_erp), versionados en
-# fabergray_erp/fixtures/. No se exportan roles/permisos de otras apps.
+# Roles y permisos propios de fabergray_erp (Bodega/Jefe de Bodega/Vendedora),
+# versionados en fabergray_erp/fixtures/. No se exportan roles/permisos de
+# otras apps.
 
 fixtures = [
-	{"dt": "Role", "filters": [["name", "in", ["Bodega", "Jefe de Bodega"]]]},
+	{"dt": "Role", "filters": [["name", "in", ["Bodega", "Jefe de Bodega", "Vendedora"]]]},
 	{
 		"dt": "Custom DocPerm",
-		"filters": [["role", "in", ["Bodega", "Jefe de Bodega"]]],
+		"filters": [["role", "in", ["Bodega", "Jefe de Bodega", "Vendedora"]]],
 	},
 	{
 		"dt": "Custom Field",
