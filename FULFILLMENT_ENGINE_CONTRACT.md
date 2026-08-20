@@ -1,4 +1,4 @@
-# Fulfillment Engine -- extension contract (Commit 7, revised Commit 9, extended Commit 12/13/14)
+# Fulfillment Engine -- extension contract (Commit 7, revised Commit 9, extended Commit 12/13/14/15)
 
 **This document does not implement the Fulfillment Engine.** It records the
 contract a future engine must follow so it can create `Reporte de Faltante`
@@ -423,3 +423,112 @@ is unaffected.
 **Not done in this commit (explicitly out of scope):** Material Request,
 Purchase Order, Work Order, Production Plan, any Sales Order hook,
 background job, `fg_fulfillment_status`, or a Ventas Page.
+
+## Commit 15 -- the orchestrator: process_sales_order()
+
+`fabergray_erp/fulfillment/engine.py`, `process_sales_order(sales_order)`,
+is the single function that composes Commits 12/13/14 for one submitted
+Sales Order. Still callable only directly (console, tests) -- not wired to
+`on_submit`, a hook, or a job.
+
+**Order of execution, confirmed technically before implementing, exactly
+as the user proposed:**
+```
+analyze_sales_order()                    -- fail fast (docstatus/permission), result unused
+-> create_pick_list_for_available_stock() -- Commit 13
+-> analyze_sales_order() again            -- Commit 12, now reflecting the Pick List just created
+-> sync_shortage_reports_for_sales_order() -- Commit 14
+```
+The *second* analyze() call, not the first, is the one returned in the
+result. This is required, not stylistic: `create_pick_list_for_available_stock()`
+may have just claimed part of a line, and `sync_shortage_reports_for_sales_order()`
+needs to see that claim (via its own fresh internal `analyze_sales_order()`
+call) to report only the genuine remainder rather than a line's full raw
+shortage that a Pick List already covers (see Commit 14's own section
+above). Running create-then-shortage in the other order would make the
+shortage-sync step race against, or precede, a claim it needs to already
+know about.
+
+**A consequence worth being explicit about:** the `analysis` field in the
+returned result is that *second*, post-Pick-List snapshot -- so for any
+line a Pick List was just created for, `analysis.has_shortage`/
+`qty_shortage` on that line still read `True`/`> 0`. This is not a bug --
+it is `analyze_sales_order()`'s own documented, deliberate design
+(Commit 12: `qty_remaining` never accounts for an open Pick List's own
+claim, on purpose) simply becoming visible through the orchestrator's
+return value. **`shortages` is the corrected, actionable signal** for
+whether anything is genuinely still missing (Commit 14's own adjustment
+already applied) -- a caller should look at `shortages`, not at
+`analysis.has_shortage`, to decide whether real action (a future Purchase
+Order / Work Order) is needed. Proven by
+`test_full_stock_creates_pick_list_with_no_shortage_report`: full stock,
+Pick List created for the whole qty, `analysis.has_shortage` is `True`
+(that line's stock is now claimed, not "available"), `shortages` is
+entirely empty (nothing genuinely missing).
+
+**Result shape:**
+```python
+{
+    "sales_order": "SAL-ORD-...",
+    "pick_list": "STO-PICK-..." or None,
+    "analysis": {...},   # analyze_sales_order()'s own shape, taken after the Pick List step
+    "shortages": {"created": [...], "updated": [...], "resolved": [...], "blocked": [...]},
+    "status": "processed",
+}
+```
+
+**Validation ("docstatus = 1; orden no cancelada"):** delegated entirely
+to `analyze_sales_order()`'s own existing `so.docstatus != 1` check (the
+first call above) -- not duplicated. That single check already rejects
+both a draft (0) and a cancelled (2) Sales Order, and runs before any
+write is attempted, so a rejected order leaves zero partial side effects
+to clean up. Proven by `test_non_submitted_sales_order_is_rejected`
+(`frappe.ValidationError` propagates; zero Pick List Item / Reporte de
+Faltante rows exist for that Sales Order afterwards).
+
+**Permissions/execution context:** no new permission logic -- inherited
+entirely from the three composed functions (`analyze_sales_order()`'s
+`check_permission("read")`, `create_pick_list_for_available_stock()`'s
+plain `.insert()`, `_insert_shortage_report()`'s
+`frappe.has_permission(..., "create", throw=True)`). Same open question
+flagged since Commit 9, still unresolved on purpose: what identity a
+future automated caller runs as is future work, not decided here.
+
+**Idempotency:** no new mechanism, no new technical field -- purely
+inherited from Commits 12/13/14 each already being idempotent on their
+own. Concretely, a second run: `create_pick_list_for_available_stock()`
+returns `None` (nothing new to claim -- **idempotent means "creates
+nothing new", not "returns the same Pick List name again"**, proven by
+`test_running_twice_is_idempotent`); `sync_shortage_reports_for_sales_order()`
+creates and updates nothing if nothing changed. When new stock arrives
+between runs, a second run correctly creates a **second, additional**
+Pick List for the genuine new remainder (not the same one reused) and
+resolves the open shortage report if the new stock now covers it --
+proven by `test_new_stock_arriving_lets_a_second_run_resolve_the_shortage`.
+
+**Commit 15 -- known concurrency window (documented, not closed; no ad
+hoc locking added, per instruction).** Composing Commits 13 and 14
+inherits Commit 13's already-documented residual race unchanged (two
+truly concurrent transactions, each with its own MVCC snapshot, could
+each claim the same stock into a Pick List for a moment -- same safety
+net: Bodega's `report_shortage()`/`finish_picking()` disclosure flow).
+Orchestrating the two together surfaces a **second, analogous window**
+this commit does not close either: `sync_shortage_reports_for_sales_order()`'s
+own check-then-insert (`_find_open_engine_report()` finds nothing, so it
+calls `_insert_shortage_report()`) has no lock across the read and the
+write. Two genuinely concurrent `process_sales_order()` calls for the
+same Sales Order could each independently see "no open report yet" for
+the same line and both insert one -- a duplicate `Reporte de Faltante`,
+not a duplicate Pick List. Unlike Commit 13's window (where
+`Pick List.before_save()` self-corrects for two calls sharing one DB
+transaction), Reporte de Faltante has no analogous native re-derivation
+step, so this window is not even self-correcting within one connection.
+Left open deliberately, for the same reason Commit 13's window was: the
+one native mechanism that would close it cleanly (a DB-level uniqueness
+constraint, or `Stock Reservation Entry`-style `for_update()` locking) was
+not built in this commit, per the explicit instruction not to invent
+custom locking here. If this is ever observed in practice, the safety net
+is manual: two open reports for the same line are still both readable and
+resolvable by a human (Jefe de Bodega already has write access to
+existing reports) -- not silent data loss, just a duplicate that needs a
+person to merge or close one.
