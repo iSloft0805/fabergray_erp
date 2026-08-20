@@ -90,7 +90,15 @@ class TestWorld:
 		doc.insert()
 		return self._track(doc)
 
-	def item(self, item_code, stock_uom=UOM, default_material_request_type=None):
+	def item(self, item_code, stock_uom=UOM, default_material_request_type=None, default_warehouse=None):
+		"""default_warehouse (Commit 18.2): appends a row to the native
+		Item.item_defaults child table for COMPANY -- the same metadata
+		api/ventas.py's own _default_warehouse_for_item() reads
+		(frappe.db.get_value("Item Default", ...)) to resolve a warehouse
+		for a Vendedora-submitted Sales Order line without ever asking her
+		to pick one. Optional and additive -- every pre-existing caller
+		that doesn't pass it keeps getting exactly the same Item as before.
+		"""
 		self._ensure_leaf_item_group()
 		item_dict = {
 			"doctype": "Item",
@@ -99,10 +107,13 @@ class TestWorld:
 			"item_group": _ITEM_GROUP,
 			"stock_uom": stock_uom,
 			"is_stock_item": 1,
+			"is_sales_item": 1,
 		}
 		if default_material_request_type:
 			item_dict["default_material_request_type"] = default_material_request_type
 		doc = frappe.get_doc(item_dict)
+		if default_warehouse:
+			doc.append("item_defaults", {"company": COMPANY, "default_warehouse": default_warehouse})
 		doc.insert()
 		return self._track(doc)
 

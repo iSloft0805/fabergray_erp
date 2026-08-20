@@ -974,3 +974,105 @@ correctly (visible to Bodega via `get_queue()` and Jefe de Bodega via
 `get_open_shortage_reports()`); `owner` on every resulting document is
 still her, not a substituted identity; she still cannot read either
 document directly afterward.
+
+## Commit 18.2 -- api/ventas.py (the Vendedora-facing API)
+
+Six `@frappe.whitelist()` endpoints, all operating under Vendedora's own,
+real, if_owner=1-restricted Sales Order permission (Commit 18.1) -- no
+`ignore_permissions`, no `frappe.get_all()`, no `frappe.set_user()`
+anywhere in this module (enforced by
+`test_ventas_api_never_calls_get_all_or_set_user` and
+`test_no_interactive_api_can_enable_fulfillment_bypass`, both AST-based).
+The one bypass the Fulfillment Engine has (Commit 18.1, above) is reached
+only through `Sales Order.submit()`'s own `on_submit` hook -- this module
+never calls any Engine internal directly.
+
+- `search_customers(txt)` / `search_items(txt)`: thin `frappe.get_list()`
+  wrappers with a hardcoded, explicit field allowlist -- never a Link-field
+  query or `Item.as_dict()`. `search_items()` never reads a price field at
+  all, so there is nothing to accidentally leak.
+- `get_item_info(item_code, customer=None, qty=None)`: an explicitly
+  hand-built dict (`item_code`, `item_name`, `description`, `stock_uom`,
+  `image`, `qty_disponible`) -- never forwards `get_item_details()`'s
+  result. `qty_disponible` reuses `get_actual_qty()`
+  (`erpnext.stock.doctype.pick_list.pick_list`), the same helper
+  `api/bodega.py` already reads Bin availability through -- purely
+  informational, never blocking.
+- `get_my_orders()` / `get_sales_summary()`: `frappe.get_list()` only,
+  scoped by `owner=frappe.session.user` (defensive, on top of the native
+  if_owner permission-query-condition that already applies). Per-order
+  line/unit counts read via one `frappe.get_doc()` per already-authorized
+  order (`len(so.items)`, `so.total_qty`) rather than a batched child-table
+  query -- same anti-`get_all()` pattern `api/jefe_bodega.py` established
+  for the identical reason (child doctypes have no permission model of
+  their own).
+- `create_and_submit_sales_order(customer, items, observations=None)`: a
+  per-line allowlist (`_ALLOWED_ITEM_FIELDS = {"item_code", "qty"}`) --
+  any other key (`rate`, `price_list_rate`, `discount_percentage`,
+  `discount_amount`, `amount`, `net_rate`, `net_amount`,
+  `margin_rate_or_amount`, `margin_type`, or anything else) makes the
+  call `frappe.throw()` immediately, before any Sales Order is built --
+  rejected loudly, never silently dropped. Warehouse is resolved
+  server-side per item via the native `Item.item_defaults` child table
+  (`frappe.db.get_value("Item Default", ...)`, not `get_all`) -- Vendedora
+  never picks one. `delivery_date` uses one centralized, named constant
+  (`DEFAULT_DELIVERY_LEAD_DAYS = 7`), since `Sales Order.delivery_date` has
+  no native default -- `validate_delivery_date()` throws if nothing is set
+  anywhere, confirmed by reading `sales_order.py` directly. `.insert()`
+  then `.submit()` is all this function does to trigger the Engine --
+  `process_sales_order()` is never called directly. ERPNext's own
+  `AccountsController.validate()` resolves every price/tax/discount field
+  during `.insert()`, unconditionally -- nothing here duplicates or
+  second-guesses that.
+
+**Discovery mid-implementation, resolved with the user before proceeding
+(per the standing "stop before granting anything new" rule):**
+`observations` was first implemented via `Document.add_comment()` (a
+universal, native Frappe mechanism -- always inserts with
+`ignore_permissions=True`, for every doctype, not an Engine-specific
+bypass). Writing worked immediately. Reading it back in `get_my_orders()`
+did not: the base `Comment` doctype's own native permission model grants
+`read` only to `System Manager`/`Website Manager`, which Vendedora is
+neither, even for a Comment on her own, otherwise fully-readable Sales
+Order. Presented three options (grant Vendedora `read` on `Comment` with
+if_owner=1; add a Custom Field; drop the field for this commit); the user
+chose a Custom Field. Resolved with `Sales Order-fg_observations`
+(`fixtures/custom_field.json`, `Small Text`, `insert_after: delivery_date`)
+-- read and written through the exact same if_owner=1 Sales Order
+permission Vendedora already had from Commit 18.1, so **no new permission
+of any kind was granted**. `hooks.py`'s `fixtures` Custom Field filter
+gained `"fg_observations"` alongside the existing `fg_started_by`/
+`fg_started_on`.
+
+**Tests** (`fabergray_erp/tests/test_ventas_api.py`, 19 tests): customer/
+item search; item search never contains prices/costs; `get_item_info()`'s
+strict response allowlist; Vendedora creates+submits her own order; the
+final price comes from ERPNext's native pricing engine (seeded via a real
+Item Price, asserted on the submitted document); every named forbidden
+field (`rate`, `price_list_rate`, both discount fields, and the full
+named list from the brief) is rejected; an unrecognized field
+(`warehouse`) is rejected; `get_my_orders()`/`get_sales_summary()` respect
+if_owner (relative before/after diffs on both Vendedora users, not
+absolute counts, since this class-level `TestWorld` doesn't rely on
+per-test rollback -- see `fixtures.py`'s own docstring); order responses
+never carry an economic key; three full E2E paths through the real
+`on_submit` hook (full stock -> Pick List visible to Bodega's
+`get_queue()`; partial stock -> Pick List + automatic Reporte de
+Faltante visible to Jefe de Bodega's `get_open_shortage_reports()`; zero
+stock with a BOM configured -> `"Producción pendiente"` shortage, no Pick
+List); Vendedora still cannot read the Pick List/Reporte de Faltante the
+Engine created on her own order's behalf; a second Vendedora can neither
+read nor write the first one's Sales Order. Plus two new structural
+guardrails in `test_regression.py`
+(`test_ventas_api_never_calls_get_all_or_set_user`, and `ventas` added to
+`test_no_interactive_api_can_enable_fulfillment_bypass`'s module list).
+
+`fixtures.py`'s `TestWorld.item()` gained one optional, additive
+parameter, `default_warehouse` -- appends a row to `Item.item_defaults`
+for `COMPANY` (needed so `_default_warehouse_for_item()` has something to
+resolve) -- and now always sets `is_sales_item=1` (harmless for every
+pre-existing caller, needed for `search_items()`'s own filter).
+
+Full suite: 158/158 passing across two consecutive runs (138 as of
+Commit 18.1 + 19 new Commit 18.2 tests + 1 new Commit 18.2 static
+guardrail -- 158 total), zero DB residue, Stock Settings unchanged.

@@ -18,7 +18,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import flt
 
-from fabergray_erp.api import bodega, jefe_bodega
+from fabergray_erp.api import bodega, jefe_bodega, ventas
 from fabergray_erp.fulfillment import shortage_service
 from fabergray_erp.tests import fixtures as fx
 
@@ -120,11 +120,11 @@ class TestStaticGuardrails(IntegrationTestCase):
 		"""Commit 18.1 guardrail #9: no interactive, whitelisted-function
 		module may hardcode `ignore_permissions=True` or
 		`via_fulfillment_engine=True` -- the only two knobs that unlock the
-		Fulfillment Engine's internal permission bypass. Checked directly
-		against api/bodega.py and api/jefe_bodega.py (api/ventas.py does
-		not exist yet -- Commit 18.2/18.3 -- and must be added to this list
-		when it does)."""
-		for module in (bodega, jefe_bodega):
+		Fulfillment Engine's internal permission bypass. Checked against
+		api/bodega.py, api/jefe_bodega.py and (Commit 18.2) api/ventas.py --
+		none of them ever reaches the bypass directly; only Sales
+		Order.submit()'s own on_submit hook does."""
+		for module in (bodega, jefe_bodega, ventas):
 			self.assertFalse(
 				_hardcodes_ignore_permissions_true(module),
 				f"{module.__name__} must never hardcode ignore_permissions=True",
@@ -137,7 +137,7 @@ class TestStaticGuardrails(IntegrationTestCase):
 		# and no @frappe.whitelist()-decorated function anywhere accepts
 		# either name as one of its own parameters, so a client could never
 		# supply the value over HTTP even indirectly.
-		for module in (bodega, jefe_bodega):
+		for module in (bodega, jefe_bodega, ventas):
 			tree = ast.parse(inspect.getsource(module))
 			for node in ast.walk(tree):
 				if not isinstance(node, ast.FunctionDef):
@@ -160,6 +160,29 @@ class TestStaticGuardrails(IntegrationTestCase):
 			calls,
 			"api/jefe_bodega.py must never call frappe.get_all -- use frappe.get_list "
 			"or get_doc()+check_permission() so permissions/User Permissions apply",
+		)
+
+	def test_ventas_api_never_calls_get_all_or_set_user(self):
+		"""Commit 18.2 structural guardrail: api/ventas.py must always read
+		through Vendedora's own, real, if_owner-restricted permissions --
+		frappe.get_all() (which forces ignore_permissions=True internally,
+		see frappe/__init__.py) and frappe.set_user() (which would swap her
+		out of her own session) are exactly the two mechanisms that could
+		silently defeat that. Checked by AST, same as the other guardrails
+		in this file, so mentioning either name in a docstring/comment can
+		never produce a false positive."""
+		calls = _dotted_calls_in(ventas)
+		self.assertNotIn(
+			"frappe.get_all",
+			calls,
+			"api/ventas.py must never call frappe.get_all -- use frappe.get_list so "
+			"if_owner and Role Permissions are actually applied",
+		)
+		self.assertNotIn(
+			"frappe.set_user",
+			calls,
+			"api/ventas.py must never call frappe.set_user -- Vendedora's own session "
+			"must be used for every read and write",
 		)
 
 	def test_finish_picking_uses_native_submit_not_a_manual_docstatus_flip(self):
