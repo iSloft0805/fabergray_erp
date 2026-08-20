@@ -128,9 +128,34 @@ def sync_shortage_reports_for_sales_order(sales_order):
     also lists that same report's name, flagging which reports need
     master-data attention (e.g. a missing BOM) rather than a Purchase
     Order or Work Order.
+
+    Concurrency (Commit 16): the check-then-insert window Commit 15
+    identified (two concurrent callers for the same Sales Order line could
+    each see "no open report yet" and both insert one) is closed here with
+    a plain `SELECT ... FOR UPDATE` row lock on the Sales Order itself,
+    held for the rest of the current transaction -- native Frappe/MariaDB
+    locking, the same idiom ERPNext's own `get_available_qty_to_reserve()`
+    uses, not a global lock and not an invented mechanism. Every
+    `sales_order_item` belongs to exactly one Sales Order, so locking this
+    one row precisely serializes every concurrent caller that could
+    possibly race for any of this order's lines -- no broader and no
+    narrower than the actual contention. A DB-level partial unique
+    constraint (a generated column + unique index, so only "open" rows
+    collide, letting resolved history and Bodega reports coexist freely)
+    was evaluated first and rejected as too invasive for this commit: it
+    requires a raw SQL column/index Frappe's own DocType framework has no
+    declarative way to express or track, undeclared to every doctype
+    export/migration tool this app otherwise relies on -- see
+    FULFILLMENT_ENGINE_CONTRACT.md, "Commit 16" for the full comparison.
+    Proven with a real two-connection test
+    (test_concurrent_calls_do_not_create_duplicate_open_reports), not
+    simulated with a single connection like Commit 13's own concurrency
+    test had to be.
     """
+    so_name = sales_order.name if hasattr(sales_order, "doctype") else sales_order
+    frappe.db.get_value("Sales Order", so_name, "name", for_update=True)
+
     analysis = analyze_sales_order(sales_order)
-    so_name = analysis["sales_order"]
 
     summary = {"created": [], "updated": [], "resolved": [], "blocked": []}
 

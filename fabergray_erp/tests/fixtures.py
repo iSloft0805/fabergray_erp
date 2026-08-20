@@ -262,8 +262,33 @@ class TestWorld:
 			}
 		)
 		doc.insert()
-		doc.submit()
+		with without_sales_order_hook():
+			doc.submit()
+		self.track_existing_pick_lists_and_reports_for(doc.name)
 		return self._track(doc)
+
+	def track_existing_pick_lists_and_reports_for(self, sales_order_name):
+		"""Commit 16: Sales Order.on_submit is now wired to
+		process_sales_order() (hooks.py doc_events) -- every Sales Order
+		submitted (through this fixture, or directly by a test exercising
+		the real hook in test_sales_order_hook.py) may automatically gain a
+		Pick List and/or a Reporte de Faltante as a side effect of that same
+		submit() call, created by code this TestWorld instance didn't call
+		directly. Without tracking them, that submit's own side effects
+		would leave real, untracked residue behind. Public (not the
+		`_`-prefixed internal-only convention every other TestWorld helper
+		uses) because test_sales_order_hook.py -- which submits Sales
+		Orders directly, not through multi_item_sales_order() -- needs to
+		call this too. Safe to query unconditionally right after submit --
+		the Sales Order didn't exist before this same call, so anything
+		linked to it now is new."""
+		for name in frappe.get_all(
+			"Pick List Item", filters={"sales_order": sales_order_name}, pluck="parent", distinct=True
+		):
+			self.track_existing("Pick List", name)
+
+		for name in frappe.get_all("Reporte de Faltante", filters={"sales_order": sales_order_name}, pluck="name"):
+			self.track_existing("Reporte de Faltante", name)
 
 	def pick_list_for(self, sales_order, warehouse):
 		"""Pick List via ERPNext's own Sales Order -> Pick List mapping
@@ -365,6 +390,37 @@ def as_user(user):
 		yield
 	finally:
 		frappe.set_user(previous)
+
+
+@contextmanager
+def without_sales_order_hook():
+	"""Commit 16: Sales Order.on_submit is now wired (hooks.py doc_events)
+	to fabergray_erp.fulfillment.sales_order_hooks.on_submit ->
+	process_sales_order(). Every test file written before Commit 16 (and
+	most written since) submits Sales Orders through TestWorld's own
+	fixtures expecting a clean, unprocessed order to then drive manually
+	through analyze_sales_order()/create_pick_list_for_available_stock()/
+	sync_shortage_reports_for_sales_order()/process_sales_order() -- if the
+	hook fired during that fixture's own submit(), it would have already
+	claimed stock and/or created a Reporte de Faltante, breaking those
+	tests' assumptions. multi_item_sales_order() wraps its own submit()
+	call in this context manager so it keeps behaving exactly as it always
+	has; only test_sales_order_hook.py builds and submits its Sales Orders
+	directly (bypassing this fixture) specifically to exercise the real
+	hook.
+
+	Implemented by directly overriding frappe.get_doc_hooks()'s own
+	thread-local cache (frappe.local.doc_events_hooks) -- the exact
+	registry Document.hook() (frappe/model/document.py) itself populates
+	and reads on every doc_events dispatch -- not a custom hook-bypass
+	mechanism of this app's own invention."""
+	doc_events_hooks = frappe.get_doc_hooks()
+	original = doc_events_hooks.get("Sales Order", {}).pop("on_submit", None)
+	try:
+		yield
+	finally:
+		if original is not None:
+			doc_events_hooks.setdefault("Sales Order", {})["on_submit"] = original
 
 
 @contextmanager

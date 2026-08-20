@@ -272,3 +272,64 @@ class TestShortageService(IntegrationTestCase):
 		self.assertEqual(pl_qty, 6.0)
 		self.assertEqual(report_qty, 4.0)
 		self.assertEqual(pl_qty + report_qty, 10.0)  # exactly the order's real pending need
+
+	# -- Concurrencia (Commit 16): dos conexiones reales, no simuladas ----------
+
+	def test_concurrent_calls_do_not_create_duplicate_open_reports_for_same_line(self):
+		"""Real two-connection/two-transaction proof for the check-then-
+		insert race Commit 15 identified, using IntegrationTestCase's own
+		primary_connection()/secondary_connection() (the same
+		infrastructure frappe's own TestConcurrency suite --
+		frappe/tests/test_db.py -- uses), not a single-connection
+		simulation like Commit 13's own concurrency test had to settle
+		for. Closed by a SELECT ... FOR UPDATE row lock on the Sales Order
+		at the top of sync_shortage_reports_for_sales_order() -- see that
+		function's docstring and FULFILLMENT_ENGINE_CONTRACT.md, "Commit
+		16" for why this was chosen over a DB-level partial unique
+		constraint."""
+		wh, item, customer = self._new_world("Concurrency", stock_qty=3)
+		so = self.world.submitted_sales_order(item.name, wh.name, 8, customer.name)
+		frappe.db.commit()  # fixtures must be visible to the secondary connection
+
+		# NOTE: primary_connection()/secondary_connection() must be used as
+		# separate, SEQUENTIAL `with` blocks, never nested one inside the
+		# other -- secondary_connection()'s first-ever call does
+		# frappe.connect() (which itself reassigns frappe.local.db) *before*
+		# its own try/finally captures "current_conn" to restore to
+		# afterwards; nesting it inside an active primary_connection() block
+		# makes it capture the wrong connection to restore to. Matches
+		# exactly how frappe's own TestConcurrency (frappe/tests/test_db.py)
+		# uses both.
+		report_name = None
+		try:
+			with self.primary_connection():
+				result_primary = sync_shortage_reports_for_sales_order(so.name)
+				self.assertEqual(len(result_primary["created"]), 1)
+				report_name = result_primary["created"][0]
+				# transaction intentionally left open here -- the row lock
+				# sync_shortage_reports_for_sales_order() took on the Sales
+				# Order is still held on this connection.
+
+			# A genuinely concurrent secondary connection attempting the
+			# exact same lock must block -- proven with a bounded,
+			# non-waiting attempt -- rather than being free to race past
+			# the "does an open report already exist" check.
+			with self.secondary_connection():
+				with self.assertRaises(frappe.QueryTimeoutError):
+					frappe.db.get_value("Sales Order", so.name, "name", for_update=True, wait=False)
+
+			with self.primary_connection():
+				frappe.db.commit()  # ends primary's transaction -- releases the lock
+
+			# secondary can now proceed, and must see the already-committed
+			# report instead of racing past a stale "no report yet" read.
+			with self.secondary_connection():
+				result_secondary = sync_shortage_reports_for_sales_order(so.name)
+				self.assertEqual(result_secondary["created"], [])  # no duplicate report
+				self.assertEqual(result_secondary["updated"], [])  # nothing genuinely changed either
+				frappe.db.commit()
+		finally:
+			if report_name:
+				self.world.track_existing("Reporte de Faltante", report_name)
+
+		self.assertEqual(frappe.db.count("Reporte de Faltante", {"sales_order": so.name}), 1)

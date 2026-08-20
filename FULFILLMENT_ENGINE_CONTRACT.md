@@ -1,4 +1,4 @@
-# Fulfillment Engine -- extension contract (Commit 7, revised Commit 9, extended Commit 12/13/14/15)
+# Fulfillment Engine -- extension contract (Commit 7, revised Commit 9, extended Commit 12/13/14/15/16)
 
 **This document does not implement the Fulfillment Engine.** It records the
 contract a future engine must follow so it can create `Reporte de Faltante`
@@ -317,7 +317,9 @@ window is ever hit is bounded and already has a safety net: Bodega's
 physical pick would come up short of what the Pick List suggests, and the
 existing, already-tested `report_shortage()`/`finish_picking()` disclosure
 flow (Commit 8) is exactly the mechanism that already handles "the paper
-said more than what's really on the shelf."
+said more than what's really on the shelf." -- superseded for the
+Reporte-de-Faltante-specific instance of this same class of race by
+Commit 16's row lock, see below.
 
 ## Commit 14 -- automatic shortage detection: sync_shortage_reports_for_sales_order()
 
@@ -532,3 +534,243 @@ is manual: two open reports for the same line are still both readable and
 resolvable by a human (Jefe de Bodega already has write access to
 existing reports) -- not silent data loss, just a duplicate that needs a
 person to merge or close one.
+
+**Update, Commit 16: this specific window is now closed** (see "Commit 16
+-- concurrency" below) -- kept the paragraph above for the historical
+record of what was evaluated and why it was left open at the time.
+
+## Commit 16 -- connecting the Fulfillment Engine to the real Sales Order flow
+
+`Sales Order` submit now automatically runs the whole pipeline:
+```
+Sales Order submit
+-> process_sales_order()
+-> stock disponible -> Pick List
+-> Pick List aparece en /app/bodega
+-> faltante -> Reporte de Faltante
+```
+
+**Hook, exact:** `hooks.py`, `doc_events`:
+```python
+doc_events = {
+    "Sales Order": {
+        "on_submit": "fabergray_erp.fulfillment.sales_order_hooks.on_submit",
+    },
+}
+```
+Standard Frappe `doc_events` extension point -- no `apps/erpnext`
+modification, no `Sales Order` class override, no Server Script.
+
+**Handler, exact** (`fabergray_erp/fulfillment/sales_order_hooks.py`),
+contains zero fulfillment logic, delegates entirely:
+```python
+from fabergray_erp.fulfillment.engine import process_sales_order
+
+def on_submit(doc, method=None):
+    return process_sales_order(doc)
+```
+
+### Transactional behaviour (investigated, not assumed)
+
+Traced directly in `apps/frappe`, not inferred from documentation:
+- `Document._save()` (`model/document.py`) calls `db_update()` (writes the
+  Sales Order's own `docstatus=1`) and then `run_post_save_methods()` ->
+  `run_method("on_submit")` -- our hook -- **in the same Python call
+  stack, no commit in between.**
+- `Document.hook()`'s `compose()` (same file) wraps every `doc_events`
+  handler call in `frappe.db._disable_transaction_control += 1` --
+  meaning even an accidental `frappe.db.commit()`/`rollback()` *inside* a
+  hook handler would be a silent no-op while that flag is set. None was
+  added (per the explicit instruction), but this is a second, independent
+  guarantee against it happening by accident.
+- The only place that actually commits a real web request is
+  `sync_database()` (`app.py`), called from `application()`'s `else`
+  branch -- **only reached if no exception propagated out of the whole
+  request.** If one does, `application()`'s `except` branch runs
+  `db.rollback(chain=True)` instead (`app.py`, both traced directly).
+
+**Net effect, confirmed:** an unhandled exception anywhere inside
+`process_sales_order()` propagates out of `Sales Order.submit()` with
+*nothing* committed since the request began -- rolling back undoes the
+Sales Order's own `docstatus` change together with whatever partial Pick
+List/Reporte de Faltante work already happened in the same call. No three
+incoherent states. Achieved entirely by Frappe's own request-boundary
+transaction model -- **no `frappe.db.commit()` was added anywhere in the
+hook, the handler, or the Engine**, exactly as instructed. Proven, not
+just traced: `test_engine_exception_during_submit_rolls_back_everything`
+patches `sync_shortage_reports_for_sales_order()` to raise after
+`create_pick_list_for_available_stock()` has already run and written a
+real Pick List, then explicitly performs the same `frappe.db.rollback()`
+`app.py` would perform at the real request boundary (`bench run-tests`
+never goes through an actual HTTP request, so this step is simulated
+explicitly rather than assumed) -- and confirms the Sales Order's
+`docstatus` reverts to `0` and zero Pick List Item / Reporte de Faltante
+rows exist for it afterward.
+
+**Caveat, for precision:** this atomicity is a property of the
+*request/RPC call boundary*, not of `Document.submit()` in isolation. It
+holds cleanly for the standard path this hook actually runs on (a user or
+API client submitting a Sales Order as one HTTP request). It is not a
+guarantee about `process_sales_order()` if it were ever called from
+*inside* some other, larger transaction (a background job batching
+several unrelated writes, for instance) -- not a concern for this commit,
+since nothing here does that, but worth knowing if a future commit adds
+one.
+
+### Concurrency: closing the Reporte de Faltante check-then-insert window
+
+**Alternatives evaluated, in the order the brief asked for:**
+
+1. **DB-level partial unique constraint** (a generated/virtual column,
+   e.g. `active_engine_key = CASE WHEN detected_by='Fulfillment Engine'
+   AND status IN ('Abierto','En Proceso') THEN sales_order_item ELSE NULL
+   END`, with a `UNIQUE` index on it -- MySQL/MariaDB unique indexes treat
+   `NULL` as distinct from every other `NULL`, so only "active" rows would
+   ever collide, letting resolved history and Bodega reports coexist
+   freely). Confirmed technically viable: this site runs MariaDB 11.8.8,
+   comfortably past the 10.2 minimum for generated columns and functional
+   indexes. **Rejected anyway**, not for a technical limitation but for
+   fit: it requires a raw `ALTER TABLE` Frappe's own DocType/`Select`
+   field system has no declarative way to express, invisible to every
+   doctype export/migration tool this app otherwise relies on, and a
+   second thing (besides `TestWorld`) that would need bespoke migration
+   handling. Genuinely the cleaner mechanism in the abstract; too
+   invasive for what this commit actually needs.
+2. **Transactional row lock on the Sales Order** (the brief's own
+   suggested fallback) -- **adopted.** `sync_shortage_reports_for_sales_order()`
+   now opens with:
+   ```python
+   frappe.db.get_value("Sales Order", so_name, "name", for_update=True)
+   ```
+   before reading or writing any Reporte de Faltante state, held for the
+   rest of the current transaction. Native Frappe/MariaDB locking -- the
+   same idiom `Stock Reservation Entry.get_available_qty_to_reserve()`
+   already uses (Commit 10's own audit) -- not a global lock and not an
+   invented mechanism. Every `sales_order_item` belongs to exactly one
+   Sales Order, so this one row lock precisely serializes every caller
+   that could possibly race for any of that order's lines -- no broader,
+   no narrower than the actual contention. Because every creator of an
+   automatic Reporte de Faltante is required to go through this function
+   (Commit 9's single-insert-path rule, still enforced by its own AST
+   guardrail test), the guarantee is real for the whole app, not
+   "hopefully" dependent on every future caller remembering to lock
+   something themselves.
+
+**What this guarantees, exactly as asked:**
+- One open (`Abierto`/`En Proceso`) automatic report per `sales_order_item`
+  at a time -- enforced by the lock making the check-then-insert atomic,
+  not by application-level discipline.
+- Multiple resolved (`Resuelto`) reports can still exist over time for the
+  same line (each "episode" gets its own history, per Commit 14's own
+  update-vs-resolve design) -- the lock only serializes *concurrent*
+  writers, it says nothing about how many rows can exist across time.
+- Bodega's own manual reports remain completely independent -- every
+  query in `shortage_service.py` is scoped to
+  `detected_by="Fulfillment Engine"`, untouched by this lock or by
+  anything upstream of it.
+
+**Proven with a real two-connection/two-transaction test**, not a
+single-connection simulation: `test_concurrent_calls_do_not_create_duplicate_open_reports_for_same_line`
+(`test_shortage_service.py`) uses `IntegrationTestCase`'s own
+`primary_connection()`/`secondary_connection()` -- the exact
+infrastructure `frappe/tests/test_db.py`'s own `TestConcurrency` suite
+uses, confirmed to exist in this Frappe version before relying on it. The
+test: primary acquires the lock and creates a report; secondary, on a
+genuinely separate MariaDB connection, attempts the identical row lock
+with `wait=False` and is proven to receive `frappe.QueryTimeoutError`
+(the lock is real and actively held, not merely "probably fine"); primary
+commits (releasing the lock); secondary then proceeds and correctly finds
+the already-committed report instead of racing past a stale read --
+zero duplicates. (Note for anyone extending this test:
+`primary_connection()`/`secondary_connection()` must be used as separate,
+sequential `with` blocks, never nested -- `secondary_connection()`'s
+first-ever call does `frappe.connect()`, which itself reassigns
+`frappe.local.db`, *before* its own `try/finally` captures the connection
+to restore afterward; nesting it inside an still-open
+`primary_connection()` block makes that restore point to the wrong
+connection. Discovered by a first, failing version of this exact test,
+not assumed correct.)
+
+### Not processing irrelevant Sales Orders -- reused, not duplicated
+
+- **Submitted, not cancelled:** delegated entirely to
+  `analyze_sales_order()`'s own `so.docstatus != 1` check (Commit 12),
+  reached via `process_sales_order()`'s first call (Commit 15) -- covers
+  both a draft (0) and a cancelled (2) order with one check, not
+  duplicated here.
+- **Relevant stock lines:** `analyze_sales_order()` already skips
+  non-stock items and drop-shipped (`delivered_by_supplier`) lines
+  (Commit 12) -- reused as-is.
+- **Valid warehouses:** verified directly in `apps/erpnext`, not assumed --
+  `Sales Order.validate_warehouse()` (`sales_order.py`) throws
+  `WarehouseRequired` for any stock item line missing a warehouse, and
+  Frappe's own `_validate_links()` (`document.py`, runs before
+  `_validate()` in every `_save()`) rejects a `warehouse` value that
+  isn't an existing `Warehouse` record. Both run as part of the Sales
+  Order's own `validate()`, which always completes successfully *before*
+  `on_submit` -- our hook -- ever fires (see `run_before_save_methods()`
+  vs. `run_post_save_methods()`, same file). By the time
+  `process_sales_order()` runs, every relevant line is already guaranteed
+  to have a valid, existing warehouse -- nothing left for this app to
+  re-check.
+
+### Manual reprocessing (section 6) -- still fully supported
+
+`process_sales_order()` remains directly callable, unchanged, exactly as
+Commit 15 left it -- the hook is a thin, optional trigger, not the only
+way in. Needed for: new stock arriving, production finishing, a stock
+correction, or simply recomputing an order on demand. Proven by
+`test_manual_reprocessing_after_hook_submit_is_idempotent`: submitting via
+the hook, then calling `process_sales_order()` again manually, creates
+and updates nothing (same idempotency guarantee as calling it twice
+directly, Commit 15) -- and by
+`test_new_stock_arriving_lets_a_second_run_resolve_the_shortage` (Commit
+15, still passing unchanged) for the "stock arrived, reprocess" case.
+
+### Sales Order cancellation -- native behaviour documented, no policy built yet
+
+Investigated directly in `apps/frappe`/`apps/erpnext`, no new code added
+(per the explicit instruction not to invent behaviour here):
+
+- `Sales Order.on_cancel()` (`sales_order.py`) never touches Pick List or
+  Reporte de Faltante at all.
+- Frappe's generic back-link check on cancel
+  (`check_if_doc_is_linked()`/`get_linked_docs()`, `delete_doc.py`) only
+  blocks cancellation for a linked document that is **submitted**
+  (`docstatus == 1`) -- confirmed by reading the exact condition
+  (`method == "Cancel" and DocStatus(item.docstatus).is_submitted()`).
+  - A **draft** (`docstatus == 0`) Pick List does **not** block Sales
+    Order cancellation.
+  - `Reporte de Faltante` is **not a submittable doctype**
+    (`is_submittable` unset in its JSON, confirmed) -- its `docstatus` is
+    always `0`, so it **never** blocks cancellation, regardless of its
+    own `status` field (`Abierto`/`En Proceso`/`Resuelto` is a plain
+    business-status `Select`, unrelated to `docstatus`).
+  - A **submitted** Pick List still blocks cancellation today, natively
+    (unchanged, pre-existing ERPNext behaviour) -- the Sales Order can't
+    be cancelled until that Pick List is dealt with first.
+
+**Net, observed behaviour** (proven live,
+`test_cancelling_sales_order_leaves_draft_pick_list_and_open_report_untouched`):
+a Sales Order with only a draft Pick List and/or an open automatic
+Reporte de Faltante cancels cleanly, and **both are left exactly as they
+were** -- the draft Pick List still `Draft`, still visible in Bodega's
+`get_queue()`; the report still `Abierto` -- both now silently referencing
+a cancelled Sales Order. Nothing currently tells Bodega or Jefe de Bodega
+that the order behind what they're looking at no longer exists.
+
+**Proposed policy for Commit 17 (not built, not decided yet -- for the
+user to confirm/adjust):** on `Sales Order.on_cancel`, via a second,
+equally thin `doc_events` handler:
+- cancel (not delete) any still-`Draft` Pick List linked to the
+  cancelled order, so it stops appearing as pickable work in
+  `get_queue()`;
+- mark any open (`Abierto`/`En Proceso`) `Fulfillment Engine`-detected
+  Reporte de Faltante `Resuelto` with an automatic note explaining why
+  (order cancelled, not stock found) -- never touching a `Bodega`-created
+  report, same scoping `sync_shortage_reports_for_sales_order()` already
+  uses;
+- explicitly **not** touching a *submitted* Pick List (already blocks
+  cancellation natively) or anything already delivered.
+This is a proposal, not a decision -- flagging it here rather than
+building it, per the explicit instruction for this commit.
