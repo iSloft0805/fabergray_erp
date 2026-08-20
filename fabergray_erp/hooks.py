@@ -142,15 +142,16 @@ app_include_css = "/assets/fabergray_erp/css/fg_shell.css"
 # ---------------
 # Hook on document methods and events
 
-# Commit 16: connects the Fulfillment Engine to the real Sales Order
-# submit flow. The handler is a one-line delegation to
-# fulfillment.engine.process_sales_order() -- see
+# Commit 16/17: connects the Fulfillment Engine to the real Sales Order
+# submit/cancel flow. Both handlers are one-line delegations -- see
 # fulfillment/sales_order_hooks.py, which deliberately contains no
 # fulfillment logic of its own, and FULFILLMENT_ENGINE_CONTRACT.md,
-# "Commit 16" for the full transactional/concurrency/cancellation writeup.
+# "Commit 16"/"Commit 17" for the full transactional/concurrency/
+# cancellation writeup.
 doc_events = {
 	"Sales Order": {
 		"on_submit": "fabergray_erp.fulfillment.sales_order_hooks.on_submit",
+		"on_cancel": "fabergray_erp.fulfillment.sales_order_hooks.on_cancel",
 	},
 }
 

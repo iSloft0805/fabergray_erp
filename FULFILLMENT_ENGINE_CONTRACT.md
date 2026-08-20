@@ -1,4 +1,4 @@
-# Fulfillment Engine -- extension contract (Commit 7, revised Commit 9, extended Commit 12/13/14/15/16)
+# Fulfillment Engine -- extension contract (Commit 7, revised Commit 9, extended Commit 12/13/14/15/16/17)
 
 **This document does not implement the Fulfillment Engine.** It records the
 contract a future engine must follow so it can create `Reporte de Faltante`
@@ -759,18 +759,153 @@ were** -- the draft Pick List still `Draft`, still visible in Bodega's
 a cancelled Sales Order. Nothing currently tells Bodega or Jefe de Bodega
 that the order behind what they're looking at no longer exists.
 
-**Proposed policy for Commit 17 (not built, not decided yet -- for the
-user to confirm/adjust):** on `Sales Order.on_cancel`, via a second,
-equally thin `doc_events` handler:
-- cancel (not delete) any still-`Draft` Pick List linked to the
-  cancelled order, so it stops appearing as pickable work in
-  `get_queue()`;
-- mark any open (`Abierto`/`En Proceso`) `Fulfillment Engine`-detected
-  Reporte de Faltante `Resuelto` with an automatic note explaining why
-  (order cancelled, not stock found) -- never touching a `Bodega`-created
-  report, same scoping `sync_shortage_reports_for_sales_order()` already
-  uses;
-- explicitly **not** touching a *submitted* Pick List (already blocks
-  cancellation natively) or anything already delivered.
-This is a proposal, not a decision -- flagging it here rather than
-building it, per the explicit instruction for this commit.
+**Superseded by Commit 17** (below) -- the proposal originally written
+here (cancel drafts, resolve open Engine reports) was implemented with
+one deliberate refinement: drafts are *deleted*, not cancelled (a draft
+was never submitted, so "cancel" -- a 1 -> 2 transition -- does not
+semantically apply to it; see Commit 17's own reasoning).
+
+## Commit 17 -- Sales Order cancellation lifecycle
+
+Closes the gap Commit 16 documented but deliberately left unbuilt:
+```
+Sales Order cancelada
+-> deja de aparecer como trabajo pendiente para Bodega
+-> faltantes automáticos dejan de aparecer como pendientes
+-> conserva trazabilidad
+```
+
+**Hook, extended** (`hooks.py`, same `doc_events["Sales Order"]` dict
+Commit 16 added):
+```python
+doc_events = {
+    "Sales Order": {
+        "on_submit": "fabergray_erp.fulfillment.sales_order_hooks.on_submit",
+        "on_cancel": "fabergray_erp.fulfillment.sales_order_hooks.on_cancel",
+    },
+}
+```
+
+**Handler, exact** (`sales_order_hooks.py`, still zero fulfillment
+logic):
+```python
+from fabergray_erp.fulfillment.cancellation_service import cleanup_fulfillment_for_cancelled_sales_order
+
+def on_cancel(doc, method=None):
+    return cleanup_fulfillment_for_cancelled_sales_order(doc)
+```
+
+**Service** (`fabergray_erp/fulfillment/cancellation_service.py`,
+`cleanup_fulfillment_for_cancelled_sales_order(sales_order)`, kept out of
+`sales_order_hooks.py` as instructed) -- two independent passes:
+
+### Draft Pick Lists (docstatus 0): deleted, not cancelled
+
+**Native investigation, not assumed:** a draft has never been submitted
+-- Frappe's own docstatus model only defines `cancel()` as a 1 -> 2
+transition (`Document._cancel()` sets `docstatus = DocStatus.CANCELLED`
+then saves; calling it on a docstatus-0 document has no defined,
+semantically correct meaning here). Deletion is therefore the *correct*
+native action for a draft, not merely the user's stated preference.
+
+- **Links:** deleting a document runs `check_if_doc_is_linked(doc,
+  method="Delete")` (`delete_doc.py`) -- for `method="Delete"`,
+  *any* row linking to this Pick List blocks deletion, regardless of its
+  own docstatus (unlike `method="Cancel"`, which only cares about
+  submitted linkers). Concretely: if Bodega already reported a shortage
+  against a row of this still-draft Pick List, that `Reporte de
+  Faltante.pick_list` link would block the delete outright -- correct
+  behaviour, not a bug to route around: a draft Pick List that already
+  has real, physical Bodega evidence attached to it is no longer "just an
+  untouched auto-created draft", and destroying it would destroy that
+  evidence. An Engine-detected report never sets `pick_list` (Commit 9),
+  so this only ever applies to Bodega-originated evidence, exactly where
+  the protection belongs. Not specially handled by this commit's code --
+  Frappe's own back-link check already does the right thing on its own.
+- **Permissions:** `frappe.delete_doc("Pick List", name)` is called with
+  no `ignore_permissions=True` (checked: no code path in this module uses
+  it). ERPNext's own Pick List DocType grants `delete=1` natively to
+  Stock Manager/Stock User/Manufacturing Manager/Manufacturing User --
+  **not** to Bodega or Jefe de Bodega (checked directly in this app's own
+  `custom_docperm.json`: both have `delete: 0`). Practical consequence,
+  flagged rather than fixed here (no new permission grant was in scope):
+  **today, only Administrator (or a future role with one of those four
+  native roles) can successfully cancel a Sales Order that has a draft
+  Pick List** -- anyone else hits a `PermissionError` during cleanup,
+  which (correctly, per the atomicity guarantee below) fails the whole
+  cancellation rather than silently leaving a stale draft behind. Whoever
+  ends up triggering Sales Order cancellation in real usage will need
+  this sorted out -- likely as part of whatever future commit designs a
+  Ventas/Sales role, not this one.
+- **Effect on `get_queue()`:** `get_queue()` reads live `Pick List Item`
+  rows (Commit 4/8) -- once the parent Pick List is deleted, there is
+  nothing left for it to find. No change to `api/bodega.py` was needed or
+  made.
+
+### Submitted Pick Lists (docstatus 1): untouched, relies on native blocking
+
+**Investigated, not assumed, and preserved exactly as found (already
+documented in Commit 16, now with a live test):**
+`check_if_doc_is_linked(doc, method="Cancel")` blocks Sales Order
+cancellation outright while a *submitted* linked Pick List exists (its
+`Pick List Item.sales_order` row has `docstatus == 1`) --
+`Sales Order.on_cancel()`'s own `ignore_linked_doctypes` tuple does not
+include `"Pick List"`. This module's queries are explicitly scoped to
+`docstatus == 0` (see `_draft_pick_lists_for()`), so a submitted Pick
+List is never read or written by this commit's code at all -- no bypass,
+no special case needed, because ERPNext already refuses the whole
+operation before this module's result could matter either way. Proven
+live: `test_submitted_pick_list_blocks_cancellation_natively` fully picks
+and submits a Pick List, then confirms `so.cancel()` raises
+`frappe.LinkExistsError` and leaves both documents exactly as they were
+(after an explicit `frappe.db.rollback()` -- `check_no_back_links_exist()`
+runs *after* `on_cancel` in `run_post_save_methods()`, so the Sales
+Order's own `docstatus=2` is already written to the same open transaction
+by the time the error fires; a real request would roll this back
+automatically at its own boundary, simulated explicitly here for the same
+reason Commit 16's rollback test needed to).
+
+### Reporte de Faltante: Engine reports resolved, Bodega reports untouched
+
+Every open (`status != "Resuelto"`) report with
+`detected_by="Fulfillment Engine"` linked to the cancelled Sales Order is
+marked `Resuelto` with `resolution_note = "Resuelto automáticamente:
+Orden de Venta cancelada."` -- kept as history (`track_changes` already
+on this doctype since Commit 2), not deleted. Every query in this module
+is scoped to `detected_by="Fulfillment Engine"`, the same convention
+`shortage_service.py` already uses -- a `Bodega`-created report is
+structurally invisible here, never read or written, regardless of its own
+`status`.
+
+### Transactional behaviour -- identical mechanism to Commit 16, on_cancel instead of on_submit
+
+`on_cancel` fires through the exact same `Document.run_method()` ->
+`Document.hook()` path traced for `on_submit` in Commit 16 -- same
+in-one-transaction guarantee, same `_disable_transaction_control` guard
+around every handler call, same request-boundary
+commit(`sync_database()`)/rollback(`db.rollback(chain=True)`, `app.py`)
+split. No `frappe.db.commit()` was added anywhere in this commit's code.
+Proven, not just re-cited: `test_intentional_error_during_cleanup_rolls_back_cancellation`
+patches `_open_engine_reports_for()` to raise *after* the draft-Pick-List
+deletion pass has already run and genuinely deleted a real document, then
+performs the same explicit `frappe.db.rollback()` a real request boundary
+would -- and confirms the Sales Order's `docstatus` reverts to `1` *and*
+the deleted Pick List reappears (the delete itself was rolled back too).
+
+### Idempotency
+
+No new technical field. Both of `cleanup_fulfillment_for_cancelled_sales_order()`'s
+queries only ever return documents that still need handling -- an
+already-deleted Pick List and an already-`Resuelto` report simply stop
+appearing in their respective queries -- so a second call (the hook
+firing twice, or a stray manual re-invocation) is a true no-op, proven by
+`test_cleanup_service_run_twice_is_idempotent`
+(`{"removed_pick_lists": [], "resolved_reports": []}` on the second
+call).
+
+### Not built this commit (as instructed)
+
+No Page Vendedora, no Material Request/Purchase Order/Work Order/
+Production Plan, no automatic Delivery Note/Sales Invoice, no
+`fg_fulfillment_status`. `api/bodega.py`/`api/jefe_bodega.py` and the
+`/app/bodega`/`/app/jefe-de-bodega` Pages were not touched.

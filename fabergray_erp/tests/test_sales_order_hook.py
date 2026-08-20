@@ -266,41 +266,9 @@ class TestSalesOrderHook(IntegrationTestCase):
 		self.assertFalse(bodega_report.resolution_note)
 		self.assertEqual(bodega_report.detected_by, "Bodega")
 
-	# -- Caso 11: cancelación de Sales Order -- investigación, no comportamiento nuevo --
-
-	def test_cancelling_sales_order_leaves_draft_pick_list_and_open_report_untouched(self):
-		"""Documents native ERPNext/Frappe behaviour only -- no on_cancel
-		hook was added this commit. Confirmed here, not assumed:
-		Sales Order.on_cancel() (sales_order.py) never touches Pick List or
-		Reporte de Faltante at all, and Frappe's generic back-link check
-		(check_if_doc_is_linked(), delete_doc.py) only blocks cancellation
-		for a *submitted* (docstatus=1) linked document -- a draft Pick
-		List (docstatus=0) does not block, and Reporte de Faltante is not
-		even a submittable doctype (docstatus stays 0 always), so it never
-		blocks either, regardless of its own `status` field. Net effect: a
-		Sales Order with only a draft Pick List and/or an open automatic
-		Reporte de Faltante cancels cleanly, and both are left exactly as
-		they were -- draft Pick List still active in Bodega's queue, report
-		still open -- both now referencing a cancelled Sales Order. See
-		FULFILLMENT_ENGINE_CONTRACT.md, "Commit 16 -- Sales Order
-		cancellation" for the proposed Commit 17 policy."""
-		wh, item, customer = self._new_world("Cancel", stock_qty=3)
-		so = self._submit_via_hook(customer.name, [{"item_code": item.name, "warehouse": wh.name, "qty": 8, "rate": 100}])
-
-		pick_list_name = self._pick_lists_for(so.name)[0]
-		report_name = self._reports_for(so.name)[0]
-
-		so.cancel()  # succeeds natively -- neither a draft Pick List nor Reporte de Faltante blocks it
-
-		so.reload()
-		self.assertEqual(so.docstatus, 2)
-
-		pl = frappe.get_doc("Pick List", pick_list_name)
-		self.assertEqual(pl.docstatus, 0)  # still draft, untouched
-
-		report = frappe.get_doc("Reporte de Faltante", report_name)
-		self.assertEqual(report.status, "Abierto")  # still open, untouched
-
-		with fx.as_user(self.bodega_user):
-			queue = bodega.get_queue()
-		self.assertIn(pick_list_name, [p["name"] for p in queue["pendientes"]])  # still visible to Bodega
+	# Sales Order cancellation is no longer "investigate only" as of
+	# Commit 17 -- an on_cancel hook now actively cleans up draft Pick
+	# Lists and resolves open automatic Reporte de Faltante. See
+	# test_sales_order_cancel.py for the full Commit 17 suite (this file
+	# used to carry a test here asserting the OLD, now-superseded native
+	# behaviour -- removed rather than left lying about what happens now).
