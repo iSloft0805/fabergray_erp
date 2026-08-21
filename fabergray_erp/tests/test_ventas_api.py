@@ -14,6 +14,7 @@ correctly trigger the Commit 15/16/18.1 Fulfillment Engine end to end.
 
 import frappe
 from frappe.tests import IntegrationTestCase
+from frappe.utils import flt
 
 from fabergray_erp.api import bodega as bodega_api
 from fabergray_erp.api import jefe_bodega as jefe_bodega_api
@@ -434,6 +435,63 @@ class TestVentasApi(IntegrationTestCase):
 		with fx.as_user(self.vendedora_a):
 			self.assertFalse(frappe.has_permission("Pick List", "read", doc=pl_name))
 			self.assertFalse(frappe.has_permission("Reporte de Faltante", "read", doc=report_name))
+
+	# -- E2E (Commit 19.2): Purchase Service creates a Material Request too --
+
+	def test_e2e_vendedora_submit_creates_material_request_despite_no_permission(self):
+		"""Vendedora has zero permission on Material Request, by design
+		(Commit 18.1's Option B, same as Pick List/Reporte de Faltante) --
+		this proves sync_material_requests_for_sales_order() (Commit 19.1,
+		wired into process_sales_order() this commit) still succeeds as a
+		consequence of her own already-authorized Sales Order submit,
+		exactly like Pick List/Reporte de Faltante already do."""
+		wh = self.world.warehouse("FG19-2 E2E MR")
+		item = self.world.item(
+			"FG19-2-E2E-MR-ITEM", default_material_request_type="Purchase", default_warehouse=wh.name
+		)
+		self.world.stock_up_real(item.name, wh.name, 2)
+
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name, items=[{"item_code": item.name, "qty": 10}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		so = frappe.get_doc("Sales Order", result["name"])
+		mr_names = frappe.get_all(
+			"Material Request Item", filters={"sales_order": so.name}, pluck="parent", distinct=True
+		)
+		self.assertEqual(len(mr_names), 1)
+		mr = frappe.get_doc("Material Request", mr_names[0])
+		self.assertEqual(mr.docstatus, 0)
+		self.assertEqual(mr.owner, self.vendedora_a)  # her session, never a substituted identity
+		self.assertEqual(flt(mr.items[0].qty), 8.0)
+		self.assertEqual(mr.items[0].sales_order, so.name)
+		self.assertEqual(mr.items[0].sales_order_item, so.items[0].name)
+
+	def test_e2e_vendedora_still_cannot_access_material_request_directly(self):
+		wh = self.world.warehouse("FG19-2 E2E MR NoAccess")
+		item = self.world.item(
+			"FG19-2-E2E-MR-NOACCESS-ITEM", default_material_request_type="Purchase", default_warehouse=wh.name
+		)
+		self.world.stock_up_real(item.name, wh.name, 2)
+
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name, items=[{"item_code": item.name, "qty": 6}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		mr_name = frappe.get_all(
+			"Material Request Item", filters={"sales_order": result["name"]}, pluck="parent", distinct=True
+		)[0]
+
+		with fx.as_user(self.vendedora_a):
+			self.assertFalse(frappe.has_permission("Material Request", "read", doc=mr_name))
+			self.assertFalse(frappe.has_permission("Material Request", "create"))
+			self.assertFalse(frappe.has_permission("Material Request", "write", doc=mr_name))
 
 	def test_another_vendedora_cannot_read_or_modify_the_created_sales_order(self):
 		with fx.as_user(self.vendedora_a):

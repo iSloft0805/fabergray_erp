@@ -224,6 +224,55 @@ class TestSalesOrderHook(IntegrationTestCase):
 		self.world.track_existing_pick_lists_and_reports_for(so.name)
 		self.assertEqual(len(self._pick_lists_for(so.name)), 1)
 
+	# -- Caso 8b (Commit 19.2): la excepción llega DESPUÉS de crear el MR --------
+
+	def test_engine_exception_after_material_request_creation_rolls_back_everything(self):
+		"""Same proof as test_engine_exception_during_submit_rolls_back_everything
+		(Commit 16), extended for Commit 19.2: the side_effect below calls the
+		REAL sync_material_requests_for_sales_order() first -- so a genuine
+		Material Request is actually inserted, in the same open transaction,
+		before the intentional exception fires -- then raises. Proves the
+		just-created Material Request rolls back together with the Sales
+		Order's own docstatus change and the Pick List/Reporte de Faltante
+		from the earlier steps, not just that an exception before any
+        Purchase Service write would have prevented one."""
+		wh, item, customer = self._new_world("RollbackMr", stock_qty=3)
+		so = self._draft_sales_order(customer.name, [{"item_code": item.name, "warehouse": wh.name, "qty": 8, "rate": 100}])
+		frappe.db.commit()  # fixtures + draft SO survive the rollback below
+
+		def _create_real_material_request_then_raise(sales_order):
+			from fabergray_erp.fulfillment.purchase_service import sync_material_requests_for_sales_order
+
+			sync_material_requests_for_sales_order(sales_order)
+			raise RuntimeError("Commit 19.2 intentional failure after Material Request creation")
+
+		with patch(
+			"fabergray_erp.fulfillment.engine.sync_material_requests_for_sales_order",
+			side_effect=_create_real_material_request_then_raise,
+		):
+			with self.assertRaises(RuntimeError):
+				so.submit()
+
+		frappe.db.rollback()
+
+		so.reload()
+		self.assertEqual(so.docstatus, 0)  # the submit itself was rolled back too
+		self.assertEqual(
+			frappe.db.sql("""select count(*) from `tabPick List Item` where sales_order=%s""", so.name)[0][0], 0
+		)
+		self.assertEqual(frappe.db.count("Reporte de Faltante", {"sales_order": so.name}), 0)
+		self.assertEqual(
+			frappe.db.sql(
+				"""select count(*) from `tabMaterial Request Item` where sales_order=%s""", so.name
+			)[0][0],
+			0,
+		)  # the Material Request the side_effect actually created is gone too
+
+		# confirm the Sales Order is left genuinely submittable afterward.
+		so.submit()
+		self.world.track_existing_pick_lists_and_reports_for(so.name)  # Pick List + Reporte + MR, Commit 19.2
+		self.assertEqual(len(self._pick_lists_for(so.name)), 1)
+
 	# -- Caso 9: reprocesar manualmente una SO ya procesada por el hook ----------
 
 	def test_manual_reprocessing_after_hook_submit_is_idempotent(self):

@@ -292,3 +292,42 @@ class TestSalesOrderCancel(IntegrationTestCase):
 		result = cleanup_fulfillment_for_cancelled_sales_order(so.name)
 		self.assertEqual(result, {"removed_pick_lists": [], "resolved_reports": []})
 		self.assertEqual(frappe.get_doc("Reporte de Faltante", report_name).status, "Resuelto")
+
+	# -- Caso 11 (Commit 19.2): Material Request existe pero cancellation_service.py
+	# no lo toca -- MR cleanup is Commit 19.3's own, not-yet-approved scope -----
+
+	def test_cancellation_still_cleans_up_pick_list_and_report_but_leaves_material_request_untouched(self):
+		"""Commit 19.2 wires sync_material_requests_for_sales_order() into
+		process_sales_order() (the on_submit side) -- this test confirms
+		that wiring did NOT change anything on the on_cancel side:
+		cancellation_service.py (Commit 17) still only knows about Pick
+		List/Reporte de Faltante, exactly as before. The Material Request
+		Commit 19.1/19.2 create as a side effect of submit is left in its
+		original Draft state after cancel -- neither deleted nor cancelled
+		nor resolved -- because that cleanup is explicitly out of this
+		commit's scope (approved for Commit 19.3, not yet built)."""
+		wh, item, customer = self._new_world("MrUntouched", stock_qty=2, default_material_request_type="Purchase")
+		so = self._submit_via_hook(customer.name, [{"item_code": item.name, "warehouse": wh.name, "qty": 10, "rate": 100}])
+
+		pick_list_name = self._pick_lists_for(so.name)[0]
+		report_name = self._reports_for(so.name)[0]
+		mr_names = frappe.get_all(
+			"Material Request Item", filters={"sales_order": so.name}, pluck="parent", distinct=True
+		)
+		self.assertEqual(len(mr_names), 1)
+		mr_name = mr_names[0]
+		self.assertEqual(frappe.db.get_value("Material Request", mr_name, "docstatus"), 0)
+
+		so.cancel()
+
+		# Commit 17 behaviour, unchanged: draft Pick List removed, open
+		# automatic report resolved.
+		self.assertFalse(frappe.db.exists("Pick List", pick_list_name))
+		self.assertEqual(frappe.get_doc("Reporte de Faltante", report_name).status, "Resuelto")
+
+		# Commit 19.2's own explicit non-goal: the Material Request is
+		# completely untouched -- still Draft, still exists, no status
+		# change, no deletion attempt.
+		mr = frappe.get_doc("Material Request", mr_name)
+		self.assertEqual(mr.docstatus, 0)
+		self.assertTrue(frappe.db.exists("Material Request", mr_name))

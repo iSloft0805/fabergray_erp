@@ -9,6 +9,7 @@ against the already-tested behaviour of Commits 12/13/14.
 
 import frappe
 from frappe.tests import IntegrationTestCase
+from frappe.utils import flt
 
 from fabergray_erp.api import bodega
 from fabergray_erp.fulfillment.engine import process_sales_order
@@ -40,12 +41,17 @@ class TestFulfillmentEngine(IntegrationTestCase):
 			self.world.track_existing("Pick List", result["pick_list"])
 		for name in result["shortages"]["created"]:
 			self.world.track_existing("Reporte de Faltante", name)
+		for name in result["purchasing"]["created"]:
+			self.world.track_existing("Material Request", name)
 
 	def _pick_list(self, name):
 		return frappe.get_doc("Pick List", name)
 
 	def _report(self, name):
 		return frappe.get_doc("Reporte de Faltante", name)
+
+	def _mr(self, name):
+		return frappe.get_doc("Material Request", name)
 
 	# -- Caso: stock completo -> Pick List, sin shortage ----------------------
 
@@ -333,3 +339,209 @@ class TestFulfillmentEngine(IntegrationTestCase):
 		with fx.as_user(self.bodega_user):
 			queue = bodega.get_queue()
 		self.assertIn(result["pick_list"], [p["name"] for p in queue["pendientes"]])
+
+	# =====================================================================
+	# Commit 19.2 -- sync_material_requests_for_sales_order() wired in
+	# =====================================================================
+
+	def _standalone_mr(self, so, sales_order_item, item_code, warehouse, qty, submit=False):
+		"""Builds a Material Request directly (never through the
+		orchestrator or purchase_service.py), mirroring
+		test_purchase_service.py's own helper -- simulates a document that
+		already exists for some other reason before process_sales_order()
+		runs, so these tests prove the orchestrator's Material Request step
+		nets correctly against it regardless of origin."""
+		mr = frappe.get_doc(
+			{
+				"doctype": "Material Request",
+				"material_request_type": "Purchase",
+				"company": so.company,
+				"transaction_date": frappe.utils.nowdate(),
+				"items": [
+					{
+						"item_code": item_code,
+						"qty": qty,
+						"warehouse": warehouse,
+						"schedule_date": frappe.utils.nowdate(),
+						"sales_order": so.name,
+						"sales_order_item": sales_order_item,
+					}
+				],
+			}
+		)
+		mr.insert()
+		self.world.track_existing("Material Request", mr.name)
+		if submit:
+			mr.submit()
+		return mr
+
+	# -- Caso 1: stock completo -> Pick List, ningún MR -----------------------
+
+	def test_full_stock_creates_pick_list_and_no_material_request(self):
+		wh, item, customer = self._new_world("MrFull", stock_qty=10)
+		so = self.world.submitted_sales_order(item.name, wh.name, 10, customer.name)
+
+		result = process_sales_order(so.name)
+		self._track_result(result)
+
+		self.assertIsNotNone(result["pick_list"])
+		self.assertEqual(result["purchasing"], {"created": [], "lines_requested": []})
+
+	# -- Caso 2: Purchase shortage parcial -> Pick List + Reporte + MR remanente --
+
+	def test_partial_purchase_shortage_creates_pick_list_report_and_material_request_for_remainder(self):
+		wh, item, customer = self._new_world("MrPartial", stock_qty=3)
+		so = self.world.submitted_sales_order(item.name, wh.name, 8, customer.name)
+
+		result = process_sales_order(so.name)
+		self._track_result(result)
+
+		self.assertEqual(self._pick_list(result["pick_list"]).get("locations")[0].stock_qty, 3.0)
+		self.assertEqual(self._report(result["shortages"]["created"][0]).qty_faltante, 5.0)
+		self.assertEqual(len(result["purchasing"]["created"]), 1)
+		mr = self._mr(result["purchasing"]["created"][0])
+		self.assertEqual(mr.docstatus, 0)
+		self.assertEqual(flt(mr.items[0].qty), 5.0)
+		self.assertEqual(mr.items[0].sales_order, so.name)
+		self.assertEqual(mr.items[0].sales_order_item, so.items[0].name)
+
+	# -- Caso 3: stock cero, Purchase -> Reporte + MR draft ---------------------
+
+	def test_zero_stock_purchase_creates_report_and_material_request(self):
+		wh, item, customer = self._new_world("MrZeroPurchase", stock_qty=None, default_material_request_type="Purchase")
+		so = self.world.submitted_sales_order(item.name, wh.name, 5, customer.name)
+
+		result = process_sales_order(so.name)
+		self._track_result(result)
+
+		self.assertIsNone(result["pick_list"])
+		self.assertEqual(len(result["purchasing"]["created"]), 1)
+		mr = self._mr(result["purchasing"]["created"][0])
+		self.assertEqual(flt(mr.items[0].qty), 5.0)
+
+	# -- Caso 4: Manufacture shortage -> no MR -----------------------------------
+
+	def test_manufacture_shortage_creates_no_material_request(self):
+		wh, item, customer = self._new_world(
+			"MrZeroManufacture", stock_qty=None, default_material_request_type="Manufacture"
+		)
+		raw = self.world.item("FG15-MRZEROMANUFACTURE-RAW")
+		self.world.bom_for(item.name, raw.name)
+		so = self.world.submitted_sales_order(item.name, wh.name, 5, customer.name)
+
+		result = process_sales_order(so.name)
+		self._track_result(result)
+
+		self.assertEqual(result["purchasing"], {"created": [], "lines_requested": []})
+
+	# -- Caso 5: Blocked (Manufacture sin BOM) -> no MR --------------------------
+
+	def test_blocked_route_creates_no_material_request(self):
+		wh, item, customer = self._new_world("MrNoBom", stock_qty=None, default_material_request_type="Manufacture")
+		so = self.world.submitted_sales_order(item.name, wh.name, 5, customer.name)
+
+		result = process_sales_order(so.name)
+		self._track_result(result)
+
+		self.assertEqual(result["purchasing"], {"created": [], "lines_requested": []})
+
+	# -- Caso 6: Sales Order mixta -> MR únicamente para la línea Purchase -------
+
+	def test_mixed_sales_order_material_request_only_for_purchase_route(self):
+		wh = self.world.warehouse("FG15 MrMixed")
+		customer = self.world.customer("FG15 MrMixed Customer")
+		self.world.warehouse_user_permission(self.bodega_user, wh.name)
+
+		item_ready = self.world.item("FG15-MRMIXED-READY", default_material_request_type="Purchase")
+		item_purchase = self.world.item("FG15-MRMIXED-PURCHASE", default_material_request_type="Purchase")
+		item_manufacture = self.world.item("FG15-MRMIXED-MANUFACTURE", default_material_request_type="Manufacture")
+		raw = self.world.item("FG15-MRMIXED-RAW")
+		self.world.bom_for(item_manufacture.name, raw.name)
+
+		self.world.stock_up_real(item_ready.name, wh.name, 10)
+		self.world.stock_up_real(item_purchase.name, wh.name, 3)
+		# item_manufacture: 0 stock
+
+		so = self.world.multi_item_sales_order(
+			customer.name,
+			[
+				{"item_code": item_ready.name, "warehouse": wh.name, "qty": 10, "rate": 100},
+				{"item_code": item_purchase.name, "warehouse": wh.name, "qty": 8, "rate": 100},
+				{"item_code": item_manufacture.name, "warehouse": wh.name, "qty": 20, "rate": 100},
+			],
+		)
+
+		result = process_sales_order(so.name)
+		self._track_result(result)
+
+		self.assertEqual(len(result["purchasing"]["created"]), 1)
+		mr = self._mr(result["purchasing"]["created"][0])
+		self.assertEqual(len(mr.items), 1)
+		self.assertEqual(mr.items[0].item_code, item_purchase.name)
+		self.assertEqual(flt(mr.items[0].qty), 5.0)
+
+	# -- Caso 7 / 14: reprocesar -> ni Pick List ni Reporte ni MR se duplican; idempotente --
+
+	def test_reprocessing_same_sales_order_does_not_duplicate_material_request(self):
+		wh, item, customer = self._new_world("MrTwice", stock_qty=3)
+		so = self.world.submitted_sales_order(item.name, wh.name, 8, customer.name)
+
+		result_1 = process_sales_order(so.name)
+		self._track_result(result_1)
+		result_2 = process_sales_order(so.name)
+
+		self.assertEqual(result_2["purchasing"], {"created": [], "lines_requested": []})
+		self.assertEqual(frappe.db.count("Material Request Item", {"sales_order": so.name}), 1)
+
+	# -- Caso 8: MR draft existente parcial (otro origen) -> solo el remanente ---
+
+	def test_pre_existing_partial_draft_material_request_only_leaves_remainder(self):
+		wh, item, customer = self._new_world("MrPreExisting", stock_qty=2)
+		so = self.world.submitted_sales_order(item.name, wh.name, 10, customer.name)
+		# Real shortage = 10 - 2 = 8. A pre-existing draft already covers 3 --
+		# built before the Sales Order even reaches the orchestrator, so
+		# TestWorld.submitted_sales_order() (which suppresses the hook) has
+		# already run; call the orchestrator manually as this file always does.
+		self._standalone_mr(so, so.items[0].name, item.name, wh.name, 3)
+
+		result = process_sales_order(so.name)
+		self._track_result(result)
+
+		self.assertEqual(len(result["purchasing"]["created"]), 1)
+		mr = self._mr(result["purchasing"]["created"][0])
+		self.assertEqual(flt(mr.items[0].qty), 5.0)  # 8 - 3, not the full 8
+		self.assertEqual(frappe.db.count("Material Request Item", {"sales_order": so.name}), 2)
+
+	# -- Caso 9: MR submitted existente -> no se modifica, solo remanente --------
+
+	def test_submitted_material_request_is_not_modified_by_orchestrator(self):
+		wh, item, customer = self._new_world("MrSubmitted", stock_qty=2)
+		so = self.world.submitted_sales_order(item.name, wh.name, 10, customer.name)
+		submitted_mr = self._standalone_mr(so, so.items[0].name, item.name, wh.name, 3, submit=True)
+
+		result = process_sales_order(so.name)
+		self._track_result(result)
+
+		submitted_mr.reload()
+		self.assertEqual(submitted_mr.docstatus, 1)
+		self.assertEqual(flt(submitted_mr.items[0].qty), 3.0)  # untouched
+
+		mr = self._mr(result["purchasing"]["created"][0])
+		self.assertNotEqual(mr.name, submitted_mr.name)
+		self.assertEqual(flt(mr.items[0].qty), 5.0)  # 8 - 3
+
+	# -- Caso 10: Pick List abierto cubriendo parte -> MR usa el shortage neto real --
+
+	def test_open_pick_list_gives_material_request_the_correct_net_shortage(self):
+		wh, item, customer = self._new_world("MrPickListIntegration", stock_qty=6)
+		so = self.world.submitted_sales_order(item.name, wh.name, 10, customer.name)
+
+		result = process_sales_order(so.name)
+		self._track_result(result)
+
+		pl_qty = flt(self._pick_list(result["pick_list"]).get("locations")[0].stock_qty)
+		mr_qty = flt(self._mr(result["purchasing"]["created"][0]).items[0].qty)
+
+		self.assertEqual(pl_qty, 6.0)
+		self.assertEqual(mr_qty, 4.0)
+		self.assertEqual(pl_qty + mr_qty, 10.0)  # exactly the order's real pending need

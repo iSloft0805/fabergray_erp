@@ -292,7 +292,14 @@ class TestWorld:
 		Orders directly, not through multi_item_sales_order() -- needs to
 		call this too. Safe to query unconditionally right after submit --
 		the Sales Order didn't exist before this same call, so anything
-		linked to it now is new."""
+		linked to it now is new.
+
+		Commit 19.2: the same submit() may now also create a draft Material
+		Request (sync_material_requests_for_sales_order(), Commit 19.1,
+		wired into process_sales_order() this commit) -- tracked here too,
+		same reasoning, so every existing call site of this method across
+		the suite keeps getting correct cleanup without having to be found
+		and edited individually."""
 		for name in frappe.get_all(
 			"Pick List Item", filters={"sales_order": sales_order_name}, pluck="parent", distinct=True
 		):
@@ -300,6 +307,11 @@ class TestWorld:
 
 		for name in frappe.get_all("Reporte de Faltante", filters={"sales_order": sales_order_name}, pluck="name"):
 			self.track_existing("Reporte de Faltante", name)
+
+		for name in frappe.get_all(
+			"Material Request Item", filters={"sales_order": sales_order_name}, pluck="parent", distinct=True
+		):
+			self.track_existing("Material Request", name)
 
 	def pick_list_for(self, sales_order, warehouse):
 		"""Pick List via ERPNext's own Sales Order -> Pick List mapping

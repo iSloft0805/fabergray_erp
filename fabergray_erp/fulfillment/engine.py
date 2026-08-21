@@ -1,31 +1,41 @@
 # -*- coding: utf-8 -*-
 """Commit 15 -- Fulfillment Engine Orchestrator: the single function that
-composes Commits 12/13/14 for one submitted Sales Order.
+composes Commits 12/13/14 for one submitted Sales Order. Commit 19.2 adds
+a fourth step, the Compras-side twin of Commit 14 (Commit 19.1):
 
 process_sales_order(sales_order):
     analyze_sales_order()                        (Commit 12, validation + snapshot)
     -> create_pick_list_for_available_stock()     (Commit 13)
     -> analyze_sales_order() again                (Commit 12, post-Pick-List snapshot)
     -> sync_shortage_reports_for_sales_order()     (Commit 14)
+    -> sync_material_requests_for_sales_order()    (Commit 19.1)
 
 Nothing here is a new formula, a new insert path, or a new idempotency
-mechanism -- it is pure composition of three already-approved, already-
-tested services, in the order that makes their own documented behaviour
-compose correctly (see the module-level docstring of shortage_service.py,
-"Commit 14 -- ... A real interaction with Commit 13" for exactly why this
-order, not the reverse, is required).
+mechanism -- it is pure composition of already-approved, already-tested
+services, in the order that makes their own documented behaviour compose
+correctly (see shortage_service.py's own docstring, "Commit 14 -- ... A
+real interaction with Commit 13", for why Pick List must run before
+shortage sync; see this function's own docstring below, "Commit 19.2 --
+why sync_material_requests runs after sync_shortage_reports, not before",
+for the fourth step's own ordering).
 
-Still creates nothing beyond what Commits 13/14 already create: a Pick
-List, a Reporte de Faltante. No Material Request, Purchase Order, Work
-Order, Production Plan, Delivery Note, or Sales Invoice. Not wired to
-`on_submit`, a hook, or a job -- callable only directly, exactly like its
-three building blocks.
+Still creates nothing beyond what Commits 13/14/19.1 already create: a
+Pick List, a Reporte de Faltante, a draft Material Request. No Purchase
+Order, Supplier, Work Order, Production Plan, Delivery Note, or Sales
+Invoice. Wired to `Sales Order.on_submit` since Commit 16
+(fulfillment/sales_order_hooks.py) -- every step below therefore also
+runs inside whatever session actually submitted the Sales Order (e.g. a
+Vendedora, Commit 18.1), which is why sync_material_requests_for_
+sales_order()'s own one write already uses `ignore_permissions=True`
+(Commit 19.1) -- this orchestrator adds no permission logic of its own,
+it inherits exactly what its four building blocks already enforce.
 """
 
 import frappe
 
 from fabergray_erp.fulfillment.analyzer import analyze_sales_order
 from fabergray_erp.fulfillment.pick_list_service import create_pick_list_for_available_stock
+from fabergray_erp.fulfillment.purchase_service import sync_material_requests_for_sales_order
 from fabergray_erp.fulfillment.shortage_service import sync_shortage_reports_for_sales_order
 
 
@@ -95,7 +105,30 @@ def process_sales_order(sales_order):
     calls could each independently find "no open report yet" for the same
     line and both insert one, before either commit -- a duplicate Reporte
     de Faltante, not a duplicate Pick List. No ad hoc lock was added for
-    either window in this commit.
+    either window in this commit. Commit 19.1's own Material Request
+    idempotency query is a plain read (frappe.qb, no locking) with the
+    same class of residual race as the Reporte de Faltante one above --
+    not newly introduced by this composition, not closed here either,
+    same rationale.
+
+    Commit 19.2 -- why sync_material_requests_for_sales_order() runs
+    after sync_shortage_reports_for_sales_order(), not before (confirmed,
+    not assumed, before wiring this in): the two services do not read
+    each other's writes at all -- sync_shortage_reports_for_sales_order()
+    never queries Material Request, and sync_material_requests_for_
+    sales_order() never queries Reporte de Faltante. Both independently
+    call analyze_sales_order() themselves and both independently apply
+    the exact same already-claimed-by-open-Pick-List correction (Commit
+    14's formula, reused by both, not duplicated by either) to the same
+    Pick List state left by create_pick_list_for_available_stock() above
+    -- so their order relative to EACH OTHER has no effect on either
+    one's correctness; there is no technical reason to invert them. The
+    order below matches the approved sequence: the operational
+    representation of the shortage (Reporte de Faltante, what Bodega/Jefe
+    de Bodega already see) is kept in sync first, and only then is the
+    Purchase-side need materialized into a Material Request -- both
+    consuming the identical net shortage number, computed independently
+    by each service from the same underlying facts.
 
     Returns:
         {
@@ -103,6 +136,7 @@ def process_sales_order(sales_order):
             "pick_list": "STO-PICK-..." or None,
             "analysis": {...},        # analyze_sales_order()'s own shape, post-Pick-List
             "shortages": {"created": [...], "updated": [...], "resolved": [...], "blocked": [...]},
+            "purchasing": {"created": [...], "lines_requested": [...]},  # purchase_service.py's own shape, Commit 19.1 -- unmodified
             "status": "processed",
         }
     """
@@ -113,15 +147,17 @@ def process_sales_order(sales_order):
     pick_list = create_pick_list_for_available_stock(so)
 
     analysis = analyze_sales_order(so)  # re-read: reflects create_pick_list_for_available_stock()'s
-    # own claim, so this snapshot and the shortage sync below describe the
+    # own claim, so this snapshot and the two syncs below describe the
     # same, post-Pick-List moment.
 
     shortages = sync_shortage_reports_for_sales_order(so)
+    purchasing = sync_material_requests_for_sales_order(so)
 
     return {
         "sales_order": so.name,
         "pick_list": pick_list.name if pick_list else None,
         "analysis": analysis,
         "shortages": shortages,
+        "purchasing": purchasing,
         "status": "processed",
     }
