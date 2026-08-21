@@ -14,14 +14,15 @@ frappe.pages["ventas"].on_page_load = function (wrapper) {
 
 // All server communication in this file goes through fabergray_erp.api.ventas.* --
 // nothing here computes pricing, calls the Fulfillment Engine directly, or reads/
-// writes Pick List/Reporte de Faltante (Vendedora has no permission on either,
-// Commit 18.1). Commit 18.3/18.4 render exactly what those seven endpoints
-// return -- no economic field (rate/price_list_rate/discount/amount/taxes/
-// grand_total or any equivalent) is ever read from a server response or
-// constructed here. The only payload this file ever sends to
-// create_and_submit_sales_order() is built by build_order_payload() below,
-// which is the single place a request body is assembled -- read that
-// function before touching anything related to "Nuevo pedido".
+// writes Pick List/Reporte de Faltante/Material Request (Vendedora has no
+// permission on any of those, Commit 18.1). Commit 18.3/18.4/18.5 render exactly
+// what those eleven endpoints return -- no economic field (rate/price_list_rate/
+// discount/amount/taxes/grand_total or any equivalent) is ever read from a server
+// response or constructed here. The only payload this file ever sends to
+// create_and_submit_sales_order()/update_draft_sales_order() is built by
+// build_order_payload() below, which is the single place a request body is
+// assembled -- read that function before touching anything related to "Nuevo
+// pedido"/"Editar pedido".
 fabergray_erp.Ventas = class Ventas {
 	constructor(page) {
 		this.page = page;
@@ -49,10 +50,12 @@ fabergray_erp.Ventas = class Ventas {
 
 	blank_nuevo_pedido_state() {
 		return {
+			editing_order_name: null, // Commit 18.5: null -> "Nuevo pedido"; a Sales Order name -> "Editar pedido"
 			customer: null, // {name, customer_name}
 			cart: new Map(), // item_code -> {item_code, item_name, description, stock_uom, image, qty_disponible, qty}
 			customer_results: [],
 			item_results: [],
+			observations: "",
 		};
 	}
 
@@ -232,8 +235,46 @@ fabergray_erp.Ventas = class Ventas {
 					<span>${format_qty(o.total_qty)} ${__("unidades")}</span>
 				</div>
 				${obs}
-				<button type="button" class="fg-order-card-view" data-order-name="${frappe.utils.escape_html(o.name)}">
-					${__("VER PEDIDO")} ${icon("chevron-right", "fg-icon-sm")}
+				${this.render_order_card_actions(o)}
+			</div>
+		`;
+	}
+
+	// Commit 18.5: Draft -> VER/EDITAR/ELIMINAR; Cancelled -> VER only;
+	// anything else (an active, submitted order) -> VER/CANCELAR PEDIDO.
+	// `o.status` is the native Sales Order.status string already returned
+	// by get_my_orders() -- no new field needed to tell these apart.
+	render_order_card_actions(o) {
+		const name_attr = `data-order-name="${frappe.utils.escape_html(o.name)}"`;
+		const view_btn = `
+			<button type="button" class="fg-order-card-action fg-order-card-view" ${name_attr}>
+				${icon("eye", "fg-icon-sm")} ${__("VER")}
+			</button>
+		`;
+
+		if (o.status === "Draft") {
+			return `
+				<div class="fg-order-card-actions">
+					${view_btn}
+					<button type="button" class="fg-order-card-action fg-order-card-edit" ${name_attr}>
+						${icon("pencil", "fg-icon-sm")} ${__("EDITAR")}
+					</button>
+					<button type="button" class="fg-order-card-action fg-order-card-action--danger fg-order-card-delete" ${name_attr}>
+						${icon("trash-2", "fg-icon-sm")} ${__("ELIMINAR")}
+					</button>
+				</div>
+			`;
+		}
+
+		if (o.status === "Cancelled") {
+			return `<div class="fg-order-card-actions">${view_btn}</div>`;
+		}
+
+		return `
+			<div class="fg-order-card-actions">
+				${view_btn}
+				<button type="button" class="fg-order-card-action fg-order-card-action--danger fg-order-card-cancel" ${name_attr}>
+					${icon("x", "fg-icon-sm")} ${__("CANCELAR PEDIDO")}
 				</button>
 			</div>
 		`;
@@ -266,6 +307,55 @@ fabergray_erp.Ventas = class Ventas {
 		this.$body.find(".fg-order-card-view").on("click", (e) => {
 			this.open_order_detail($(e.currentTarget).data("order-name"));
 		});
+		this.$body.find(".fg-order-card-edit").on("click", (e) => {
+			this.open_edit_pedido($(e.currentTarget).data("order-name"));
+		});
+		this.$body.find(".fg-order-card-delete").on("click", (e) => {
+			this.confirm_delete_draft($(e.currentTarget).data("order-name"));
+		});
+		this.$body.find(".fg-order-card-cancel").on("click", (e) => {
+			this.confirm_cancel_order($(e.currentTarget).data("order-name"));
+		});
+	}
+
+	// =====================================================================
+	// Eliminar Draft / Cancelar Submitted (Commit 18.5)
+	// =====================================================================
+	confirm_delete_draft(name) {
+		if (!name) return;
+		frappe.confirm(__("¿Eliminar este borrador?"), () => {
+			this.call("delete_draft_sales_order", { name: name })
+				.then(() => {
+					frappe.show_alert({ message: __("Borrador eliminado."), indicator: "green" }, 5);
+					this.load_dashboard();
+				})
+				.catch(() => {
+					// the server's own frappe.call error dialog already showed the
+					// real validation/permission error -- nothing more to do here.
+				});
+		});
+	}
+
+	confirm_cancel_order(name) {
+		if (!name) return;
+		frappe.confirm(
+			__(
+				"¿Cancelar este pedido? Esta acción retirará el pedido del flujo operativo cuando sea permitido por ERPNext."
+			),
+			() => {
+				this.call("cancel_sales_order", { name: name })
+					.then(() => {
+						frappe.show_alert({ message: __("Pedido cancelado."), indicator: "green" }, 5);
+						this.load_dashboard();
+					})
+					.catch(() => {
+						// Native ERPNext blocks (submitted Pick List/Material Request/
+						// Purchase Order still linked, etc.) surface here via the
+						// server's own real error message -- never swallowed, never
+						// bypassed, no manual cleanup attempted client-side.
+					});
+			}
+		);
 	}
 
 	// =====================================================================
@@ -364,15 +454,46 @@ fabergray_erp.Ventas = class Ventas {
 		this.render_nuevo_pedido();
 	}
 
+	// Commit 18.5: reuses the exact same "Nuevo pedido" screen, prefilled
+	// via get_editable_order() (server already enforces docstatus==0 --
+	// only a Draft can ever reach this). Never submits on save -- see
+	// save_draft_edit()/confirm_order() below.
+	open_edit_pedido(name) {
+		if (!name) return;
+		this.np = this.blank_nuevo_pedido_state();
+		this._item_info_cache = new Map();
+		this.state.view = "nuevo_pedido";
+		this.set_busy(true);
+
+		this.call("get_editable_order", { name: name })
+			.then((detail) => {
+				this.np.editing_order_name = detail.name;
+				this.np.customer = { name: detail.customer, customer_name: detail.customer_name };
+				this.np.observations = detail.observations || "";
+				for (const item of detail.items || []) {
+					this.np.cart.set(item.item_code, {
+						item_code: item.item_code,
+						item_name: item.item_name,
+						stock_uom: item.stock_uom,
+						qty: item.qty,
+					});
+				}
+				this.render_nuevo_pedido();
+			})
+			.catch(() => this.back_to_dashboard())
+			.finally(() => this.set_busy(false));
+	}
+
 	back_to_dashboard() {
 		this.load_dashboard();
 	}
 
 	render_nuevo_pedido() {
+		const editing = !!this.np.editing_order_name;
 		this.$body.html(`
 			<div class="fg-np-header">
 				<button type="button" class="fg-np-back">${icon("arrow-left")} ${__("Volver")}</button>
-				<div class="fg-np-title">${__("Nuevo pedido")}</div>
+				<div class="fg-np-title">${editing ? __("Editar pedido") : __("Nuevo pedido")}</div>
 			</div>
 
 			<div class="fg-np-section">
@@ -710,7 +831,7 @@ fabergray_erp.Ventas = class Ventas {
 				)}">${frappe.utils.escape_html(this.np.observations || "")}</textarea>
 			</div>
 			<button type="button" class="fg-btn fg-btn--solid-primary fg-btn--lg fg-confirm-btn" disabled>
-				${icon("check")} ${__("CONFIRMAR PEDIDO")}
+				${icon("check")} ${this.np.editing_order_name ? __("GUARDAR CAMBIOS") : __("CONFIRMAR PEDIDO")}
 			</button>
 		`);
 
@@ -790,6 +911,15 @@ fabergray_erp.Ventas = class Ventas {
 			return;
 		}
 
+		if (this.np.editing_order_name) {
+			// Commit 18.5: "GUARDAR CAMBIOS" never submits -- straight to
+			// update_draft_sales_order(), no confirmation dialog (matches
+			// ordinary "save" conventions; ELIMINAR/CANCELAR are the two
+			// destructive actions that get an explicit confirm instead).
+			this.save_draft_edit(payload);
+			return;
+		}
+
 		this.busy = true;
 		const $btn = this.$body.find(".fg-confirm-btn").prop("disabled", true).addClass("fg-btn--loading");
 
@@ -825,6 +955,39 @@ fabergray_erp.Ventas = class Ventas {
 				$btn.prop("disabled", false).removeClass("fg-btn--loading");
 			}
 		);
+	}
+
+	save_draft_edit(payload) {
+		this.busy = true;
+		const $btn = this.$body.find(".fg-confirm-btn").prop("disabled", true).addClass("fg-btn--loading");
+
+		this.call("update_draft_sales_order", {
+			name: this.np.editing_order_name,
+			customer: payload.customer,
+			items: payload.items,
+			observations: payload.observations,
+		})
+			.then((result) => {
+				frappe.show_alert(
+					{
+						message: `${icon("check", "fg-icon-sm")} ${__("Cambios guardados")} — #${frappe.utils.escape_html(
+							result.name
+						)}`,
+						indicator: "green",
+					},
+					5
+				);
+				this.back_to_dashboard();
+			})
+			.catch(() => {
+				// same reasoning as confirm_order()'s own .catch() -- the server's
+				// default error dialog already showed the real message.
+			})
+			.finally(() => {
+				this.busy = false;
+				$btn.prop("disabled", false).removeClass("fg-btn--loading");
+				this.refresh_confirm_state();
+			});
 	}
 };
 

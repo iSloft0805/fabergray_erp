@@ -97,6 +97,17 @@ def _dotted_calls_in(module) -> list[str]:
 	return collector.dotted_calls
 
 
+def _dotted_calls_in_tree(tree) -> list[str]:
+	"""Same as `_dotted_calls_in()` above, but for an already-parsed AST
+	(e.g. of a single function's source, via `ast.parse(inspect.getsource(fn))`)
+	rather than a whole module -- Commit 18.5's guardrail checks individual
+	`api/ventas.py` functions, not the whole module, so it needs this
+	narrower entry point."""
+	collector = _CallCollector()
+	collector.visit(tree)
+	return collector.dotted_calls
+
+
 class TestStaticGuardrails(IntegrationTestCase):
 	"""No Pick List/Reporte de Faltante data needed -- these read source code."""
 
@@ -250,6 +261,100 @@ class TestStaticGuardrails(IntegrationTestCase):
 			f"get_order_detail() returns unexpected key(s): {found_keys - allowed_keys}",
 		)
 		self.assertFalse(economic_keys & found_keys)
+
+	def test_commit_18_5_endpoints_never_leak_economic_data_or_bypass_permissions(self):
+		"""Commit 18.5 guardrail: get_editable_order()/update_draft_sales_
+		order()/delete_draft_sales_order()/cancel_sales_order() must never
+		return an economic field and must never gain a bypass (no
+		`.as_dict()`, no hardcoded `ignore_permissions=True`, no
+		`frappe.get_all`, no `frappe.set_user`) -- checked statically so a
+		future edit that starts forwarding `rate`/`amount`/`grand_total`/
+		etc., or that reaches for a bypass, fails here immediately, before
+		any behavioural test would catch it. `test_ventas_api_never_calls_
+		get_all_or_set_user`/`test_no_interactive_api_can_enable_
+		fulfillment_bypass` already scan the whole `ventas` module
+		(these four functions included) for `get_all`/`set_user`/
+		`ignore_permissions=True`/`via_fulfillment_engine=True` -- this
+		test adds the return-shape/`.as_dict()` check those two do not
+		cover, and re-confirms the bypass check narrowly scoped to just
+		these four functions for a precise failure message.
+		"""
+		economic_keys = {
+			"rate",
+			"price_list_rate",
+			"amount",
+			"net_rate",
+			"net_amount",
+			"base_rate",
+			"base_amount",
+			"total",
+			"grand_total",
+			"net_total",
+			"base_grand_total",
+			"base_net_total",
+			"discount_percentage",
+			"discount_amount",
+			"taxes",
+			"margin_rate_or_amount",
+		}
+		# get_editable_order() returns get_order_detail()'s own dict verbatim
+		# (already covered by the guardrail above) -- its own body has no
+		# dict literal of its own, only "name"/"status" pass through docstatus
+		# checks below, so it is included here only for the bypass half of
+		# this test, not the key-allowlist half.
+		functions_with_own_return_dict = [ventas.update_draft_sales_order, ventas.delete_draft_sales_order, ventas.cancel_sales_order]
+		all_four = [ventas.get_editable_order] + functions_with_own_return_dict
+
+		for fn in all_four:
+			source = inspect.getsource(fn)
+			tree = ast.parse(source)
+
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Attribute) and node.attr == "as_dict":
+					self.fail(f"{fn.__name__}() must never call .as_dict() -- builds/forwards a safe dict only")
+
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Call):
+					for kw in node.keywords:
+						if kw.arg == "ignore_permissions" and _is_true_literal(kw.value):
+							self.fail(f"{fn.__name__}() must never hardcode ignore_permissions=True")
+						if kw.arg == "via_fulfillment_engine" and _is_true_literal(kw.value):
+							self.fail(f"{fn.__name__}() must never pass via_fulfillment_engine=True")
+
+			calls = _dotted_calls_in_tree(tree)
+			self.assertNotIn("frappe.get_all", calls, f"{fn.__name__}() must never call frappe.get_all")
+			self.assertNotIn("frappe.set_user", calls, f"{fn.__name__}() must never call frappe.set_user")
+
+		for fn in functions_with_own_return_dict:
+			tree = ast.parse(inspect.getsource(fn))
+			found_keys = set()
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Dict):
+					for key in node.keys:
+						if isinstance(key, ast.Constant) and isinstance(key.value, str):
+							found_keys.add(key.value)
+			self.assertTrue(found_keys, f"expected at least one dict literal key in {fn.__name__}()")
+			self.assertFalse(
+				economic_keys & found_keys, f"{fn.__name__}() returns economic key(s): {economic_keys & found_keys}"
+			)
+
+		# cancel_sales_order() must trigger cleanup only via so.cancel()'s own
+		# hooks -- never by calling a Fulfillment Engine internal directly
+		# (the same standing rule create_and_submit_sales_order() already
+		# follows for submit -- Commit 16's "don't call the Engine directly
+		# if submit/cancel already does").
+		cancel_calls = _dotted_calls_in_tree(ast.parse(inspect.getsource(ventas.cancel_sales_order)))
+		for forbidden in (
+			"process_sales_order",
+			"sync_shortage_reports_for_sales_order",
+			"sync_material_requests_for_sales_order",
+			"cleanup_fulfillment_for_cancelled_sales_order",
+		):
+			self.assertNotIn(
+				forbidden,
+				cancel_calls,
+				f"cancel_sales_order() must not call {forbidden}() directly -- so.cancel()'s own hooks must do it",
+			)
 
 	def test_finish_picking_uses_native_submit_not_a_manual_docstatus_flip(self):
 		source = inspect.getsource(bodega.finish_picking)

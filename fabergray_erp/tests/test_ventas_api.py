@@ -507,3 +507,282 @@ class TestVentasApi(IntegrationTestCase):
 			self.assertEqual(
 				frappe.get_list("Sales Order", filters={"name": result["name"]}, pluck="name"), []
 			)
+
+	# =====================================================================
+	# Commit 18.5 -- get_editable_order / update_draft_sales_order /
+	# delete_draft_sales_order / cancel_sales_order
+	# =====================================================================
+
+	def _draft_so(self, vendedora, item=None, qty=5, customer=None):
+		"""A plain Draft Sales Order built directly as `vendedora` herself
+		(her own real create=1/if_owner=1 permission, Commit 18.1) --
+		never through create_and_submit_sales_order(), which always
+		submits. Mirrors exactly what that function builds, minus the
+		final .submit() call."""
+		item = item or self.item
+		customer = customer or self.customer
+		delivery_date = frappe.utils.add_days(frappe.utils.nowdate(), 7)
+		with fx.as_user(vendedora):
+			so = frappe.get_doc(
+				{
+					"doctype": "Sales Order",
+					"customer": customer.name,
+					"company": frappe.defaults.get_global_default("company"),
+					"transaction_date": frappe.utils.nowdate(),
+					"delivery_date": delivery_date,
+					"set_warehouse": self.wh.name,
+					"items": [
+						{
+							"item_code": item.name,
+							"warehouse": self.wh.name,
+							"qty": qty,
+							"delivery_date": delivery_date,
+						}
+					],
+				}
+			)
+			so.insert()
+		self.world.track_existing("Sales Order", so.name)
+		return so
+
+	# -- get_editable_order / update_draft_sales_order -----------------------
+
+	def test_vendedora_can_edit_her_own_draft(self):
+		other_customer = self.world.customer("FG18-5 Other Customer")
+		other_item = self.world.item("FG18-5-OTHER-ITEM", default_warehouse=self.wh.name)
+		so = self._draft_so(self.vendedora_a)
+
+		with fx.as_user(self.vendedora_a):
+			editable = ventas.get_editable_order(so.name)
+			self.assertEqual(editable["name"], so.name)
+
+			result = ventas.update_draft_sales_order(
+				name=so.name,
+				customer=other_customer.name,
+				items=[{"item_code": other_item.name, "qty": 9}],
+				observations="Pedido editado",
+			)
+		self.assertEqual(result["name"], so.name)
+
+		so.reload()
+		self.assertEqual(so.docstatus, 0)
+		self.assertEqual(so.customer, other_customer.name)
+		self.assertEqual(len(so.items), 1)
+		self.assertEqual(so.items[0].item_code, other_item.name)
+		self.assertEqual(so.items[0].qty, 9)
+		self.assertEqual(so.fg_observations, "Pedido editado")
+
+	def test_another_vendedora_cannot_edit_it(self):
+		so = self._draft_so(self.vendedora_a)
+
+		with fx.as_user(self.vendedora_b):
+			with self.assertRaises(frappe.PermissionError):
+				ventas.get_editable_order(so.name)
+			with self.assertRaises(frappe.PermissionError):
+				ventas.update_draft_sales_order(
+					name=so.name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
+				)
+
+	def test_editing_a_submitted_order_fails(self):
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.ValidationError):
+				ventas.get_editable_order(result["name"])
+			with self.assertRaises(frappe.ValidationError):
+				ventas.update_draft_sales_order(
+					name=result["name"], customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 2}]
+				)
+
+	def test_injecting_rate_fails_on_update(self):
+		so = self._draft_so(self.vendedora_a)
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.ValidationError):
+				ventas.update_draft_sales_order(
+					name=so.name,
+					customer=self.customer.name,
+					items=[{"item_code": self.item.name, "qty": 1, "rate": 999}],
+				)
+
+	def test_injecting_amount_and_discount_fails_on_update(self):
+		so = self._draft_so(self.vendedora_a)
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.ValidationError):
+				ventas.update_draft_sales_order(
+					name=so.name,
+					customer=self.customer.name,
+					items=[{"item_code": self.item.name, "qty": 1, "amount": 500}],
+				)
+			with self.assertRaises(frappe.ValidationError):
+				ventas.update_draft_sales_order(
+					name=so.name,
+					customer=self.customer.name,
+					items=[{"item_code": self.item.name, "qty": 1, "discount_percentage": 20}],
+				)
+
+	# -- delete_draft_sales_order ---------------------------------------------
+
+	def test_vendedora_can_delete_her_own_draft(self):
+		so = self._draft_so(self.vendedora_a)
+		with fx.as_user(self.vendedora_a):
+			result = ventas.delete_draft_sales_order(so.name)
+		self.assertEqual(result["name"], so.name)
+		self.assertFalse(frappe.db.exists("Sales Order", so.name))
+
+	def test_another_vendedora_cannot_delete_it(self):
+		so = self._draft_so(self.vendedora_a)
+		with fx.as_user(self.vendedora_b):
+			with self.assertRaises(frappe.PermissionError):
+				ventas.delete_draft_sales_order(so.name)
+		self.assertTrue(frappe.db.exists("Sales Order", so.name))
+
+	def test_submitted_order_cannot_be_deleted(self):
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.ValidationError):
+				ventas.delete_draft_sales_order(result["name"])
+		self.assertTrue(frappe.db.exists("Sales Order", result["name"]))
+
+	# -- cancel_sales_order ----------------------------------------------------
+
+	def test_vendedora_can_cancel_her_own_submitted_order_when_erpnext_allows(self):
+		wh = self.world.warehouse("FG18-5 Cancel OK")
+		item = self.world.item("FG18-5-CANCEL-OK-ITEM", default_warehouse=wh.name)
+		self.world.stock_up_real(item.name, wh.name, 10)
+
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name, items=[{"item_code": item.name, "qty": 10}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		with fx.as_user(self.vendedora_a):
+			cancel_result = ventas.cancel_sales_order(result["name"])
+		self.assertEqual(cancel_result["name"], result["name"])
+		self.assertEqual(frappe.db.get_value("Sales Order", result["name"], "docstatus"), 2)
+
+	def test_another_vendedora_cannot_cancel_it(self):
+		wh = self.world.warehouse("FG18-5 Cancel Blocked Other")
+		item = self.world.item("FG18-5-CANCEL-BLOCKED-OTHER-ITEM", default_warehouse=wh.name)
+		self.world.stock_up_real(item.name, wh.name, 10)
+
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name, items=[{"item_code": item.name, "qty": 10}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		with fx.as_user(self.vendedora_b):
+			with self.assertRaises(frappe.PermissionError):
+				ventas.cancel_sales_order(result["name"])
+		self.assertEqual(frappe.db.get_value("Sales Order", result["name"], "docstatus"), 1)
+
+	def test_cancel_triggers_real_cleanup(self):
+		wh = self.world.warehouse("FG18-5 Cleanup")
+		item = self.world.item(
+			"FG18-5-CLEANUP-ITEM", default_material_request_type="Purchase", default_warehouse=wh.name
+		)
+		self.world.stock_up_real(item.name, wh.name, 3)
+
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name, items=[{"item_code": item.name, "qty": 8}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		pick_list_name = frappe.get_all(
+			"Pick List Item", filters={"sales_order": result["name"], "docstatus": ["!=", 2]}, pluck="parent", distinct=True
+		)[0]
+		report_name = frappe.get_all("Reporte de Faltante", filters={"sales_order": result["name"]}, pluck="name")[0]
+
+		with fx.as_user(self.vendedora_a):
+			ventas.cancel_sales_order(result["name"])
+
+		self.assertFalse(frappe.db.exists("Pick List", pick_list_name))  # Commit 17 cleanup, draft removed
+		self.assertEqual(frappe.get_doc("Reporte de Faltante", report_name).status, "Resuelto")
+
+	def test_cancellation_blocked_by_submitted_document_preserves_native_block(self):
+		from fabergray_erp.api import bodega
+
+		wh = self.world.warehouse("FG18-5 Cancel Blocked PL")
+		item = self.world.item("FG18-5-CANCEL-BLOCKED-PL-ITEM", default_warehouse=wh.name)
+		self.world.stock_up_real(item.name, wh.name, 10)
+		bodega_user = self.world.user("fg18-5-bodega@example.com", ["Bodega"])
+		self.world.warehouse_user_permission(bodega_user, wh.name)
+
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name, items=[{"item_code": item.name, "qty": 10}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		pl_name = frappe.get_all(
+			"Pick List Item", filters={"sales_order": result["name"], "docstatus": ["!=", 2]}, pluck="parent", distinct=True
+		)[0]
+		with fx.as_user(bodega_user):
+			bodega.start_picking(pl_name)
+			row = bodega.get_pick_list(pl_name)["rows"][0]
+			bodega.set_picked_qty(pl_name, row["row_name"], row["qty_solicitada"])
+			bodega.finish_picking(pl_name)  # submits the Pick List
+		frappe.db.commit()  # fixtures + submitted Pick List survive the rollback below
+
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.LinkExistsError):
+				ventas.cancel_sales_order(result["name"])
+
+		# Same finding Commit 17 already documented: ERPNext's back-link
+		# check runs AFTER on_cancel, so docstatus=2 is already written to
+		# this same, still-open transaction by the time the error fires --
+		# roll back explicitly (simulating what a real request's error
+		# handler does) before inspecting state.
+		frappe.db.rollback()
+
+		self.assertEqual(frappe.db.get_value("Sales Order", result["name"], "docstatus"), 1)
+		self.assertEqual(frappe.db.get_value("Pick List", pl_name, "docstatus"), 1)  # untouched, still submitted
+
+	# -- Cancelled queda solo lectura ------------------------------------------
+
+	def test_cancelled_order_is_read_only(self):
+		wh = self.world.warehouse("FG18-5 ReadOnly")
+		item = self.world.item("FG18-5-READONLY-ITEM", default_warehouse=wh.name)
+		self.world.stock_up_real(item.name, wh.name, 10)
+
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name, items=[{"item_code": item.name, "qty": 10}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		with fx.as_user(self.vendedora_a):
+			ventas.cancel_sales_order(result["name"])
+
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.ValidationError):
+				ventas.update_draft_sales_order(
+					name=result["name"], customer=self.customer.name, items=[{"item_code": item.name, "qty": 1}]
+				)
+			with self.assertRaises(frappe.ValidationError):
+				ventas.delete_draft_sales_order(result["name"])
+			with self.assertRaises(frappe.ValidationError):
+				ventas.cancel_sales_order(result["name"])
+
+		# VER (get_order_detail) still works -- read-only access is preserved.
+		with fx.as_user(self.vendedora_a):
+			detail = ventas.get_order_detail(result["name"])
+		self.assertEqual(detail["status"], "Cancelled")

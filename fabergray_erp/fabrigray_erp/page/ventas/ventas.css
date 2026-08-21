@@ -203,23 +203,59 @@
 }
 
 /* ------------------------------------------------------------------ */
-/* "VER PEDIDO ->" action (Commit 18.4)                                 */
+/* Order card actions -- VER / EDITAR / ELIMINAR / CANCELAR PEDIDO      */
+/* (Commit 18.4's single "VER PEDIDO ->" link became a row of real,     */
+/* per-status actions in Commit 18.5).                                  */
 /* ------------------------------------------------------------------ */
-.fg-ventas .fg-order-card-view {
+.fg-ventas .fg-order-card-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 4px;
+}
+
+.fg-ventas .fg-order-card-action {
 	appearance: none;
-	align-self: flex-start;
-	margin: -8px -4px -6px;
-	background: transparent;
-	border: none;
-	padding: 8px 4px 6px;
+	flex: 1 1 auto;
 	min-height: 44px;
-	font-size: 0.8rem;
+	padding: 0 14px;
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	font-size: 0.78rem;
 	font-weight: 700;
-	color: var(--fg-primary);
+	letter-spacing: 0.01em;
 	display: inline-flex;
 	align-items: center;
-	gap: 4px;
+	justify-content: center;
+	gap: 6px;
 	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition);
+	white-space: nowrap;
+}
+
+.fg-ventas .fg-order-card-action:hover {
+	background: var(--fg-bg);
+}
+
+.fg-ventas .fg-order-card-view {
+	color: var(--fg-primary);
+	border-color: var(--fg-primary-tint);
+	background: var(--fg-primary-tint);
+}
+
+.fg-ventas .fg-order-card-view:hover {
+	background: #d9e9fc;
+}
+
+.fg-ventas .fg-order-card-action--danger {
+	color: var(--fg-danger);
+	border-color: var(--fg-danger-tint);
+}
+
+.fg-ventas .fg-order-card-action--danger:hover {
+	background: var(--fg-danger-tint);
 }
 
 .fg-ventas .fg-order-card-view:hover {

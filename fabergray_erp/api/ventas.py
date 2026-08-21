@@ -54,6 +54,67 @@ DEFAULT_DELIVERY_LEAD_DAYS = 7
 _ALLOWED_ITEM_FIELDS = {"item_code", "qty"}
 
 
+def _validate_and_build_item_rows(items, company, delivery_date):
+    """The one place a Sales Order Item row list is built from
+    client-supplied data -- shared by `create_and_submit_sales_order()`
+    and `update_draft_sales_order()` (Commit 18.5), extracted so both
+    entry points that accept an `items` payload from Vendedora enforce
+    the exact same allowlist/validation, never two parallel copies of
+    the same security boundary. Behavior is byte-for-byte identical to
+    what `create_and_submit_sales_order()` already had since Commit 18.2
+    -- this refactor changes nothing about what is accepted or rejected,
+    only where the code lives.
+
+    Rejects any line carrying a key outside `_ALLOWED_ITEM_FIELDS`
+    (`rate`, `price_list_rate`, `discount_percentage`, `discount_amount`,
+    `amount`, `net_rate`, `net_amount`, `margin_rate_or_amount`,
+    `margin_type`, or anything else, present or future) -- never
+    silently dropped. Warehouse is resolved server-side per item
+    (`_default_warehouse_for_item()`); `delivery_date` is the caller's
+    single, already-resolved value, applied uniformly to every line.
+    """
+    items = frappe.parse_json(items) if isinstance(items, str) else items
+    if not items:
+        frappe.throw(_("El pedido debe tener al menos un producto."))
+
+    so_items = []
+    for row in items:
+        if not isinstance(row, dict):
+            frappe.throw(_("Formato de línea de pedido inválido."))
+
+        disallowed = set(row.keys()) - _ALLOWED_ITEM_FIELDS
+        if disallowed:
+            frappe.throw(
+                _("Campos no permitidos en la línea del pedido: {0}").format(", ".join(sorted(disallowed)))
+            )
+
+        if "item_code" not in row or "qty" not in row:
+            frappe.throw(_("Cada línea del pedido debe incluir item_code y qty."))
+
+        item_code = row["item_code"]
+        qty = flt(row["qty"])
+
+        if not frappe.db.exists("Item", item_code):
+            frappe.throw(_("El producto {0} no existe.").format(item_code))
+        if qty <= 0:
+            frappe.throw(_("La cantidad debe ser mayor a cero para {0}.").format(item_code))
+
+        warehouse = _default_warehouse_for_item(item_code, company)
+        if not warehouse:
+            frappe.throw(_("El producto {0} no tiene una bodega por defecto configurada.").format(item_code))
+
+        so_items.append(
+            {
+                "item_code": item_code,
+                "qty": qty,
+                "warehouse": warehouse,
+                "delivery_date": delivery_date,
+            }
+        )
+
+    return so_items
+
+
 def _default_warehouse_for_item(item_code, company):
     """The one place `create_and_submit_sales_order()` and `get_item_info()`
     both resolve which warehouse a line uses -- Vendedora never picks one
@@ -308,14 +369,17 @@ def create_and_submit_sales_order(customer, items, observations=None):
 
     Security (Commit 18's approved design, verified here, not just
     documented): each line is checked against an explicit allowlist
-    (`_ALLOWED_ITEM_FIELDS = {"item_code", "qty"}`) -- any other key
-    (`rate`, `price_list_rate`, `discount_percentage`, `discount_amount`,
-    `amount`, `net_rate`, `net_amount`, `margin_rate_or_amount`,
-    `margin_type`, or anything else, present or future) makes this
-    function raise immediately, before any Sales Order is even
-    constructed -- never silently dropped. The Sales Order Item rows
-    built from the surviving fields carry `item_code`/`qty`/`warehouse`/
-    `delivery_date` only; ERPNext's own `AccountsController.validate()`
+    (`_ALLOWED_ITEM_FIELDS = {"item_code", "qty"}`) via
+    `_validate_and_build_item_rows()` (extracted in Commit 18.5, shared
+    verbatim with `update_draft_sales_order()` -- one security boundary,
+    not two) -- any other key (`rate`, `price_list_rate`,
+    `discount_percentage`, `discount_amount`, `amount`, `net_rate`,
+    `net_amount`, `margin_rate_or_amount`, `margin_type`, or anything
+    else, present or future) makes this function raise immediately,
+    before any Sales Order is even constructed -- never silently
+    dropped. The Sales Order Item rows built from the surviving fields
+    carry `item_code`/`qty`/`warehouse`/`delivery_date` only; ERPNext's
+    own `AccountsController.validate()`
     (`set_missing_values()` then `calculate_taxes_and_totals()`) resolves
     every price/discount/tax field itself, unconditionally, the moment
     `.insert()` runs -- there is no pricing logic in this function to
@@ -349,47 +413,9 @@ def create_and_submit_sales_order(customer, items, observations=None):
     _require_login()
     frappe.has_permission("Sales Order", "create", throw=True)
 
-    items = frappe.parse_json(items) if isinstance(items, str) else items
-    if not items:
-        frappe.throw(_("El pedido debe tener al menos un producto."))
-
     company = frappe.defaults.get_global_default("company")
     delivery_date = add_days(nowdate(), DEFAULT_DELIVERY_LEAD_DAYS)
-
-    so_items = []
-    for row in items:
-        if not isinstance(row, dict):
-            frappe.throw(_("Formato de línea de pedido inválido."))
-
-        disallowed = set(row.keys()) - _ALLOWED_ITEM_FIELDS
-        if disallowed:
-            frappe.throw(
-                _("Campos no permitidos en la línea del pedido: {0}").format(", ".join(sorted(disallowed)))
-            )
-
-        if "item_code" not in row or "qty" not in row:
-            frappe.throw(_("Cada línea del pedido debe incluir item_code y qty."))
-
-        item_code = row["item_code"]
-        qty = flt(row["qty"])
-
-        if not frappe.db.exists("Item", item_code):
-            frappe.throw(_("El producto {0} no existe.").format(item_code))
-        if qty <= 0:
-            frappe.throw(_("La cantidad debe ser mayor a cero para {0}.").format(item_code))
-
-        warehouse = _default_warehouse_for_item(item_code, company)
-        if not warehouse:
-            frappe.throw(_("El producto {0} no tiene una bodega por defecto configurada.").format(item_code))
-
-        so_items.append(
-            {
-                "item_code": item_code,
-                "qty": qty,
-                "warehouse": warehouse,
-                "delivery_date": delivery_date,
-            }
-        )
+    so_items = _validate_and_build_item_rows(items, company, delivery_date)
 
     so = frappe.get_doc(
         {
@@ -409,3 +435,147 @@ def create_and_submit_sales_order(customer, items, observations=None):
     so.submit()  # triggers on_submit -> process_sales_order() -- never called directly here
 
     return {"name": so.name}
+
+
+@frappe.whitelist()
+def get_editable_order(name):
+    """Prefill data for the "Editar pedido" view (Commit 18.5) -- reuses
+    `get_order_detail()`'s own exact response shape verbatim (same
+    allowlist, same field-by-field construction, same static guardrail
+    in `test_regression.py`), since editing reuses the identical "Nuevo
+    Pedido" screen just prefilled. The one thing added on top: only a
+    Draft order can be prefilled for editing here -- `check_permission
+    ("read")` (if_owner=1, Commit 18.1) is where ownership is actually
+    enforced, exactly like every other read in this module; the
+    `docstatus` check is the read-side half of the same "Draft only"
+    boundary `update_draft_sales_order()` enforces independently on the
+    write side below.
+    """
+    _require_login()
+
+    so = frappe.get_doc("Sales Order", name)
+    so.check_permission("read")
+
+    if so.docstatus != 0:
+        frappe.throw(_("Solo se pueden editar pedidos en borrador."))
+
+    return get_order_detail(name)
+
+
+@frappe.whitelist()
+def update_draft_sales_order(name, customer, items, observations=None):
+    """Edits one of Vendedora's own Draft Sales Orders in place (Commit
+    18.5) -- `customer`, `items` (`item_code`/`qty` only, via the exact
+    same `_validate_and_build_item_rows()` allowlist
+    `create_and_submit_sales_order()` uses -- one shared security
+    boundary, not two independently-maintained copies), and
+    `fg_observations`. Replaces the entire item list rather than
+    patching individual rows -- exactly what "Editar pedido" reusing the
+    "Nuevo Pedido" screen naturally produces (she rebuilds her cart from
+    the prefilled state, the same UI flow as creating a new order).
+    Never submits -- "GUARDAR CAMBIOS" is deliberately not "CONFIRMAR
+    PEDIDO"; the only path that ever triggers the Fulfillment Engine is
+    `create_and_submit_sales_order()`'s own `.submit()` call (Commit 16's
+    `on_submit` hook), never reached from here.
+
+    `check_permission("write")` is where if_owner=1 (Commit 18.1) is
+    actually enforced -- a second Vendedora's own order raises
+    `PermissionError` here exactly like `get_order_detail()`/
+    `get_my_orders()` already do for read. `docstatus == 0` is required
+    explicitly, throwing a clear, specific message -- ERPNext's own
+    docstatus-transition guard would eventually reject writing to a
+    submitted document too, but only after doing more work first.
+
+    Returns `{"name": "SAL-ORD-..."}` only -- no economic field, no
+    Fulfillment Engine artifact name, matching every other write in this
+    module.
+    """
+    _require_login()
+
+    so = frappe.get_doc("Sales Order", name)
+    so.check_permission("write")
+
+    if so.docstatus != 0:
+        frappe.throw(_("Solo se pueden editar pedidos en borrador."))
+
+    company = frappe.defaults.get_global_default("company")
+    delivery_date = add_days(nowdate(), DEFAULT_DELIVERY_LEAD_DAYS)
+    so_items = _validate_and_build_item_rows(items, company, delivery_date)
+
+    so.customer = customer
+    so.set("items", [])
+    for row in so_items:
+        so.append("items", row)
+    so.set_warehouse = so_items[0]["warehouse"]
+    if observations is not None:
+        so.fg_observations = observations
+
+    so.save()  # no ignore_permissions -- her real if_owner=1 write permission already covers this
+
+    return {"name": so.name}
+
+
+@frappe.whitelist()
+def delete_draft_sales_order(name):
+    """Deletes one of Vendedora's own Draft Sales Orders (Commit 18.5).
+
+    `check_permission("delete")` is where if_owner=1 -- now including
+    `delete=1`, the one new grant this commit adds to the existing
+    Custom DocPerm row (Commit 18.1's own row, not a second one) -- is
+    actually enforced; a second Vendedora's own order raises
+    `PermissionError` exactly like every other function in this module.
+    `docstatus == 0` is required explicitly, matching the native rule
+    that a submitted document can never be deleted (Frappe's own
+    `check_permission_and_not_submitted()` would reject it too, but this
+    throws a specific, clear message first).
+    """
+    _require_login()
+
+    so = frappe.get_doc("Sales Order", name)
+    so.check_permission("delete")
+
+    if so.docstatus != 0:
+        frappe.throw(_("Solo se pueden eliminar pedidos en borrador."))
+
+    frappe.delete_doc("Sales Order", name)  # no ignore_permissions
+
+    return {"name": name, "deleted": True}
+
+
+@frappe.whitelist()
+def cancel_sales_order(name):
+    """Cancels one of Vendedora's own submitted Sales Orders (Commit
+    18.5).
+
+    `check_permission("cancel")` is where if_owner=1 -- now including
+    `cancel=1`, the other new grant this commit adds to the same
+    existing row -- is actually enforced. `so.cancel()` is called with
+    no bypass of any kind: ERPNext's own native back-link protection (a
+    submitted Pick List/Material Request/Purchase Order still
+    referencing this order, Commits 17/19.3) runs exactly as it does for
+    any other Sales Order in this app, and its real error (e.g.
+    `LinkExistsError`) propagates to the caller unmodified -- never
+    caught, swallowed, or worked around here. The existing on_submit/
+    on_cancel hooks (Commits 16/17/19.2/19.3) do every bit of Fulfillment
+    cleanup exactly as they already do for a cancellation triggered any
+    other way; this function calls no Fulfillment Engine internal
+    directly -- `.cancel()` alone is what triggers
+    `cleanup_fulfillment_for_cancelled_sales_order()`, the same standing
+    "don't call the Engine directly if submit/cancel already does" rule
+    `create_and_submit_sales_order()` already follows for submit.
+
+    `docstatus == 1` is required explicitly, throwing a clear, specific
+    message for an already-Draft or already-Cancelled order rather than
+    letting ERPNext's own docstatus-transition error surface instead.
+    """
+    _require_login()
+
+    so = frappe.get_doc("Sales Order", name)
+    so.check_permission("cancel")
+
+    if so.docstatus != 1:
+        frappe.throw(_("Solo se pueden cancelar pedidos sometidos."))
+
+    so.cancel()  # no ignore_permissions -- native back-link checks apply unmodified
+
+    return {"name": name, "status": "Cancelled"}
