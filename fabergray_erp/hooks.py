@@ -153,6 +153,9 @@ doc_events = {
 		"on_submit": "fabergray_erp.fulfillment.sales_order_hooks.on_submit",
 		"on_cancel": "fabergray_erp.fulfillment.sales_order_hooks.on_cancel",
 	},
+	"Purchase Receipt": {
+		"on_submit": "fabergray_erp.fulfillment.purchase_receipt_hooks.on_submit",
+	},
 }
 
 # Scheduled Tasks

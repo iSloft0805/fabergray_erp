@@ -447,6 +447,31 @@ def without_sales_order_hook():
 
 
 @contextmanager
+def company_defaults(**overrides):
+	"""Temporarily override Company (COMPANY) default-account fields --
+	e.g. `stock_received_but_not_billed`, required for a real Purchase
+	Receipt to post GL entries on submit -- restoring the original values
+	afterwards, even if the block raises. Commit 19.4's own audit found
+	this site's real, PUC-based chart of accounts has never had that
+	default configured (NULL), the same class of pre-existing site-config
+	gap `STOCK_ADJUSTMENT_ACCOUNT`/`COST_CENTER` above already document
+	for Stock Reconciliation -- submitting a Purchase Receipt at all, ours
+	or a human's, would hit this. Same reasoning as `stock_settings()`
+	below: Company is site-wide master data, not scoped to a transaction,
+	so tests needing a specific default active must restore it
+	deterministically rather than relying on IntegrationTestCase's
+	(unreliable, see this module's own docstring) rollback."""
+	originals = {field: frappe.db.get_value("Company", COMPANY, field) for field in overrides}
+	try:
+		for field, value in overrides.items():
+			frappe.db.set_value("Company", COMPANY, field, value)
+		yield
+	finally:
+		for field, value in originals.items():
+			frappe.db.set_value("Company", COMPANY, field, value)
+
+
+@contextmanager
 def stock_settings(**overrides):
 	"""Temporarily override Stock Settings singleton fields (e.g.
 	enable_stock_reservation, auto_reserve_stock), restoring the original
