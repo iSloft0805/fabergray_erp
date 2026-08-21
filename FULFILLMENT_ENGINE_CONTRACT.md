@@ -1226,4 +1226,96 @@ guardrail in `test_regression.py` (above), 4 new tests total. No change to
 `ventas.json` (roles already correct from Commit 18.3). See the exact
 before/after count and `run-tests` result in the Commit 18.4 delivery
 summary.
-precedent for automated frontend tests, and this commit invents none.
+
+## Commit 18.5a -- Sales Order naming series: PEDIDO-.# (no year, no padding, no reset)
+
+Pure configuration change, requested independently of the rest of
+Commit 18.5, applied via the native mechanism only -- no custom Python
+counter, no change to `api/ventas.py`, the Fulfillment Engine, Bodega, or
+any link/enlace logic anywhere in this app.
+
+**Mechanism**: two `Property Setter` records on `Sales Order.naming_series`
+(`fixtures/property_setter.json`, applied via `bench migrate`) --
+`options = "PEDIDO-.#\nSAL-ORD-.YYYY.-"` and `default = "PEDIDO-.#"`.
+This is not an app-invented technique: it is the exact same pair of
+writes `frappe.core.doctype.document_naming_settings.
+DocumentNamingSettings.set_series_options_in_meta()` performs internally
+(confirmed by reading that controller directly) -- the code behind
+Desk's own "Document Naming Settings" tool. `get_default_naming_series()`
+(`frappe/model/naming.py`) returns the first truthy entry in `options`,
+which is why listing `PEDIDO-.#` first is what makes it the default for
+every new Sales Order without touching a single line of this app's own
+code -- neither `create_and_submit_sales_order()` nor
+`update_draft_sales_order()` ever sets `so.naming_series` explicitly, so
+both pick up the new default automatically.
+
+**Why `PEDIDO-.#` (one hash, not `#####`) produces `PEDIDO-1`, not
+`PEDIDO-00001` -- confirmed live, not assumed, and load-bearing for any
+future Frappe upgrade:** `set_name_by_naming_series()`
+(`frappe/model/naming.py:260-268`) unconditionally appends `.#####` to
+whatever the `naming_series` field's value already is --
+`doc.naming_series + ".#####"`. For `PEDIDO-.#`, the pattern actually
+evaluated becomes `"PEDIDO-.#.#####"`. `parse_naming_series()`
+(`naming.py:326`) only ever honours the FIRST `#`-group it encounters
+(`series_set` short-circuits every later one) -- so the one-digit,
+unpadded first group (`#`) wins, and the framework's own auto-appended
+`#####` group is silently discarded. This was verified with a live,
+throwaway-series test before implementing (never touching the real
+`PEDIDO-` counter), producing `PEDIDO-1`, `PEDIDO-2`, `PEDIDO-3` with no
+padding, exactly as required.
+
+**This is a real, if low-risk, dependency on today's (Frappe 16)
+implementation detail of `parse_naming_series()`'s short-circuit
+behaviour, not a documented, guaranteed-stable "no padding" feature of
+naming series.** If a future Frappe version changes how a second
+`#`-group is handled (e.g. stops discarding it, or pads differently),
+Sales Order names could silently start looking like `PEDIDO-1-00001` or
+similar. `test_sales_order_naming_series.py`'s own
+`test_compat_parse_naming_series_still_ignores_the_auto_appended_padding`
+exercises this exact mechanism directly (via a throwaway series key, not
+`PEDIDO-` itself) specifically so a future `bench update` that changes
+this behaviour fails a dedicated, clearly-labelled test immediately,
+instead of surfacing later as a support ticket about malformed Sales
+Order names.
+
+**No reset, ever, by construction:** `getseries()`
+(`naming.py:408`) keys the `tabSeries` counter purely off the literal,
+already-resolved prefix string (`NamingSeries("PEDIDO-.#").get_prefix()`
+== `"PEDIDO-"`, confirmed directly) -- since `PEDIDO-.#` has no
+`.YYYY.`/`.YY.`/`.MM.`/`.DD.` token anywhere in it, that key can never
+change, so the counter's `tabSeries` row is the same one forever. This is
+also why cross-year non-reset can't be (and wasn't) "simulated" by
+fast-forwarding the clock inside a test -- `test_series_prefix_has_no_
+date_token_so_it_can_never_reset` proves it the honest way, structurally,
+by asserting the resolved prefix and the absence of any date token in the
+pattern, which is what actually determines reset behaviour.
+
+**Scope, confirmed live before considering this done:** existing Sales
+Orders (`SAL-ORD-2026-000xx`) are completely untouched -- a naming series
+change only ever affects documents created *after* the change, `name` is
+immutable once assigned. `SAL-ORD-.YYYY.-` was kept as a real, still
+fully-functional second option (not removed) -- a document that
+explicitly requests it via `naming_series="SAL-ORD-.YYYY.-"` still gets
+one, off its own separate, year-keyed counter, entirely unaffected by
+`PEDIDO-`'s. Live end-to-end proof, real throwaway data, full cleanup
+after: first and second real Sales Orders created via `ventas.
+create_and_submit_sales_order()` came back `PEDIDO-1`/`PEDIDO-2`; the
+real `on_submit` hook created a Pick List/Reporte de Faltante/Material
+Request all correctly linked via `sales_order="PEDIDO-1"`; `get_my_
+orders()`/`bodega.get_queue()`/`jefe_bodega.get_open_shortage_reports()`
+all showed the new name; `cancel_sales_order()` triggered the real
+Commit 17 cleanup (draft Pick List removed, Reporte resolved) exactly as
+before. Nothing in Pick List/Reporte de Faltante/Material Request/
+Purchase Order/Purchase Receipt or any UI file (`ventas.js`/`bodega.js`/
+`jefe_de_bodega.js`) needed a code change -- every one of them already
+treats the Sales Order reference as an opaque string via native Link
+fields, never parsing or assuming its format.
+
+9 new tests (`test_sales_order_naming_series.py`): configuration applied
+correctly; first/second new Sales Order use the new series and
+increment; no year in the name; structural no-reset proof; no collision
+across several consecutive creates; the old series still works when
+explicitly requested; the Fulfillment Engine links correctly to a
+`PEDIDO-N`-named order (Pick List/Reporte de Faltante/Material Request
+all checked); cancellation still works; and the dedicated Frappe-16-
+compatibility regression detector described above.

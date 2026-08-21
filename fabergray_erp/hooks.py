@@ -197,6 +197,14 @@ fixtures = [
 			["fieldname", "in", ["fg_started_by", "fg_started_on", "fg_observations", "fg_created_by_fulfillment_engine"]]
 		],
 	},
+	{
+		# Commit 18.5a -- Sales Order naming series (PEDIDO-.# as default,
+		# SAL-ORD-.YYYY.- kept as a non-default second option). Native
+		# Document Naming Settings mechanism (frappe.custom.doctype.
+		# property_setter) -- no custom Python counter.
+		"dt": "Property Setter",
+		"filters": [["doc_type", "=", "Sales Order"], ["field_name", "=", "naming_series"]],
+	},
 ]
 
 # Testing
