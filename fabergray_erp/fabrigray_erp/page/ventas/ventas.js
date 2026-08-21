@@ -69,6 +69,13 @@ fabergray_erp.Ventas = class Ventas {
 
 	// -------------------------------------------------------------------
 	// Shell: header (logo, title, user, refresh) stays fixed across views.
+	//
+	// Refresh button: real SPA refresh -- click -> re-call the real
+	// endpoint -> replace local state with the fresh response -> render.
+	// page/bodega/bodega.js's own .fg-refresh-btn follows this identical
+	// pattern (see its own render_shell() comment), just covering one more
+	// view (its detail/picking screen); this one only ever refreshes the
+	// dashboard, disabling itself outside it (see set_busy() below).
 	// -------------------------------------------------------------------
 	render_shell() {
 		const fullname = frappe.session.user_fullname || frappe.session.user;

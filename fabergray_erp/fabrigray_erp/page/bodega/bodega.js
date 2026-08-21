@@ -73,6 +73,23 @@ fabergray_erp.Bodega = class Bodega {
 
 	// -------------------------------------------------------------------
 	// Shell: header (logo, title, user, refresh) stays fixed across views.
+	//
+	// Refresh button: same SPA refresh pattern as page/ventas/ventas.js's
+	// own .fg-refresh-btn -- click -> re-call the real endpoint -> replace
+	// local state with the fresh response -> re-render, never a cached or
+	// stale render. Deliberately never window.location.reload() or any
+	// full Desk reload. set_shell_busy() below is the exact same
+	// disable-button + toggle(".fg-loading") pair ventas.js's own
+	// set_busy() uses -- .fg-loading's CSS spinner (bodega.css) mirrors
+	// ventas.css's own -- and, like ventas.js's load_dashboard(), the calls
+	// below have no explicit .catch(): frappe.call() already shows its own
+	// native error dialog on failure regardless, and .finally() always
+	// restores the button whether the call succeeded or failed.
+	//
+	// Bodega's version covers one more case than Ventas's: which endpoint
+	// to re-call depends on the currently active view (get_queue() for the
+	// queue dashboard, get_pick_list() for the detail/picking screen) --
+	// Ventas only ever has the one dashboard view to refresh.
 	// -------------------------------------------------------------------
 	render_shell() {
 		const fullname = frappe.session.user_fullname || frappe.session.user;
