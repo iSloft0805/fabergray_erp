@@ -215,6 +215,7 @@ class TestStaticGuardrails(IntegrationTestCase):
 
 		allowed_keys = {
 			"name",
+			"commercial_name",
 			"customer",
 			"customer_name",
 			"transaction_date",
@@ -354,6 +355,87 @@ class TestStaticGuardrails(IntegrationTestCase):
 				forbidden,
 				cancel_calls,
 				f"cancel_sales_order() must not call {forbidden}() directly -- so.cancel()'s own hooks must do it",
+			)
+
+	def test_commit_18_5b_modification_endpoints_never_leak_economic_data_or_bypass_permissions(self):
+		"""Commit 18.5b guardrail: get_modification_status()/get_order_for_
+		modification()/modify_submitted_sales_order() must never return an
+		economic field and must never gain a bypass (no `.as_dict()`, no
+		hardcoded `ignore_permissions=True`, no `frappe.get_all`, no
+		`frappe.set_user`). Same shape as
+		`test_commit_18_5_endpoints_never_leak_economic_data_or_bypass_
+		permissions` above, applied to the three new functions.
+		"""
+		economic_keys = {
+			"rate",
+			"price_list_rate",
+			"amount",
+			"net_rate",
+			"net_amount",
+			"base_rate",
+			"base_amount",
+			"total",
+			"grand_total",
+			"net_total",
+			"base_grand_total",
+			"base_net_total",
+			"discount_percentage",
+			"discount_amount",
+			"taxes",
+			"margin_rate_or_amount",
+		}
+		functions_with_own_return_dict = [ventas.get_modification_status, ventas.modify_submitted_sales_order]
+		all_three = functions_with_own_return_dict + [ventas.get_order_for_modification]
+
+		for fn in all_three:
+			source = inspect.getsource(fn)
+			tree = ast.parse(source)
+
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Attribute) and node.attr == "as_dict":
+					self.fail(f"{fn.__name__}() must never call .as_dict() -- builds/forwards a safe dict only")
+
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Call):
+					for kw in node.keywords:
+						if kw.arg == "ignore_permissions" and _is_true_literal(kw.value):
+							self.fail(f"{fn.__name__}() must never hardcode ignore_permissions=True")
+						if kw.arg == "via_fulfillment_engine" and _is_true_literal(kw.value):
+							self.fail(f"{fn.__name__}() must never pass via_fulfillment_engine=True")
+
+			calls = _dotted_calls_in_tree(tree)
+			self.assertNotIn("frappe.get_all", calls, f"{fn.__name__}() must never call frappe.get_all")
+			self.assertNotIn("frappe.set_user", calls, f"{fn.__name__}() must never call frappe.set_user")
+
+		for fn in functions_with_own_return_dict:
+			tree = ast.parse(inspect.getsource(fn))
+			found_keys = set()
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Dict):
+					for key in node.keys:
+						if isinstance(key, ast.Constant) and isinstance(key.value, str):
+							found_keys.add(key.value)
+			self.assertTrue(found_keys, f"expected at least one dict literal key in {fn.__name__}()")
+			self.assertFalse(
+				economic_keys & found_keys, f"{fn.__name__}() returns economic key(s): {economic_keys & found_keys}"
+			)
+
+		# modify_submitted_sales_order() must trigger cleanup/re-processing
+		# only via so.cancel()/amended.submit()'s own native hooks -- never
+		# by calling a Fulfillment Engine internal directly (same standing
+		# rule as create_and_submit_sales_order()/cancel_sales_order()).
+		modify_calls = _dotted_calls_in_tree(ast.parse(inspect.getsource(ventas.modify_submitted_sales_order)))
+		for forbidden in (
+			"process_sales_order",
+			"sync_shortage_reports_for_sales_order",
+			"sync_material_requests_for_sales_order",
+			"cleanup_fulfillment_for_cancelled_sales_order",
+		):
+			self.assertNotIn(
+				forbidden,
+				modify_calls,
+				f"modify_submitted_sales_order() must not call {forbidden}() directly -- "
+				"so.cancel()/amended.submit()'s own hooks must do it",
 			)
 
 	def test_finish_picking_uses_native_submit_not_a_manual_docstatus_flip(self):

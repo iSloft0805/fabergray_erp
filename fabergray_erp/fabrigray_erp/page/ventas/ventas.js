@@ -15,14 +15,14 @@ frappe.pages["ventas"].on_page_load = function (wrapper) {
 // All server communication in this file goes through fabergray_erp.api.ventas.* --
 // nothing here computes pricing, calls the Fulfillment Engine directly, or reads/
 // writes Pick List/Reporte de Faltante/Material Request (Vendedora has no
-// permission on any of those, Commit 18.1). Commit 18.3/18.4/18.5 render exactly
-// what those eleven endpoints return -- no economic field (rate/price_list_rate/
-// discount/amount/taxes/grand_total or any equivalent) is ever read from a server
-// response or constructed here. The only payload this file ever sends to
-// create_and_submit_sales_order()/update_draft_sales_order() is built by
-// build_order_payload() below, which is the single place a request body is
-// assembled -- read that function before touching anything related to "Nuevo
-// pedido"/"Editar pedido".
+// permission on any of those, Commit 18.1). Commit 18.3/18.4/18.5/18.5b render
+// exactly what those fourteen endpoints return -- no economic field (rate/
+// price_list_rate/discount/amount/taxes/grand_total or any equivalent) is ever
+// read from a server response or constructed here. The only payload this file
+// ever sends to create_and_submit_sales_order()/update_draft_sales_order()/
+// modify_submitted_sales_order() is built by build_order_payload() below, which
+// is the single place a request body is assembled -- read that function before
+// touching anything related to "Nuevo pedido"/"Editar pedido"/"Modificar pedido".
 fabergray_erp.Ventas = class Ventas {
 	constructor(page) {
 		this.page = page;
@@ -50,7 +50,8 @@ fabergray_erp.Ventas = class Ventas {
 
 	blank_nuevo_pedido_state() {
 		return {
-			editing_order_name: null, // Commit 18.5: null -> "Nuevo pedido"; a Sales Order name -> "Editar pedido"
+			editing_order_name: null, // Commit 18.5: null -> "Nuevo pedido"; a Draft Sales Order name -> "Editar pedido"
+			modifying_order_name: null, // Commit 18.5b: a Submitted Sales Order name -> "Modificar pedido"
 			customer: null, // {name, customer_name}
 			cart: new Map(), // item_code -> {item_code, item_name, description, stock_uom, image, qty_disponible, qty}
 			customer_results: [],
@@ -222,7 +223,7 @@ fabergray_erp.Ventas = class Ventas {
 		return `
 			<div class="fg-order-card">
 				<div class="fg-order-card-top">
-					<div class="fg-order-card-id">#${frappe.utils.escape_html(o.name)}</div>
+					<div class="fg-order-card-id">#${frappe.utils.escape_html(o.commercial_name || o.name)}</div>
 					<span class="fg-badge fg-badge--${status.mod}">${status.label}</span>
 				</div>
 				<div class="fg-order-card-customer">${icon("user", "fg-icon-sm")} ${customer_label}</div>
@@ -241,9 +242,16 @@ fabergray_erp.Ventas = class Ventas {
 	}
 
 	// Commit 18.5: Draft -> VER/EDITAR/ELIMINAR; Cancelled -> VER only;
-	// anything else (an active, submitted order) -> VER/CANCELAR PEDIDO.
-	// `o.status` is the native Sales Order.status string already returned
-	// by get_my_orders() -- no new field needed to tell these apart.
+	// anything else (an active, submitted order) -> VER/MODIFICAR PEDIDO/
+	// CANCELAR PEDIDO (Commit 18.5b adds MODIFICAR). `o.status` is the
+	// native Sales Order.status string already returned by get_my_orders()
+	// -- no new field needed to tell Draft/Cancelled/active apart.
+	// `o.modifiable` (Commit 18.5b) is the same non-authoritative pre-check
+	// get_modification_status() exposes standalone -- when false, the
+	// button is omitted entirely rather than shown disabled, matching
+	// ELIMINAR/EDITAR's own already-established "not applicable -> not
+	// shown" convention for the other two states above. The real gate
+	// still runs server-side regardless of what this button shows.
 	render_order_card_actions(o) {
 		const name_attr = `data-order-name="${frappe.utils.escape_html(o.name)}"`;
 		const view_btn = `
@@ -270,9 +278,18 @@ fabergray_erp.Ventas = class Ventas {
 			return `<div class="fg-order-card-actions">${view_btn}</div>`;
 		}
 
+		const modify_btn = o.modifiable
+			? `
+				<button type="button" class="fg-order-card-action fg-order-card-modify" ${name_attr}>
+					${icon("pencil", "fg-icon-sm")} ${__("MODIFICAR PEDIDO")}
+				</button>
+			`
+			: "";
+
 		return `
 			<div class="fg-order-card-actions">
 				${view_btn}
+				${modify_btn}
 				<button type="button" class="fg-order-card-action fg-order-card-action--danger fg-order-card-cancel" ${name_attr}>
 					${icon("x", "fg-icon-sm")} ${__("CANCELAR PEDIDO")}
 				</button>
@@ -309,6 +326,9 @@ fabergray_erp.Ventas = class Ventas {
 		});
 		this.$body.find(".fg-order-card-edit").on("click", (e) => {
 			this.open_edit_pedido($(e.currentTarget).data("order-name"));
+		});
+		this.$body.find(".fg-order-card-modify").on("click", (e) => {
+			this.open_modify_pedido($(e.currentTarget).data("order-name"));
 		});
 		this.$body.find(".fg-order-card-delete").on("click", (e) => {
 			this.confirm_delete_draft($(e.currentTarget).data("order-name"));
@@ -413,7 +433,7 @@ fabergray_erp.Ventas = class Ventas {
 		$overlay.html(`
 			<div class="fg-order-detail-panel">
 				<div class="fg-order-detail-header">
-					<div class="fg-order-detail-id">#${frappe.utils.escape_html(detail.name)}</div>
+					<div class="fg-order-detail-id">#${frappe.utils.escape_html(detail.commercial_name || detail.name)}</div>
 					<span class="fg-badge fg-badge--${status.mod}">${status.label}</span>
 					<button type="button" class="fg-order-detail-close" title="${__("Cerrar")}">${icon("x")}</button>
 				</div>
@@ -484,16 +504,51 @@ fabergray_erp.Ventas = class Ventas {
 			.finally(() => this.set_busy(false));
 	}
 
+	// Commit 18.5b: same "Nuevo pedido" screen again, prefilled via
+	// get_order_for_modification() -- which re-derives the authoritative
+	// modification gate itself (never trusts o.modifiable, which only
+	// decided whether this button rendered at all) and throws if the
+	// order can no longer be modified; the .catch() below sends the
+	// Vendedora back to the dashboard in that case, same as
+	// open_edit_pedido()'s own failure handling.
+	open_modify_pedido(name) {
+		if (!name) return;
+		this.np = this.blank_nuevo_pedido_state();
+		this._item_info_cache = new Map();
+		this.state.view = "nuevo_pedido";
+		this.set_busy(true);
+
+		this.call("get_order_for_modification", { name: name })
+			.then((detail) => {
+				this.np.modifying_order_name = detail.name;
+				this.np.customer = { name: detail.customer, customer_name: detail.customer_name };
+				this.np.observations = detail.observations || "";
+				for (const item of detail.items || []) {
+					this.np.cart.set(item.item_code, {
+						item_code: item.item_code,
+						item_name: item.item_name,
+						stock_uom: item.stock_uom,
+						qty: item.qty,
+					});
+				}
+				this.render_nuevo_pedido();
+			})
+			.catch(() => this.back_to_dashboard())
+			.finally(() => this.set_busy(false));
+	}
+
 	back_to_dashboard() {
 		this.load_dashboard();
 	}
 
 	render_nuevo_pedido() {
 		const editing = !!this.np.editing_order_name;
+		const modifying = !!this.np.modifying_order_name;
+		const title = modifying ? __("Modificar pedido") : editing ? __("Editar pedido") : __("Nuevo pedido");
 		this.$body.html(`
 			<div class="fg-np-header">
 				<button type="button" class="fg-np-back">${icon("arrow-left")} ${__("Volver")}</button>
-				<div class="fg-np-title">${editing ? __("Editar pedido") : __("Nuevo pedido")}</div>
+				<div class="fg-np-title">${title}</div>
 			</div>
 
 			<div class="fg-np-section">
@@ -831,7 +886,9 @@ fabergray_erp.Ventas = class Ventas {
 				)}">${frappe.utils.escape_html(this.np.observations || "")}</textarea>
 			</div>
 			<button type="button" class="fg-btn fg-btn--solid-primary fg-btn--lg fg-confirm-btn" disabled>
-				${icon("check")} ${this.np.editing_order_name ? __("GUARDAR CAMBIOS") : __("CONFIRMAR PEDIDO")}
+				${icon("check")} ${
+					this.np.editing_order_name || this.np.modifying_order_name ? __("GUARDAR CAMBIOS") : __("CONFIRMAR PEDIDO")
+				}
 			</button>
 		`);
 
@@ -920,6 +977,14 @@ fabergray_erp.Ventas = class Ventas {
 			return;
 		}
 
+		if (this.np.modifying_order_name) {
+			// Commit 18.5b: same "no confirmation dialog" convention as
+			// save_draft_edit() above -- straight to modify_submitted_
+			// sales_order(), which does the real cancel+amend server-side.
+			this.save_submitted_modification(payload);
+			return;
+		}
+
 		this.busy = true;
 		const $btn = this.$body.find(".fg-confirm-btn").prop("disabled", true).addClass("fg-btn--loading");
 
@@ -982,6 +1047,47 @@ fabergray_erp.Ventas = class Ventas {
 			.catch(() => {
 				// same reasoning as confirm_order()'s own .catch() -- the server's
 				// default error dialog already showed the real message.
+			})
+			.finally(() => {
+				this.busy = false;
+				$btn.prop("disabled", false).removeClass("fg-btn--loading");
+				this.refresh_confirm_state();
+			});
+	}
+
+	// Commit 18.5b: modify_submitted_sales_order() does the real cancel+
+	// amend server-side -- the authoritative gate is re-checked there
+	// (never trusted from what got this screen open in the first place).
+	// A block surfaces here via the server's own real error message
+	// (Bodega started picking a moment ago, etc.) exactly like
+	// cancel_sales_order()'s own native-block .catch() already does --
+	// never swallowed, never bypassed, no manual retry attempted.
+	save_submitted_modification(payload) {
+		this.busy = true;
+		const $btn = this.$body.find(".fg-confirm-btn").prop("disabled", true).addClass("fg-btn--loading");
+
+		this.call("modify_submitted_sales_order", {
+			name: this.np.modifying_order_name,
+			customer: payload.customer,
+			items: payload.items,
+			observations: payload.observations,
+		})
+			.then((result) => {
+				frappe.show_alert(
+					{
+						message: `${icon("check", "fg-icon-sm")} ${__("Cambios guardados")} — ${__(
+							"Pedido"
+						)} #${frappe.utils.escape_html(result.commercial_name)}`,
+						indicator: "green",
+					},
+					5
+				);
+				this.back_to_dashboard();
+			})
+			.catch(() => {
+				// same reasoning as confirm_order()'s/save_draft_edit()'s own
+				// .catch() -- the server's default error dialog already showed
+				// the real message (a blocker found, ownership, etc.).
 			})
 			.finally(() => {
 				this.busy = false;

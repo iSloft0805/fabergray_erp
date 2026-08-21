@@ -36,6 +36,7 @@ from frappe.utils import add_days, cint, flt, nowdate
 from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
 from fabergray_erp.api.bodega import _require_login
+from fabergray_erp.fulfillment.modification_service import modification_blockers_for
 
 # No native default exists for Sales Order.delivery_date -- confirmed by
 # reading validate_delivery_date() (sales_order.py) directly: it throws
@@ -126,6 +127,32 @@ def _default_warehouse_for_item(item_code, company):
     `frappe.db.get_value` is a raw, single-value read (not `get_all`), the
     same kind already used throughout this app's Fulfillment Engine."""
     return frappe.db.get_value("Item Default", {"parent": item_code, "company": company}, "default_warehouse")
+
+
+def _root_commercial_name(so_name):
+    """Walks the native `amended_from` chain backward to the original
+    document name -- the stable "PEDIDO-N" commercial identity shown
+    throughout /app/ventas, independent of how many times the order has
+    since been amended (Commit 18.5: the technical name becomes
+    `PEDIDO-N-1`, `PEDIDO-N-2`, ... on each amend -- confirmed directly
+    against `frappe/model/naming.py`'s `_set_amended_name()`, which always
+    takes priority over the `PEDIDO-.#` naming series once `amended_from`
+    is set, and cannot be configured to preserve the original literal name
+    -- see FULFILLMENT_ENGINE_CONTRACT.md, "Commit 18.5 -- naming"). Only
+    ever walks a chain of this Vendedora's own documents (a chain can only
+    grow through her own `modify_submitted_sales_order()` calls), so no
+    separate permission check is needed per hop -- same reasoning as
+    `_default_warehouse_for_item()` above (a raw, single-field read used
+    only to compute a label, not to expose document data)."""
+    current = so_name
+    seen = set()
+    while current not in seen:
+        seen.add(current)
+        parent = frappe.db.get_value("Sales Order", current, "amended_from")
+        if not parent:
+            return current
+        current = parent
+    return current  # defensive: amended_from can never actually cycle
 
 
 @frappe.whitelist()
@@ -239,6 +266,27 @@ def get_my_orders(limit=50):
     Field, see `create_and_submit_sales_order()`'s docstring for why this
     is not `Comment`) -- covered by the exact same if_owner=1 Sales Order
     permission already checked above, no separate permission needed.
+
+    One card per commercial order (Commit 18.5): a Sales Order that some
+    OTHER one of her own documents already lists as `amended_from` was
+    superseded by that later amendment -- it is skipped here entirely, so
+    only the current tip of each amend chain is ever returned (a chain can
+    never fork -- Frappe forbids cancelling an already-cancelled document,
+    so at most one document can ever amend a given one). This is what
+    keeps "PEDIDO-1 Cancelado" and "PEDIDO-1-1 Activo" from ever appearing
+    as two separate cards -- only the still-relevant tip shows, labelled
+    with `commercial_name` (the walk-back-to-the-root helper below), never
+    the raw, possibly-suffixed technical `name`. A genuinely cancelled
+    order (nothing amends it) is unaffected and still shows, exactly as
+    before.
+
+    `modifiable` is the same non-authoritative pre-check
+    `get_modification_status()` exposes standalone, computed only for a
+    docstatus==1 order (never for Draft/Cancelled, which are never
+    modifiable via this path regardless) -- lets the UI hide/disable
+    "MODIFICAR PEDIDO" per card without a second round-trip; the
+    authoritative check still lives in `modify_submitted_sales_order()`
+    itself, re-derived there, never trusted from here.
     """
     _require_login()
     frappe.has_permission("Sales Order", "read", throw=True)
@@ -248,18 +296,27 @@ def get_my_orders(limit=50):
         filters={"owner": frappe.session.user},
         fields=["name"],
         order_by="transaction_date desc, creation desc",
-        limit_page_length=cint(limit) or 50,
+        limit_page_length=0,
         pluck="name",
     )
 
+    max_orders = cint(limit) or 50
     orders = []
     for name in names:
+        if len(orders) >= max_orders:
+            break
+        if frappe.db.exists("Sales Order", {"amended_from": name}):
+            continue  # superseded by a later amendment -- the chain's tip is listed instead
+
         so = frappe.get_doc("Sales Order", name)
         so.check_permission("read")
+
+        modifiable = so.docstatus == 1 and not modification_blockers_for(so.name)
 
         orders.append(
             {
                 "name": so.name,
+                "commercial_name": _root_commercial_name(so.name),
                 "customer": so.customer,
                 "customer_name": so.customer_name,
                 "transaction_date": so.transaction_date,
@@ -268,6 +325,7 @@ def get_my_orders(limit=50):
                 "item_count": len(so.items),
                 "total_qty": so.total_qty,
                 "observations": so.fg_observations,
+                "modifiable": modifiable,
             }
         )
 
@@ -299,6 +357,7 @@ def get_order_detail(name):
 
     return {
         "name": so.name,
+        "commercial_name": _root_commercial_name(so.name),
         "customer": so.customer,
         "customer_name": so.customer_name,
         "transaction_date": so.transaction_date,
@@ -579,3 +638,149 @@ def cancel_sales_order(name):
     so.cancel()  # no ignore_permissions -- native back-link checks apply unmodified
 
     return {"name": name, "status": "Cancelled"}
+
+
+@frappe.whitelist()
+def get_modification_status(name):
+    """Cheap, read-only pre-check for whether "MODIFICAR PEDIDO" should be
+    shown/enabled in the UI (Commit 18.5) -- NOT authoritative.
+    `modify_submitted_sales_order()` re-derives this exact same check
+    itself, independently, immediately before acting; nothing here is ever
+    trusted as a substitute for that.
+
+    `check_permission("cancel")` -- not "read" -- because that is the
+    exact grant `modify_submitted_sales_order()` itself requires (cancel+
+    amend starts with `so.cancel()`); using the same permission here means
+    this pre-check can never say "yes" for an order the real operation
+    would then reject on ownership grounds alone.
+    """
+    _require_login()
+
+    so = frappe.get_doc("Sales Order", name)
+    so.check_permission("cancel")
+
+    if so.docstatus != 1:
+        return {"modifiable": False, "blockers": ["not_submitted"]}
+
+    blockers = modification_blockers_for(name)
+    return {"modifiable": not blockers, "blockers": blockers}
+
+
+@frappe.whitelist()
+def get_order_for_modification(name):
+    """Prefill for "MODIFICAR PEDIDO" (Commit 18.5) -- reuses
+    `get_order_detail()`'s own exact response shape verbatim, exactly like
+    `get_editable_order()` does for Draft. Unlike the pre-check above,
+    this re-derives `modification_blockers_for()` authoritatively and
+    refuses outright if anything blocks -- a stale UI state (button was
+    enabled when the card last rendered, but Bodega started picking a
+    moment ago) can never even reach the prefill screen.
+    """
+    _require_login()
+
+    so = frappe.get_doc("Sales Order", name)
+    so.check_permission("cancel")
+
+    if so.docstatus != 1:
+        frappe.throw(_("Solo se pueden modificar pedidos sometidos."))
+
+    if modification_blockers_for(name):
+        frappe.throw(
+            _("Este pedido ya no puede modificarse: Bodega ya inició el alistamiento u otro proceso relacionado.")
+        )
+
+    return get_order_detail(name)
+
+
+@frappe.whitelist()
+def modify_submitted_sales_order(name, customer, items, observations=None):
+    """Commit 18.5 -- modifies a submitted Sales Order via ERPNext's own
+    native cancel+amend, never by touching a single field or child row of
+    the submitted document directly.
+
+    Sequence: validate the new `items` payload FIRST (fail fast, before
+    anything is cancelled) -> `so.cancel()` (no bypass; triggers the
+    existing `cleanup_fulfillment_for_cancelled_sales_order()` on_cancel
+    hook exactly as `cancel_sales_order()` already does) ->
+    `frappe.copy_doc(so, ignore_no_copy=False)` (confirmed by reading
+    `frappe/model/document.py` directly: with `ignore_no_copy=False` this
+    also clears every `no_copy`-flagged field -- `picked_qty`,
+    `delivered_qty`, `billed_amt`, `requested_qty`, etc. -- on the new
+    document and its child rows, so the amended version never carries
+    over fulfillment progress from the one just cancelled; `copy_doc()`
+    itself already clears `amended_from`, `name`, `docstatus`, `owner`) ->
+    `amended_from` is set explicitly (`copy_doc()` clears it by default,
+    same as ERPNext's own client-side "Amend" button then re-sets it) ->
+    the new customer/items/observations are applied via the exact same
+    `_validate_and_build_item_rows()` allowlist every other write in this
+    module uses -> `.insert()` + `.submit()` (triggers `on_submit` ->
+    `process_sales_order()` fresh, exactly like `create_and_submit_sales_
+    order()` -- never called directly here).
+
+    `check_permission("cancel")` is where if_owner=1 is enforced -- the
+    exact same grant `cancel_sales_order()` already relies on, no new
+    Custom DocPerm needed. The authoritative gate is
+    `modification_blockers_for()`, re-derived here (never trusted from
+    `get_modification_status()`/`get_order_for_modification()`, both of
+    which the client may have called any amount of time before this
+    request actually lands): if Bodega started picking, a Pick List or
+    Material Request got submitted, a Purchase Order is linked, or a
+    Delivery Note/Sales Invoice exists, this throws a clear message and
+    the Sales Order is never touched -- `so.cancel()` is not even
+    attempted, so there is no risk of a half-cancelled state to recover
+    from.
+
+    Naming (see FULFILLMENT_ENGINE_CONTRACT.md, "Commit 18.5 -- naming"):
+    the returned `name` is the new technical document name (e.g.
+    `PEDIDO-1-1`) -- Frappe's own amend mechanism cannot preserve the
+    literal original name. `commercial_name` is the stable "PEDIDO-1"
+    identity `get_my_orders()`/`get_order_detail()` already show
+    throughout the UI, resolved via `_root_commercial_name()`.
+
+    Returns `{"name": "PEDIDO-1-1", "commercial_name": "PEDIDO-1"}` only --
+    no economic field, matching every other write in this module.
+    """
+    _require_login()
+
+    so = frappe.get_doc("Sales Order", name)
+    so.check_permission("cancel")
+
+    if so.docstatus != 1:
+        frappe.throw(_("Solo se pueden modificar pedidos sometidos."))
+
+    if modification_blockers_for(name):
+        frappe.throw(
+            _("Este pedido ya no puede modificarse: Bodega ya inició el alistamiento u otro proceso relacionado.")
+        )
+
+    company = frappe.defaults.get_global_default("company")
+    delivery_date = add_days(nowdate(), DEFAULT_DELIVERY_LEAD_DAYS)
+    so_items = _validate_and_build_item_rows(items, company, delivery_date)  # fail fast -- nothing cancelled yet
+
+    commercial_name = _root_commercial_name(name)
+
+    so.cancel()  # no ignore_permissions -- triggers cleanup_fulfillment_for_cancelled_sales_order() via on_cancel
+
+    amended = frappe.copy_doc(so, ignore_no_copy=False)
+    # frappe.copy_doc() only clears docstatus when NOT frappe.in_test (see
+    # frappe/model/document.py) -- confirmed live, not assumed, while
+    # writing this commit's own tests: under IntegrationTestCase that flag
+    # is always true, so `so`'s already-cancelled docstatus=2 would
+    # otherwise be copied verbatim onto the new, still-unsaved document,
+    # making .insert() below fail with DocstatusTransitionError. Set
+    # explicitly here so behaviour is identical and correct in both a real
+    # request and a test, never dependent on that environment flag.
+    amended.docstatus = 0
+    amended.amended_from = name
+    amended.customer = customer
+    amended.set("items", [])
+    for row in so_items:
+        amended.append("items", row)
+    amended.set_warehouse = so_items[0]["warehouse"]
+    if observations is not None:
+        amended.fg_observations = observations
+
+    amended.insert()
+    amended.submit()  # triggers on_submit -> process_sales_order() -- never called directly here
+
+    return {"name": amended.name, "commercial_name": commercial_name}

@@ -203,9 +203,11 @@
 }
 
 /* ------------------------------------------------------------------ */
-/* Order card actions -- VER / EDITAR / ELIMINAR / CANCELAR PEDIDO      */
-/* (Commit 18.4's single "VER PEDIDO ->" link became a row of real,     */
-/* per-status actions in Commit 18.5).                                  */
+/* Order card actions -- VER / EDITAR / ELIMINAR / MODIFICAR PEDIDO /   */
+/* CANCELAR PEDIDO (Commit 18.4's single "VER PEDIDO ->" link became a  */
+/* row of real, per-status actions in Commit 18.5; Commit 18.5b adds    */
+/* MODIFICAR PEDIDO for an active order -- reuses .fg-order-card-action */
+/* verbatim, no new modifier class needed, same as EDITAR).             */
 /* ------------------------------------------------------------------ */
 .fg-ventas .fg-order-card-actions {
 	display: flex;

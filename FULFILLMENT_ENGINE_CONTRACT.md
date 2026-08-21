@@ -1319,3 +1319,167 @@ explicitly requested; the Fulfillment Engine links correctly to a
 `PEDIDO-N`-named order (Pick List/Reporte de Faltante/Material Request
 all checked); cancellation still works; and the dedicated Frappe-16-
 compatibility regression detector described above.
+
+## Commit 18.5b -- modifying a submitted Sales Order (cancel + amend)
+
+Lets a Vendedora add/remove products and change quantities on one of her
+own already-*submitted* Sales Orders, from `/app/ventas`, whenever it is
+still operationally safe to do so -- distinct from Commit 18.5's
+Draft-only edit (`update_draft_sales_order()`, unchanged) and from
+`cancel_sales_order()` (unchanged, still the only way to void an order
+outright).
+
+**Mechanism: native cancel + amend, never a direct child-row edit.**
+`modify_submitted_sales_order()` (`api/ventas.py`) validates the new item
+payload first (fail fast, nothing touched yet, via the same
+`_validate_and_build_item_rows()` allowlist every other write in this
+module already shares), then `so.cancel()` (no bypass -- triggers the
+existing `cleanup_fulfillment_for_cancelled_sales_order()` on_cancel hook
+exactly as `cancel_sales_order()` already does), then
+`frappe.copy_doc(so, ignore_no_copy=False)` with `amended_from` set
+explicitly (`copy_doc()` clears it by default, same as ERPNext's own
+client-side "Amend" button, which re-sets it too), the new
+customer/items/observations applied, then `.insert()` + `.submit()` --
+triggering `on_submit` -> `process_sales_order()` fresh, exactly like
+`create_and_submit_sales_order()`. `ignore_no_copy=False` was a deliberate
+choice, confirmed by reading `frappe/model/document.py`'s `copy_doc()`
+directly: it also clears every `no_copy`-flagged field (`picked_qty`,
+`delivered_qty`, `billed_amt`, `requested_qty`, etc.) so the amended
+version never inherits fulfillment progress from the version just
+cancelled -- moot for the child rows themselves here (they are replaced
+wholesale from the validated payload anyway) but real for header-level
+no_copy fields (`per_billed`, `advance_paid`, etc.).
+
+**Modifiability gate (`fulfillment/modification_service.py`,
+`modification_blockers_for()`)**: a submitted Sales Order may be modified
+unless any of the following applies --
+
+- `bodega_started` -- any linked Pick List (draft or submitted) has
+  `fg_started_by` set (Commit 18.2 custom field). Native cancellation does
+  not consult this at all; added here because "Bodega opened the Pick
+  List and is working it" is a real operational commitment even before
+  anything is submitted.
+- `picked_qty` -- any linked Pick List Item row has real picked quantity,
+  independent of `fg_started_by` (confirmed with a dedicated test:
+  `set_picked_qty()` does not itself require `start_picking()` to have run
+  first).
+- `pick_list_submitted` -- a submitted Pick List exists. Native
+  cancellation already refuses in this case (`LinkExistsError`) -- this
+  check exists only so the UI/pre-check can know the answer without
+  attempting a real cancel first; the real gate is re-derived, not skipped.
+- `material_request_submitted` -- a submitted Material Request exists.
+  Same reasoning: native cancellation already refuses.
+- `purchase_order_linked` -- **the one genuinely new business rule this
+  commit adds, explicitly approved, not a native mechanism.** Confirmed
+  (Commit 19.4) that `AccountsController.on_cancel()`'s
+  `unlink_ref_doc_from_po()` does *not* block cancellation when a Purchase
+  Order is linked -- it silently clears `sales_order`/`sales_order_item`
+  on the Purchase Order Item instead. Left unchecked, cancel+amend would
+  succeed natively while quietly orphaning a real purchase Compras may
+  already be executing against. This module blocks it explicitly instead.
+- `downstream_document` -- a (non-cancelled) Delivery Note or Sales
+  Invoice references the order. Defensive: in this app's actual flow both
+  are only ever created from an already-submitted Pick List, so
+  `pick_list_submitted` should already have caught this case first: kept
+  anyway as an explicit, independently-tested second check (proven with a
+  Delivery Note created directly off the Sales Order, no Pick List
+  involved at all, via `make_delivery_note()`).
+
+Every read in `modification_service.py` uses `frappe.qb` (never
+`frappe.get_all`), matching the "Commit 18.1 pattern" already established
+throughout this package (pick_list_service.py, shortage_service.py,
+purchase_service.py, cancellation_service.py) -- this runs inside a
+Vendedora's own restricted session, which has zero permission on Pick
+List/Material Request/Purchase Order/Delivery Note/Sales Invoice by
+design, yet the check must still see real state to answer correctly.
+Nothing is ever exposed to the caller beyond an opaque list of reason
+codes -- never a document name, a quantity, or any other field.
+`api/ventas.py` itself remains 100% free of `get_all`/`ignore_permissions`/
+`set_user` (checked by `test_ventas_api_never_calls_get_all_or_set_user`,
+already scoping the whole module).
+
+The gate is **re-derived twice, never trusted once**:
+`get_modification_status()` is a cheap pre-check for the UI (hide/disable
+"MODIFICAR PEDIDO"); `get_order_for_modification()` re-checks
+authoritatively before allowing the prefill screen to even open;
+`modify_submitted_sales_order()` re-checks a third time, immediately
+before calling `so.cancel()` -- a state that changed between the pre-check
+and the real request (Bodega started picking a moment ago) is always
+caught by the version that actually acts, never by a stale client-side
+flag.
+
+**Naming: Frappe's own amend mechanism cannot preserve the literal
+original name.** Confirmed directly against `frappe/model/naming.py`
+(`set_new_name()`/`_set_amended_name()`): once `amended_from` is set, it
+always takes priority over the `PEDIDO-.#` naming series -- the new
+document is named `{original}-{n}` (this site's `Document Naming
+Settings.default_amend_naming = "Amend Counter"`, confirmed live, no
+per-doctype override for Sales Order), e.g. `PEDIDO-1` amended once
+becomes `PEDIDO-1-1`. There is no native configuration that produces
+`PEDIDO-2` (or any other bare-series name) for an amended document while
+also keeping `PEDIDO-1`'s own history intact -- the alternative
+(`default_amend_naming = "Default Naming"`) would instead consume a fresh
+number from the *live* series, which is worse for commercial identity, not
+better.
+
+**Commercial identity is resolved at the UI/read layer instead, not by
+fighting Frappe's naming.** `_root_commercial_name()` (`api/ventas.py`)
+walks the native `amended_from` chain backward to the original document
+name and is what `get_my_orders()`/`get_order_detail()` show as
+`commercial_name` throughout `/app/ventas` -- the technical `name` (which
+may be `PEDIDO-1-1`, `PEDIDO-1-2`, ...) is never shown to the Vendedora as
+"the pedido number". `get_my_orders()` additionally folds each amend chain
+into exactly one card: any Sales Order that some *other* one of her own
+documents already lists as `amended_from` was superseded and is skipped
+entirely (a chain can never fork -- Frappe forbids cancelling an
+already-cancelled document, so at most one document can ever amend a
+given one) -- only the still-relevant tip of each chain is ever returned,
+labelled with the root name. This is what keeps "PEDIDO-1 Cancelado" and
+"PEDIDO-1-1 Activo" from ever appearing as two separate cards.
+
+**UI (`ventas.js`/`ventas.css`)**: an active (non-Draft, non-Cancelled)
+order's card now shows `VER | MODIFICAR PEDIDO | CANCELAR PEDIDO`, the
+middle button hidden when `get_my_orders()`'s own `modifiable: false`
+says so (matching the authoritative server-side gate, which still runs
+independently at save time regardless of what the button showed).
+"MODIFICAR PEDIDO" reuses the exact same "Nuevo pedido" screen (customer
+step, product search/stepper, summary/observations) prefilled via
+`get_order_for_modification()`, exactly like "EDITAR" already does for
+Draft via `get_editable_order()` -- the confirm button reads "GUARDAR
+CAMBIOS" in both cases, never "Crear pedido"/"Confirmar pedido". No new
+screen, no duplicated cart/stepper logic.
+
+**Tests** (`test_sales_order_modification.py`, 15 new): allowed
+modification recalculates Pick List/shortage/Material Request correctly
+(add, remove, and change quantity on different lines); response/status
+shape never contains an economic key; blocked by `bodega_started`;
+blocked by `picked_qty` alone (proven independent of `bodega_started` --
+`set_picked_qty()` does not require `start_picking()` first); blocked by a
+submitted Pick List (native `LinkExistsError` territory, but caught here
+before `so.cancel()` is even attempted); blocked by a submitted Material
+Request; blocked by a related Purchase Order (the one new business rule);
+blocked by a Delivery Note created directly off the Sales Order (no Pick
+List involved); another Vendedora cannot read the status, prefill, or
+modify the order (if_owner=1, same grant `cancel_sales_order()` already
+uses -- no new Custom DocPerm); a chain of two amendments still resolves
+`commercial_name` back to the very first name, and `get_order_detail()`
+agrees; `get_my_orders()` returns exactly one card for a multi-amendment
+chain, holding the latest version's data; the old shortage report is
+resolved (not deleted) and the old Engine-created Material Request is
+removed when the new version no longer needs them; live stock that
+arrived between the original submission and the modification is what the
+new Pick List actually uses, not a stale snapshot from creation time.
+
+Plus the existing structural guardrail suite extended
+(`test_regression.py`): the three new endpoints never call `.as_dict()`,
+never hardcode `ignore_permissions=True`/`via_fulfillment_engine=True`,
+never call `frappe.get_all`/`frappe.set_user`, never return an economic
+key, and `modify_submitted_sales_order()` never calls a Fulfillment Engine
+internal directly -- only `so.cancel()`/`amended.submit()`'s own native
+hooks do. `get_order_detail()`'s existing key-allowlist guardrail was
+extended with `commercial_name`.
+
+No new Custom Field, no new Custom DocPerm, no new Property Setter, no
+change to Stock Settings, no change to the `PEDIDO-.#` naming series
+itself.
+compatibility regression detector described above.
