@@ -190,7 +190,9 @@ fixtures = [
 	},
 	{
 		"dt": "Custom Field",
-		"filters": [["fieldname", "in", ["fg_started_by", "fg_started_on", "fg_observations"]]],
+		"filters": [
+			["fieldname", "in", ["fg_started_by", "fg_started_on", "fg_observations", "fg_created_by_fulfillment_engine"]]
+		],
 	},
 ]
 

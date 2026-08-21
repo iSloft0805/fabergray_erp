@@ -40,12 +40,19 @@ Sales Order.
 
 Explicit, deliberate non-goals for this commit (approved scope): no
 Supplier selection, no Purchase Order, no submit, no hook wiring, no
-Custom Field, no change to the Fulfillment Engine's orchestrator
-(engine.py) or to shortage_service.py/pick_list_service.py. Updating or
-deleting a pre-existing draft Material Request when the shortage shrinks
-or clears is explicitly OUT of this commit -- see this module's own
-"Known, deliberately unresolved gap" section below for why, confirmed by
-reading material_request_item.json directly rather than assumed.
+change to the Fulfillment Engine's orchestrator (engine.py) or to
+shortage_service.py/pick_list_service.py. Updating or deleting a
+pre-existing draft Material Request when the shortage shrinks or clears
+is still OUT of this commit's scope (that stays purely additive, per the
+approved design) -- but Commit 19.3 DOES add the one Custom Field this
+module's own docstring originally flagged as the way to resolve a
+related, separate problem (identifying an Engine-created Material
+Request for safe cleanup on Sales Order *cancellation*, not on shortage
+change): `fg_created_by_fulfillment_engine` (Check, read-only,
+`fixtures/custom_field.json`), set to 1 only here, in
+_insert_draft_material_request() below -- see
+fulfillment/cancellation_service.py for the only place that ever reads
+it.
 """
 
 import frappe
@@ -191,6 +198,16 @@ def _insert_draft_material_request(so, lines_to_request):
             "material_request_type": MATERIAL_REQUEST_TYPE,
             "company": so.company,
             "transaction_date": nowdate(),
+            # Commit 19.3 -- the ONLY place this ever gets set to 1. The
+            # sole, user-approved signal cancellation_service.py uses to
+            # safely identify (and only then clean up) a Material Request
+            # this module created, as opposed to one a human made via
+            # ERPNext's own native "Create Material Request" button --
+            # which produces an otherwise field-for-field identical
+            # sales_order/sales_order_item signature (Commit 19.1's own
+            # documented gap). Never set anywhere else, never exposed on
+            # any whitelisted parameter.
+            "fg_created_by_fulfillment_engine": 1,
         }
     )
 
@@ -268,30 +285,36 @@ def sync_material_requests_for_sales_order(sales_order):
     line into a single Material Request, same shape as ERPNext's own
     native "Create Material Request" button).
 
-    Known, deliberately unresolved gap (flagged to the user, not silently
-    worked around): once a Material Request this module created is later
-    submitted by Compras (turning it into real native demand,
-    Sales Order Item.requested_qty included) or the underlying shortage
-    changes (more stock arrives, or the shortage clears), this function
-    still never updates or deletes that pre-existing document -- it only
-    ever computes a new, smaller-or-larger net remainder and creates a
-    fresh Material Request for whatever is still missing (never negative,
-    floored at 0 like every other quantity in this module). Confirmed
-    directly against material_request_item.json: `sales_order`/
-    `sales_order_item` are `hidden`+`read_only` on the Item grid, so a
-    human cannot type them in manually -- but ERPNext's own native
-    "Create Material Request" button on the Sales Order form (a real,
-    unmodified, always-available native action) populates the exact same
-    fields the same way this module does, with no way to distinguish
-    "created by this Engine" from "created by a human via that native
-    button" using only native fields. Deliberately not resolved with a
-    heuristic (e.g. a `title` convention) or a new Custom Field in this
-    commit -- both were flagged as options requiring an explicit decision,
-    not something to decide unilaterally here. This is why updating or
-    deleting an existing draft Material Request is out of this commit's
-    scope entirely; every path through this function only ever reads
-    existing Material Requests (via the query above) and creates new
-    ones, never writes to a pre-existing one.
+    Known, still-unresolved gap for THIS function specifically (Commit
+    19.3 resolved the related-but-different Sales-Order-*cancellation*
+    cleanup problem below, not this one): once a Material Request this
+    module created is later submitted by Compras (turning it into real
+    native demand, Sales Order Item.requested_qty included) or the
+    underlying shortage changes while the SO is still active (more stock
+    arrives, or the shortage clears), this function still never updates
+    or deletes that pre-existing document -- it only ever computes a new,
+    smaller-or-larger net remainder and creates a fresh Material Request
+    for whatever is still missing (never negative, floored at 0 like
+    every other quantity in this module). Confirmed directly against
+    material_request_item.json: `sales_order`/`sales_order_item` are
+    `hidden`+`read_only` on the Item grid, so a human cannot type them in
+    manually -- but ERPNext's own native "Create Material Request" button
+    on the Sales Order form (a real, unmodified, always-available native
+    action) populates the exact same fields the same way this module
+    does, with no way to distinguish "created by this Engine" from
+    "created by a human via that native button" using only native
+    relations alone.
+
+    `fg_created_by_fulfillment_engine` (Commit 19.3, set by
+    _insert_draft_material_request() above) exists specifically because
+    the SAME ambiguity blocked cancellation_service.py from safely
+    cleaning up an orphaned draft Material Request when its Sales Order
+    gets cancelled -- the user approved a minimal Custom Field for that
+    one, narrower use after the identical native-fields-are-insufficient
+    finding was reconfirmed there. It is NOT used here, on purpose: this
+    function's own scope (update/delete while the SO is still active) was
+    never re-opened or re-approved, so it keeps behaving exactly as
+    before -- create-only, never touching a pre-existing document.
     """
     so = sales_order if hasattr(sales_order, "doctype") else frappe.get_doc("Sales Order", sales_order)
 
