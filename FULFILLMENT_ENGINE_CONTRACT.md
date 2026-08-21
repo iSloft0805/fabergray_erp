@@ -1168,3 +1168,62 @@ Full existing suite re-run after this commit: 158/158 passing, zero DB
 residue. No new automated tests were added for this commit -- consistent
 with `page/bodega`/`page/jefe_de_bodega`, this app has no existing
 precedent for automated frontend tests, and this commit invents none.
+
+## Commit 18.4 -- Page Ventas UX refinement (no Engine/permission/hook change)
+
+Pure UX/UI pass over Commit 18.3's Page Ventas, approved by the user after
+manual visual validation of 18.3. Touches `ventas.js`/`ventas.css` and adds
+exactly one new read endpoint to `api/ventas.py` -- nothing in
+`fulfillment/*`, `hooks.py`, fixtures, `create_and_submit_sales_order()`,
+or `_ALLOWED_ITEM_FIELDS` changed.
+
+- **Cliente/Producto selectors**: neither the full customer list nor the
+  full Item catalog is fetched/rendered on opening "Nuevo pedido" anymore
+  -- both start as just a search box (`"Buscar cliente..."`/`"Escribe
+  para buscar productos"`) and only call `search_customers()`/
+  `search_items()` once real text is typed, clearing back to that empty
+  state (no server call) when the box is emptied. Selecting a customer
+  still collapses the search into the existing compact chip; the customer
+  dropdown now also closes on blur (short delay so a result's `mousedown`
+  still registers first).
+- **Disponibilidad** (`get_item_info().qty_disponible`, unchanged
+  server-side) now renders three states instead of two: verde (`> 0`),
+  rojo (`== 0`, new `.fg-product-avail--zero` color), gris/no determinado
+  (`null` -- item has no default warehouse configured, new
+  `.fg-product-avail--none`). Still purely informational -- the stepper is
+  never disabled by it, at any quantity.
+- **Stepper**: tightened gap/input width in the product-card stepper
+  (`.fg-stepper` gap 8px->6px, input 48px->44px); buttons stay at
+  `var(--fg-touch)` (44px), the shared design system's own minimum tap
+  target, unchanged. On mobile (<=640px) the stepper wraps to its own row
+  below the product's image/name/code/UOM/disponibilidad instead of
+  competing with them for width, same pattern already used by
+  `.fg-cart-line` on the resumen step.
+- **"VER PEDIDO ->"**: each "Mis pedidos" card gained a visible action
+  that opens a detail overlay for that order. Backed by a new
+  `api/ventas.py` endpoint, `get_order_detail(name)` -- same permission
+  model as every other read in the module (`get_doc()` +
+  `check_permission("read")`, i.e. Commit 18.1's real if_owner=1, no
+  `ignore_permissions`/`get_all`/`set_user`), returning the same header
+  fields `get_my_orders()` already exposes plus a hand-built `items` list
+  (`item_code`/`item_name`/`qty`/`stock_uom` only, one entry per Sales
+  Order Item row -- never `so.as_dict()`/`row.as_dict()`, so there is
+  nothing economic to accidentally forward). A new AST-based structural
+  guardrail (`test_regression.py`,
+  `test_get_order_detail_never_calls_as_dict_and_only_returns_allowlisted_keys`)
+  asserts this holds even after a future edit: no `.as_dict()` call
+  anywhere in the function, and every dict-literal key it returns is a
+  member of a fixed, non-economic allowlist.
+- **KPI "Pendientes"**: subtitle changed from "Por entregar o facturar" to
+  "Pedidos por completar". Title and the underlying `status` bucket logic
+  (`get_sales_summary()`) are unchanged.
+
+**Tests**: 3 new behavioural tests in `test_ventas_api.py`
+(`get_order_detail()` returns the right header + item breakdown; response
+never contains an economic key, header or item-level; a second Vendedora
+gets `PermissionError` reading the first one's order) + 1 new structural
+guardrail in `test_regression.py` (above), 4 new tests total. No change to
+`ventas.json` (roles already correct from Commit 18.3). See the exact
+before/after count and `run-tests` result in the Commit 18.4 delivery
+summary.
+precedent for automated frontend tests, and this commit invents none.

@@ -214,6 +214,51 @@ def get_my_orders(limit=50):
 
 
 @frappe.whitelist()
+def get_order_detail(name):
+    """Line-level detail for one of Vendedora's own Sales Orders -- the
+    "VER PEDIDO" view in Page Ventas (Commit 18.4). Same permission model
+    as every other read in this module: `get_doc()` + `check_permission
+    ("read")`, which is where if_owner=1 (Commit 18.1) is actually
+    enforced -- a second Vendedora's own order raises `PermissionError`
+    here exactly like it does everywhere else in this module.
+
+    The response is built field by field, never `so.as_dict()` or
+    `row.as_dict()` (both of which carry every economic field on the
+    document) -- there is nothing to filter after the fact because
+    nothing economic is ever read into a variable here in the first
+    place. See `test_regression.py`'s
+    `test_get_order_detail_never_calls_as_dict_and_only_returns_allowlisted_keys`
+    for the static guardrail that keeps this true if this function is
+    ever touched again.
+    """
+    _require_login()
+
+    so = frappe.get_doc("Sales Order", name)
+    so.check_permission("read")
+
+    return {
+        "name": so.name,
+        "customer": so.customer,
+        "customer_name": so.customer_name,
+        "transaction_date": so.transaction_date,
+        "delivery_date": so.delivery_date,
+        "status": so.status,
+        "item_count": len(so.items),
+        "total_qty": so.total_qty,
+        "observations": so.fg_observations,
+        "items": [
+            {
+                "item_code": row.item_code,
+                "item_name": row.item_name,
+                "qty": row.qty,
+                "stock_uom": row.stock_uom,
+            }
+            for row in so.items
+        ],
+    }
+
+
+@frappe.whitelist()
 def get_sales_summary():
     """KPI counts for the Page Ventas dashboard header -- derived
     exclusively from Sales Order/Sales Order Item's own native fields,

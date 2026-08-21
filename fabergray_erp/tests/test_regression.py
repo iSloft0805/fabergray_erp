@@ -185,6 +185,72 @@ class TestStaticGuardrails(IntegrationTestCase):
 			"must be used for every read and write",
 		)
 
+	def test_get_order_detail_never_calls_as_dict_and_only_returns_allowlisted_keys(self):
+		"""Commit 18.4 guardrail: get_order_detail() must build its response
+		dict field by field (never `so.as_dict()`/`row.as_dict()`, both of
+		which carry every economic field on the document) and must never
+		gain a dict-literal key outside this fixed allowlist -- so a future
+		edit that starts forwarding `rate`/`amount`/`grand_total`/etc. fails
+		here immediately, before any behavioural test would catch it."""
+		source = inspect.getsource(ventas.get_order_detail)
+		tree = ast.parse(source)
+
+		for node in ast.walk(tree):
+			if isinstance(node, ast.Attribute) and node.attr == "as_dict":
+				self.fail(
+					"get_order_detail() must build its response dict field by field, "
+					"never via so.as_dict()/row.as_dict()"
+				)
+
+		allowed_keys = {
+			"name",
+			"customer",
+			"customer_name",
+			"transaction_date",
+			"delivery_date",
+			"status",
+			"item_count",
+			"total_qty",
+			"observations",
+			"items",
+			"item_code",
+			"item_name",
+			"qty",
+			"stock_uom",
+		}
+		economic_keys = {
+			"rate",
+			"price_list_rate",
+			"amount",
+			"net_rate",
+			"net_amount",
+			"base_rate",
+			"base_amount",
+			"total",
+			"grand_total",
+			"net_total",
+			"base_grand_total",
+			"base_net_total",
+			"discount_percentage",
+			"discount_amount",
+			"taxes",
+			"margin_rate_or_amount",
+		}
+
+		found_keys = set()
+		for node in ast.walk(tree):
+			if isinstance(node, ast.Dict):
+				for key in node.keys:
+					if isinstance(key, ast.Constant) and isinstance(key.value, str):
+						found_keys.add(key.value)
+
+		self.assertTrue(found_keys, "expected at least one dict literal key in get_order_detail()")
+		self.assertTrue(
+			found_keys.issubset(allowed_keys),
+			f"get_order_detail() returns unexpected key(s): {found_keys - allowed_keys}",
+		)
+		self.assertFalse(economic_keys & found_keys)
+
 	def test_finish_picking_uses_native_submit_not_a_manual_docstatus_flip(self):
 		source = inspect.getsource(bodega.finish_picking)
 		self.assertIn("pl.submit()", source)

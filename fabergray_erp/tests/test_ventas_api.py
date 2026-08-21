@@ -249,6 +249,59 @@ class TestVentasApi(IntegrationTestCase):
 		order = next(o for o in orders if o["name"] == result["name"])
 		self.assertFalse(_ECONOMIC_KEYS & set(order.keys()))
 
+	# -- get_order_detail (Commit 18.4) --------------------------------------
+
+	def test_vendedora_can_get_order_detail_with_items(self):
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name,
+				items=[{"item_code": self.item.name, "qty": 3}],
+				observations="Entregar en la mañana",
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		with fx.as_user(self.vendedora_a):
+			detail = ventas.get_order_detail(result["name"])
+
+		self.assertEqual(detail["name"], result["name"])
+		self.assertEqual(detail["customer"], self.customer.name)
+		self.assertEqual(detail["item_count"], 1)
+		self.assertEqual(detail["total_qty"], 3)
+		self.assertEqual(detail["observations"], "Entregar en la mañana")
+		self.assertEqual(len(detail["items"]), 1)
+		self.assertEqual(detail["items"][0]["item_code"], self.item.name)
+		self.assertEqual(detail["items"][0]["qty"], 3)
+		self.assertEqual(detail["items"][0]["stock_uom"], self.item.stock_uom)
+
+	def test_get_order_detail_response_never_contains_economic_data(self):
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		with fx.as_user(self.vendedora_a):
+			detail = ventas.get_order_detail(result["name"])
+
+		self.assertFalse(_ECONOMIC_KEYS & set(detail.keys()))
+		for row in detail["items"]:
+			self.assertEqual(set(row.keys()), {"item_code", "item_name", "qty", "stock_uom"})
+			self.assertFalse(_ECONOMIC_KEYS & set(row.keys()))
+
+	def test_another_vendedora_cannot_read_order_detail(self):
+		with fx.as_user(self.vendedora_a):
+			result = ventas.create_and_submit_sales_order(
+				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
+
+		with fx.as_user(self.vendedora_b):
+			with self.assertRaises(frappe.PermissionError):
+				ventas.get_order_detail(result["name"])
+
 	def test_sales_summary_respects_if_owner(self):
 		"""Each Vendedora's `pedidos_hoy` moves by exactly the orders *she*
 		submits, regardless of what the other one does in between --

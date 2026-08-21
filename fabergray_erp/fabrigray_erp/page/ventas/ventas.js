@@ -15,13 +15,13 @@ frappe.pages["ventas"].on_page_load = function (wrapper) {
 // All server communication in this file goes through fabergray_erp.api.ventas.* --
 // nothing here computes pricing, calls the Fulfillment Engine directly, or reads/
 // writes Pick List/Reporte de Faltante (Vendedora has no permission on either,
-// Commit 18.1). Commit 18.3 renders exactly what those six endpoints return --
-// no economic field (rate/price_list_rate/discount/amount/taxes/grand_total or
-// any equivalent) is ever read from a server response or constructed here. The
-// only payload this file ever sends to create_and_submit_sales_order() is built
-// by build_order_payload() below, which is the single place a request body is
-// assembled -- read that function before touching anything related to "Nuevo
-// pedido".
+// Commit 18.1). Commit 18.3/18.4 render exactly what those seven endpoints
+// return -- no economic field (rate/price_list_rate/discount/amount/taxes/
+// grand_total or any equivalent) is ever read from a server response or
+// constructed here. The only payload this file ever sends to
+// create_and_submit_sales_order() is built by build_order_payload() below,
+// which is the single place a request body is assembled -- read that
+// function before touching anything related to "Nuevo pedido".
 fabergray_erp.Ventas = class Ventas {
 	constructor(page) {
 		this.page = page;
@@ -142,7 +142,7 @@ fabergray_erp.Ventas = class Ventas {
 		const s = this.summary || {};
 		const cards = [
 			{ key: "pedidos_hoy", label: __("Pedidos de hoy"), sub: __("Pedidos creados hoy"), i: "calendar", mod: "ventas-hoy" },
-			{ key: "pendientes", label: __("Pendientes"), sub: __("Por entregar o facturar"), i: "clock", mod: "ventas-pendientes" },
+			{ key: "pendientes", label: __("Pendientes"), sub: __("Pedidos por completar"), i: "clock", mod: "ventas-pendientes" },
 			{ key: "entregados", label: __("Entregados"), sub: __("Completados"), i: "check", mod: "ventas-entregados" },
 			{ key: "cancelados", label: __("Cancelados"), sub: __("Pedidos cancelados"), i: "x", mod: "ventas-cancelados" },
 		];
@@ -232,6 +232,9 @@ fabergray_erp.Ventas = class Ventas {
 					<span>${format_qty(o.total_qty)} ${__("unidades")}</span>
 				</div>
 				${obs}
+				<button type="button" class="fg-order-card-view" data-order-name="${frappe.utils.escape_html(o.name)}">
+					${__("VER PEDIDO")} ${icon("chevron-right", "fg-icon-sm")}
+				</button>
 			</div>
 		`;
 	}
@@ -259,6 +262,95 @@ fabergray_erp.Ventas = class Ventas {
 			this.$body.find(".fg-orders-section").html(this.render_orders_section());
 			this.bind_orders_section_events();
 		});
+
+		this.$body.find(".fg-order-card-view").on("click", (e) => {
+			this.open_order_detail($(e.currentTarget).data("order-name"));
+		});
+	}
+
+	// =====================================================================
+	// Detalle de pedido ("VER PEDIDO") -- operational only, same non-
+	// economic allowlist as get_order_detail() (Commit 18.4). No line item
+	// here ever carries rate/amount/price_list_rate/etc.
+	// =====================================================================
+	open_order_detail(name) {
+		if (!name) return;
+		this.render_order_detail_overlay(null, true);
+		this.call("get_order_detail", { name: name })
+			.then((detail) => this.render_order_detail_overlay(detail, false))
+			.catch(() => this.close_order_detail());
+	}
+
+	render_order_detail_overlay(detail, loading) {
+		this.$app.find(".fg-order-detail-overlay").remove();
+
+		const $overlay = $('<div class="fg-order-detail-overlay"></div>').appendTo(this.$app);
+		$overlay.on("mousedown", (e) => {
+			if (e.target === $overlay[0]) this.close_order_detail();
+		});
+
+		if (loading) {
+			$overlay.html(`
+				<div class="fg-order-detail-panel">
+					<div class="fg-skeleton fg-product-skeleton"></div>
+					<div class="fg-skeleton fg-product-skeleton"></div>
+				</div>
+			`);
+			return;
+		}
+
+		const status = status_meta(detail.status);
+		const entrega = detail.delivery_date ? frappe.datetime.str_to_user(detail.delivery_date) : "—";
+		const obs = detail.observations
+			? `<div class="fg-order-detail-obs">${icon("file-text", "fg-icon-sm")} ${frappe.utils.escape_html(
+					detail.observations
+			  )}</div>`
+			: "";
+		const lines = (detail.items || [])
+			.map(
+				(l) => `
+				<div class="fg-order-detail-line">
+					<div class="fg-order-detail-line-info">
+						<span class="fg-order-detail-line-name">${frappe.utils.escape_html(l.item_name)}</span>
+						<span class="fg-order-detail-line-code">${frappe.utils.escape_html(l.item_code)}</span>
+					</div>
+					<span class="fg-order-detail-line-qty">${format_qty(l.qty)} ${frappe.utils.escape_html(l.stock_uom || "")}</span>
+				</div>
+			`
+			)
+			.join("");
+
+		$overlay.html(`
+			<div class="fg-order-detail-panel">
+				<div class="fg-order-detail-header">
+					<div class="fg-order-detail-id">#${frappe.utils.escape_html(detail.name)}</div>
+					<span class="fg-badge fg-badge--${status.mod}">${status.label}</span>
+					<button type="button" class="fg-order-detail-close" title="${__("Cerrar")}">${icon("x")}</button>
+				</div>
+				<div class="fg-order-detail-customer">
+					${icon("user", "fg-icon-sm")} ${frappe.utils.escape_html(detail.customer_name || detail.customer || "—")}
+				</div>
+				<div class="fg-order-detail-meta">
+					<span>${icon("calendar", "fg-icon-sm")} ${frappe.datetime.str_to_user(detail.transaction_date)}</span>
+					<span>${icon("truck", "fg-icon-sm")} ${__("Entrega")}: ${entrega}</span>
+				</div>
+				${obs}
+				<div class="fg-order-detail-section-title">${__("Productos")}</div>
+				<div class="fg-order-detail-lines">
+					${lines || `<div class="fg-empty fg-empty--sm">${__("Sin productos.")}</div>`}
+				</div>
+				<div class="fg-order-detail-footer">
+					${detail.item_count} ${detail.item_count === 1 ? __("referencia") : __("referencias")}
+					&middot;
+					${format_qty(detail.total_qty)} ${__("unidades")}
+				</div>
+			</div>
+		`);
+		$overlay.find(".fg-order-detail-close").on("click", () => this.close_order_detail());
+	}
+
+	close_order_detail() {
+		this.$app.find(".fg-order-detail-overlay").remove();
 	}
 
 	// =====================================================================
@@ -270,8 +362,6 @@ fabergray_erp.Ventas = class Ventas {
 		this.state.view = "nuevo_pedido";
 		this.set_busy(false);
 		this.render_nuevo_pedido();
-		this.search_customers("");
-		this.search_items("");
 	}
 
 	back_to_dashboard() {
@@ -305,7 +395,7 @@ fabergray_erp.Ventas = class Ventas {
 			</div>
 		`);
 		this.render_customer_area();
-		this.render_item_results_skeleton();
+		this.render_item_results_empty_prompt();
 		this.render_summary();
 		this.bind_nuevo_pedido_events();
 	}
@@ -319,12 +409,32 @@ fabergray_erp.Ventas = class Ventas {
 		`);
 	}
 
+	// Initial state of "2. Agregar productos" -- no catalog preload (Commit
+	// 18.4): the full Item list never renders until the Vendedora actually
+	// types something into the search box.
+	render_item_results_empty_prompt() {
+		this.$body.find(".fg-item-results").html(`
+			<div class="fg-empty">${__("Escribe para buscar productos")}</div>
+		`);
+	}
+
 	bind_nuevo_pedido_events() {
 		this.$body.find(".fg-np-back").on("click", () => this.back_to_dashboard());
 
 		const $item_input = this.$body.find(".fg-item-search-input");
 		const debounced_item_search = frappe.utils.debounce((txt) => this.search_items(txt), 300);
-		$item_input.on("input", (e) => debounced_item_search($(e.currentTarget).val()));
+		$item_input.on("input", (e) => {
+			const txt = $(e.currentTarget).val();
+			if (!txt || !txt.trim()) {
+				// Clearing the box goes back to the empty prompt immediately --
+				// no debounce, no server call, matching search_items()'s own guard.
+				this._item_search_seq++; // invalidate any in-flight search
+				this.np.item_results = [];
+				this.render_item_results_empty_prompt();
+				return;
+			}
+			debounced_item_search(txt);
+		});
 	}
 
 	// -- Paso 1: Cliente -----------------------------------------------------
@@ -341,13 +451,15 @@ fabergray_erp.Ventas = class Ventas {
 			`);
 			$area.find(".fg-chip-remove").on("click", () => {
 				this.np.customer = null;
+				this.np.customer_results = [];
 				this.render_customer_area();
-				this.search_customers("");
 				this.refresh_confirm_state();
 			});
 			return;
 		}
 
+		// No catalog preload (Commit 18.4): just the search box, closed --
+		// nothing is fetched until the Vendedora types something.
 		$area.html(`
 			<div class="fg-search-box">
 				${icon("search")}
@@ -355,19 +467,40 @@ fabergray_erp.Ventas = class Ventas {
 			</div>
 			<div class="fg-search-dropdown"></div>
 		`);
-		this.render_customer_dropdown();
 
 		const $input = $area.find(".fg-customer-search-input");
 		const debounced = frappe.utils.debounce((txt) => this.search_customers(txt), 300);
-		$input.on("input", (e) => debounced($(e.currentTarget).val()));
+		$input.on("input", (e) => {
+			const txt = $(e.currentTarget).val();
+			if (!txt || !txt.trim()) {
+				this._customer_search_seq++; // invalidate any in-flight search
+				this.np.customer_results = [];
+				this.render_customer_dropdown();
+				return;
+			}
+			debounced(txt);
+		});
 		$input.on("focus", () => {
 			if (this.np.customer_results.length) $area.find(".fg-search-dropdown").addClass("is-open");
+		});
+		$input.on("blur", () => {
+			// Small delay so a result row's own "mousedown" (fires before
+			// blur) can still register the selection before this closes it.
+			setTimeout(() => $area.find(".fg-search-dropdown").removeClass("is-open"), 150);
 		});
 	}
 
 	search_customers(txt) {
+		if (!txt || !txt.trim()) {
+			// Commit 18.4: never fetch/show the full customer list -- only a
+			// real search triggers a server call.
+			this._customer_search_seq++;
+			this.np.customer_results = [];
+			this.render_customer_dropdown();
+			return Promise.resolve();
+		}
 		const seq = ++this._customer_search_seq;
-		return this.call("search_customers", { txt: txt || "" }).then((results) => {
+		return this.call("search_customers", { txt: txt }).then((results) => {
 			if (seq !== this._customer_search_seq || this.np.customer) return;
 			this.np.customer_results = results || [];
 			this.render_customer_dropdown();
@@ -411,9 +544,17 @@ fabergray_erp.Ventas = class Ventas {
 	// -- Paso 2: Productos ----------------------------------------------------
 
 	search_items(txt) {
+		if (!txt || !txt.trim()) {
+			// Commit 18.4: never fetch/show the full catalog -- only a real
+			// search triggers a server call.
+			this._item_search_seq++;
+			this.np.item_results = [];
+			this.render_item_results_empty_prompt();
+			return Promise.resolve();
+		}
 		const seq = ++this._item_search_seq;
 		this.render_item_results_skeleton();
-		return this.call("search_items", { txt: txt || "" }).then((results) => {
+		return this.call("search_items", { txt: txt }).then((results) => {
 			if (seq !== this._item_search_seq) return;
 			this.np.item_results = results || [];
 			return this.hydrate_item_availability(this.np.item_results).then(() => {
@@ -453,8 +594,17 @@ fabergray_erp.Ventas = class Ventas {
 
 	render_item_result_card(r) {
 		const info = this._item_info_cache.get(r.item_code);
-		const disponible = info && info.qty_disponible != null ? format_qty(info.qty_disponible) : "—";
-		const disponible_class = info && flt(info.qty_disponible) > 0 ? "fg-product-avail--ok" : "fg-product-avail--zero";
+		const has_qty = !!info && info.qty_disponible != null;
+		const disponible = has_qty ? format_qty(info.qty_disponible) : "—";
+		// Three states (Commit 18.4): verde (>0), rojo (=0), gris (no
+		// determinado -- item.item_defaults sin bodega, get_item_info()
+		// devolvió qty_disponible: null). Nunca deshabilita el stepper --
+		// la disponibilidad es puramente informativa.
+		const disponible_class = !has_qty
+			? "fg-product-avail--none"
+			: flt(info.qty_disponible) > 0
+			? "fg-product-avail--ok"
+			: "fg-product-avail--zero";
 		const qty = this.cart_qty(r.item_code);
 		const thumb = r.image
 			? `<img class="fg-product-thumb-img" src="${frappe.utils.escape_html(r.image)}" alt="">`

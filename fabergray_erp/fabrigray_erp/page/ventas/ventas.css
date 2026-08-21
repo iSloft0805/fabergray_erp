@@ -9,6 +9,10 @@
  * customer/product search boxes, product cards and the cart/resumen list.
  * Scoped under .fg-ventas so nothing leaks outside this Page; bodega.css/
  * jefe_de_bodega.css are not touched or depended on.
+ *
+ * Commit 18.4 (UX-only refinement, no behavioural/permission change): three-
+ * state disponibilidad colors, a compacted product-card stepper, the "VER
+ * PEDIDO ->" action + its detail overlay, and no other rule touched.
  */
 
 .fg-ventas .fg-body {
@@ -196,6 +200,30 @@
 
 .fg-ventas .fg-empty--sm {
 	padding: 24px 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* "VER PEDIDO ->" action (Commit 18.4)                                 */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-order-card-view {
+	appearance: none;
+	align-self: flex-start;
+	margin: -8px -4px -6px;
+	background: transparent;
+	border: none;
+	padding: 8px 4px 6px;
+	min-height: 44px;
+	font-size: 0.8rem;
+	font-weight: 700;
+	color: var(--fg-primary);
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	cursor: pointer;
+}
+
+.fg-ventas .fg-order-card-view:hover {
+	color: var(--fg-primary-dark);
 }
 
 /* ------------------------------------------------------------------ */
@@ -390,10 +418,10 @@
 	background: var(--fg-bg);
 	border: 1.5px solid var(--fg-border);
 	border-radius: var(--fg-radius-md);
-	padding: 14px;
+	padding: 12px;
 	display: flex;
 	align-items: center;
-	gap: 12px;
+	gap: 10px;
 	transition: border-color var(--fg-transition), background var(--fg-transition);
 }
 
@@ -454,24 +482,34 @@
 	flex-wrap: wrap;
 }
 
+/* Disponibilidad -- tres estados, puramente informativos (Commit 18.4):
+ * nunca deshabilitan el stepper ni bloquean agregar cantidad. */
 .fg-ventas .fg-product-avail--ok {
 	color: var(--fg-success-dark);
 	font-weight: 600;
 }
 
 .fg-ventas .fg-product-avail--zero {
+	color: var(--fg-danger);
+	font-weight: 600;
+}
+
+.fg-ventas .fg-product-avail--none {
 	color: var(--fg-text-faint);
 }
 
 /* ------------------------------------------------------------------ */
 /* Stepper -- reproduced from page/bodega/bodega.css (same values,     */
 /* scoped here under .fg-ventas rather than importing that file).      */
+/* Commit 18.4: tightened gap/input width in the product-card stepper  */
+/* to leave more room for name/code/UOM/disponibilidad -- buttons stay */
+/* at var(--fg-touch) (44px), the minimum tap target, unchanged.       */
 /* ------------------------------------------------------------------ */
 .fg-ventas .fg-stepper {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	gap: 8px;
+	gap: 6px;
 	flex-shrink: 0;
 }
 
@@ -515,7 +553,7 @@
 }
 
 .fg-ventas .fg-stepper-input {
-	width: 48px;
+	width: 44px;
 	height: var(--fg-touch);
 	text-align: center;
 	font-size: 1rem;
@@ -634,6 +672,154 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Detalle de pedido ("VER PEDIDO ->") -- operational only, same        */
+/* non-economic allowlist as get_order_detail() (Commit 18.4).          */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-order-detail-overlay {
+	position: fixed;
+	inset: 0;
+	background: rgba(16, 24, 40, 0.45);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 20px;
+	z-index: 100;
+}
+
+.fg-ventas .fg-order-detail-panel {
+	background: var(--fg-card);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow);
+	width: min(480px, 100%);
+	max-height: min(640px, 90vh);
+	overflow-y: auto;
+	padding: 20px;
+}
+
+.fg-ventas .fg-order-detail-header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-bottom: 14px;
+}
+
+.fg-ventas .fg-order-detail-id {
+	font-size: 1.1rem;
+	font-weight: 700;
+	flex: 1;
+}
+
+.fg-ventas .fg-order-detail-close {
+	appearance: none;
+	width: 36px;
+	height: 36px;
+	border-radius: 50%;
+	border: 1px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+.fg-ventas .fg-order-detail-close:hover {
+	background: var(--fg-bg);
+}
+
+.fg-ventas .fg-order-detail-customer {
+	font-size: 0.92rem;
+	font-weight: 600;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 8px;
+}
+
+.fg-ventas .fg-order-detail-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 16px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	margin-bottom: 14px;
+}
+
+.fg-ventas .fg-order-detail-meta span {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.fg-ventas .fg-order-detail-obs {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-sm);
+	padding: 8px 10px;
+	margin-bottom: 14px;
+}
+
+.fg-ventas .fg-order-detail-section-title {
+	font-weight: 700;
+	font-size: 0.9rem;
+	margin-bottom: 10px;
+}
+
+.fg-ventas .fg-order-detail-lines {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 16px;
+}
+
+.fg-ventas .fg-order-detail-line {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	background: var(--fg-bg);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 10px 12px;
+}
+
+.fg-ventas .fg-order-detail-line-info {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.fg-ventas .fg-order-detail-line-name {
+	font-size: 0.86rem;
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+
+.fg-ventas .fg-order-detail-line-code {
+	font-size: 0.74rem;
+	color: var(--fg-text-faint);
+}
+
+.fg-ventas .fg-order-detail-line-qty {
+	font-size: 0.84rem;
+	font-weight: 700;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+.fg-ventas .fg-order-detail-footer {
+	font-weight: 700;
+	font-size: 0.9rem;
+	padding-top: 4px;
+	border-top: 1px solid var(--fg-border);
+}
+
+/* ------------------------------------------------------------------ */
 /* Responsive -- desktop first, then tablet (~860px), then mobile      */
 /* (~640px), matching the breakpoints already approved for /app/bodega */
 /* and /app/jefe-de-bodega.                                             */
@@ -677,5 +863,27 @@
 
 	.fg-ventas .fg-np-cta-row .fg-btn {
 		width: 100%;
+	}
+
+	/* Stepper drops to its own row on mobile (Commit 18.4) -- thumb/name/
+	 * code/UOM/disponibilidad keep the first row, tap targets unchanged. */
+	.fg-ventas .fg-product-card {
+		flex-wrap: wrap;
+	}
+
+	.fg-ventas .fg-product-card .fg-stepper {
+		flex-basis: 100%;
+		justify-content: flex-end;
+		margin-top: 4px;
+	}
+
+	.fg-ventas .fg-order-detail-panel {
+		width: 100%;
+		max-height: 100%;
+		border-radius: var(--fg-radius-lg) var(--fg-radius-lg) 0 0;
+	}
+
+	.fg-ventas .fg-order-detail-overlay {
+		align-items: flex-end;
 	}
 }
