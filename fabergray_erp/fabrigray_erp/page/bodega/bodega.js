@@ -21,7 +21,13 @@ fabergray_erp.Bodega = class Bodega {
 	constructor(page) {
 		this.page = page;
 		this.method_prefix = "fabergray_erp.api.bodega.";
-		this.pending_rows = new Set();
+		// Qty-stepper coalescing state (see request_picked_qty/sync_row below):
+		// desired_qty is the latest value the user has asked for per row,
+		// updated synchronously on every click; inflight_rows tracks which
+		// rows currently have a set_picked_qty request in flight. At most one
+		// request is ever in flight per row_name -- other rows are untouched.
+		this.desired_qty = new Map();
+		this.inflight_rows = new Set();
 		this.busy = false;
 		this.last_changed_row = null;
 		this.state = {
@@ -429,7 +435,9 @@ fabergray_erp.Bodega = class Bodega {
 					"minus"
 			  )}</button>
 					<input type="number" inputmode="decimal" class="fg-stepper-input" value="${alistada}" min="0">
-					<button type="button" class="fg-stepper-btn fg-stepper-plus">${icon("plus")}</button>
+					<button type="button" class="fg-stepper-btn fg-stepper-plus" ${
+						solicitada > 0 && alistada >= solicitada ? "disabled" : ""
+					}>${icon("plus")}</button>
 				</div>
 			`
 			: `<div class="fg-item-readonly"><small>${__("Alistado")}</small>${format_qty(alistada)} ${uom}</div>`;
@@ -458,15 +466,15 @@ fabergray_erp.Bodega = class Bodega {
 			const $input = $card.find(".fg-stepper-input");
 
 			$card.find(".fg-stepper-minus").on("click", () => {
-				const next = Math.max(flt($input.val()) - 1, 0);
-				this.commit_picked_qty(row_name, next, $card);
+				const current = this.desired_qty.has(row_name) ? this.desired_qty.get(row_name) : flt($input.val());
+				this.request_picked_qty(row_name, Math.max(current - 1, 0), $card);
 			});
 			$card.find(".fg-stepper-plus").on("click", () => {
-				const next = flt($input.val()) + 1;
-				this.commit_picked_qty(row_name, next, $card);
+				const current = this.desired_qty.has(row_name) ? this.desired_qty.get(row_name) : flt($input.val());
+				this.request_picked_qty(row_name, current + 1, $card);
 			});
 			$input.on("change", () => {
-				this.commit_picked_qty(row_name, flt($input.val()), $card);
+				this.request_picked_qty(row_name, Math.max(flt($input.val()), 0), $card);
 			});
 			$card.find(".fg-report-shortage-btn").on("click", () => {
 				this.open_report_shortage_dialog(row_name, $card);
@@ -474,19 +482,92 @@ fabergray_erp.Bodega = class Bodega {
 		});
 	}
 
-	commit_picked_qty(row_name, qty, $card) {
-		if (this.pending_rows.has(row_name)) return;
-		this.pending_rows.add(row_name);
-		$card.addClass("fg-row-busy");
-		$card.find(".fg-stepper-btn, .fg-stepper-input").prop("disabled", true);
+	// -------------------------------------------------------------------
+	// Qty-stepper coalescing.
+	//
+	// Goal: a burst of +/- clicks on one row must never be silently dropped
+	// and must never queue up N serial requests either. At most one
+	// set_picked_qty request is in flight per row_name at any time; extra
+	// clicks that land while that request is in flight only update
+	// desired_qty (and the on-screen input, optimistically) -- they do not
+	// start a second request. When the in-flight request resolves, we
+	// compare what the server just confirmed against the *current*
+	// desired_qty: if the user asked for something else in the meantime, we
+	// immediately re-sync straight to that latest value (skipping whatever
+	// intermediate values were requested and abandoned along the way).
+	// Only once server and desired_qty agree do we do the one full
+	// load_detail() refresh. Other rows are completely unaffected -- the
+	// lock is per row_name, never global.
+	// -------------------------------------------------------------------
+	request_picked_qty(row_name, qty, $card) {
+		qty = Math.max(flt(qty), 0);
+		this.desired_qty.set(row_name, qty);
+		this.update_stepper_display(row_name, qty, $card);
 
-		this.last_changed_row = row_name;
-		this.call("set_picked_qty", { name: this.state.pick_list, row_name: row_name, qty: qty })
-			.then(() => this.load_detail(this.state.pick_list))
-			.catch(() => this.load_detail(this.state.pick_list))
-			.finally(() => {
-				this.pending_rows.delete(row_name);
+		if (this.inflight_rows.has(row_name)) {
+			// A request for this row is already in flight; it will pick up
+			// this newer desired_qty itself once it resolves (see below).
+			return;
+		}
+		this.sync_row(row_name, $card);
+	}
+
+	sync_row(row_name, $card) {
+		const sent_qty = this.desired_qty.get(row_name);
+		if (sent_qty === undefined) return;
+
+		this.inflight_rows.add(row_name);
+		$card.addClass("fg-row-syncing");
+
+		this.call("set_picked_qty", { name: this.state.pick_list, row_name: row_name, qty: sent_qty })
+			.then(() => {
+				this.inflight_rows.delete(row_name);
+				const latest_desired = this.desired_qty.get(row_name);
+				// Compare against what THIS request just sent, not against the
+				// server's (possibly rounded) echo -- otherwise a field
+				// precision rounding on save could make this loop forever
+				// resending the same value.
+				if (latest_desired !== undefined && flt(latest_desired) !== flt(sent_qty)) {
+					// The user asked for something new while this request was
+					// in flight -- chase the newest value directly, no
+					// intermediate step.
+					this.sync_row(row_name, $card);
+					return;
+				}
+				this.desired_qty.delete(row_name);
+				$card.removeClass("fg-row-syncing");
+				this.last_changed_row = row_name;
+				this.load_detail(this.state.pick_list);
+			})
+			.catch(() => {
+				// Server rejected this value (over the limit, doc no longer
+				// open, concurrent edit, etc). Drop the optimistic guess for
+				// this row entirely and reload the real state from the
+				// server -- never leave a false optimistic number on screen.
+				// This is the one case where controls are briefly blocked,
+				// via fg-row-busy's pointer-events:none, until that reload
+				// finishes and re-renders the row from scratch.
+				this.inflight_rows.delete(row_name);
+				this.desired_qty.delete(row_name);
+				$card.removeClass("fg-row-syncing").addClass("fg-row-busy");
+				this.last_changed_row = row_name;
+				this.load_detail(this.state.pick_list);
 			});
+	}
+
+	// Optimistic, local-only UI update: reflects the requested qty on the
+	// input immediately, and soft-caps the buttons using the qty_solicitada
+	// already present in state.detail (no new data fetched for this). The
+	// server-side check in set_picked_qty (over_delivery_receipt_allowance)
+	// remains the real authority -- this is only a visual courtesy so the
+	// stepper doesn't invite obviously-invalid clicks.
+	update_stepper_display(row_name, qty, $card) {
+		$card.find(".fg-stepper-input").val(qty);
+		$card.find(".fg-stepper-minus").prop("disabled", qty <= 0);
+
+		const row = (this.state.detail && this.state.detail.rows || []).find((r) => r.row_name === row_name);
+		const solicitada = row ? flt(row.qty_solicitada) : 0;
+		$card.find(".fg-stepper-plus").prop("disabled", solicitada > 0 && qty >= solicitada);
 	}
 
 	open_report_shortage_dialog(row_name, $card) {

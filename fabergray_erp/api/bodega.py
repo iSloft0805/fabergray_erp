@@ -296,6 +296,12 @@ def get_pick_list(name):
 				"item_code": row.item_code,
 				"item_name": row.item_name,
 				"description": row.description,
+				# PENDING (tracked separately as "Bodega UOM normalization"):
+				# qty_solicitada/qty_alistada/qty_disponible below are all in
+				# Stock UOM (native Pick List Item convention), but "uom"
+				# here is the transactional UOM, not stock_uom -- they only
+				# look consistent while conversion_factor == 1. Deliberately
+				# not touched by the qty-stepper coalescing bugfix.
 				"uom": row.uom,
 				"warehouse": row.warehouse,
 				"qty_solicitada": row.stock_qty,

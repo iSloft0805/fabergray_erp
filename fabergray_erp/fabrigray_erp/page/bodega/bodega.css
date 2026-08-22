@@ -827,6 +827,13 @@
 	pointer-events: none;
 }
 
+/* Qty-stepper sync indicator: request in flight for this row, but the
+   +/- controls stay fully clickable (no pointer-events:none, no opacity
+   dip) so a burst of clicks keeps registering while it resolves. */
+.fg-item-card.fg-row-syncing {
+	box-shadow: inset 0 0 0 2px var(--fg-primary-tint);
+}
+
 .fg-item-card.fg-row-flash {
 	animation: fg-flash 420ms ease;
 }
