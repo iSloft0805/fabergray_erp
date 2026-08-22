@@ -46,11 +46,17 @@ fabergray_erp.Bodega = class Bodega {
 			queue: null, // get_queue() -- shared by home, orders and history sections
 			filter_bucket: null, // Inicio's own KPI-click filter (unchanged from before)
 			orders_filter: null, // Pedidos' own chip filter -- independent of Inicio's
+			orders_search: "", // Pedidos' own search box -- independent of Faltantes/Historial
+			orders_page: 1,
+			orders_filters_open: false, // Pedidos' own Filtros popover
 			shortages: null, // get_shortages() -- fetched once, filtered client-side by chip
 			shortages_filter: null,
+			shortages_search: "", // Faltantes' own search box -- independent of Pedidos/Historial
+			shortages_page: 1,
 			history_search: "",
 			history_date_from: "",
 			history_date_to: "",
+			history_page: 1,
 			more_view: "menu", // "menu" | "inventory" | "profile" | "help"
 			inventory: null, // get_inventory() -- fetched once, filtered client-side by search
 			inventory_search: "",
@@ -222,6 +228,9 @@ fabergray_erp.Bodega = class Bodega {
 		this.state.pick_list = null;
 		this.state.detail = null;
 		if (section === "more") this.state.more_view = "menu";
+		// Pedidos' own Filtros popover is ephemeral UI, not a filter value --
+		// never leave it open when navigating to another section.
+		if (section !== "orders") this.state.orders_filters_open = false;
 
 		if ((section === "home" || section === "orders" || section === "history") && !this.state.queue) {
 			this.load_queue();
@@ -519,9 +528,37 @@ fabergray_erp.Bodega = class Bodega {
 
 	// -------------------------------------------------------------------
 	// Pedidos -- all Pick Lists visible to the user (get_queue()'s four
-	// buckets, no date restriction), filterable by chip instead of Inicio's
-	// KPI cards. Same card, same open action as Inicio.
+	// buckets, no date restriction), filterable by chip and free-text
+	// search, paginated client-side. Fully isolated from Inicio: its own
+	// card renderer (render_orders_card, not render_queue_card) and its
+	// own fg-orders-* CSS namespace -- restyling Pedidos can never affect
+	// Inicio, Faltantes or Historial, and vice versa. Only get_queue() is
+	// shared as a data source (already the case before this redesign).
 	// -------------------------------------------------------------------
+	get_filtered_orders() {
+		const queue = this.state.queue || {};
+		const filter_order = ["pendientes", "en_alistamiento", "con_faltantes", "listos"];
+		const active_filter = this.state.orders_filter || "todos";
+		const buckets_to_show = active_filter === "todos" ? filter_order : [active_filter];
+
+		let items = [];
+		buckets_to_show.forEach((bucket) => {
+			(queue[bucket] || []).forEach((pl) => items.push({ pl, bucket }));
+		});
+
+		const search = (this.state.orders_search || "").trim().toLowerCase();
+		if (search) {
+			items = items.filter(({ pl }) => {
+				const haystack = [pl.commercial_name, pl.sales_order, pl.name, pl.customer]
+					.filter(Boolean)
+					.join(" ")
+					.toLowerCase();
+				return haystack.includes(search);
+			});
+		}
+		return items;
+	}
+
 	render_orders_html() {
 		const queue = this.state.queue || {};
 		const meta = Bodega.bucket_meta();
@@ -531,132 +568,415 @@ fabergray_erp.Bodega = class Bodega {
 		const chip_html = ["todos", ...filter_order]
 			.map((key) => {
 				const label = key === "todos" ? __("Todos") : meta[key].label;
+				const icon_name = key === "todos" ? "layout-grid" : meta[key].icon;
 				const count =
 					key === "todos"
 						? filter_order.reduce((sum, b) => sum + (queue[b] || []).length, 0)
 						: (queue[key] || []).length;
-				return `<button type="button" class="fg-chip ${
+				return `<button type="button" class="fg-orders-chip ${
 					active_filter === key ? "is-active" : ""
-				}" data-filter="${key}">${label} (${count})</button>`;
+				}" data-filter="${key}">${icon(icon_name, "fg-icon-sm")} ${label} (${count})</button>`;
 			})
 			.join("");
 
-		const buckets_to_show = active_filter === "todos" ? filter_order : [active_filter];
-		let cards_html = "";
-		let any = false;
-		buckets_to_show.forEach((bucket) => {
-			(queue[bucket] || []).forEach((pl) => {
-				any = true;
-				cards_html += this.render_queue_card(pl, bucket);
-			});
-		});
-		if (!any) {
-			cards_html = `<div class="fg-empty">${__("No hay pedidos en este estado.")}</div>`;
+		const filtered = this.get_filtered_orders();
+		const paged = paginate(filtered, this.state.orders_page, PAGE_SIZE);
+		this.state.orders_page = paged.page;
+
+		const cards_html = paged.page_items.length
+			? paged.page_items.map(({ pl, bucket }) => this.render_orders_card(pl, bucket)).join("")
+			: `<div class="fg-orders-empty">${__("No hay pedidos que coincidan.")}</div>`;
+
+		return `
+			<div class="fg-orders-head">
+				<div class="fg-orders-icon">${icon("clipboard-list")}</div>
+				<div>
+					<div class="fg-orders-title">${__("Pedidos")}</div>
+					<div class="fg-orders-subtitle">${__("Gestiona y da seguimiento a todos los pedidos")}</div>
+				</div>
+			</div>
+			<div class="fg-orders-toolbar">
+				<div class="fg-orders-search-wrap">
+					${icon("search", "fg-orders-search-icon")}
+					<input type="text" class="fg-orders-search" placeholder="${__(
+						"Buscar pedido o cliente..."
+					)}" value="${frappe.utils.escape_html(this.state.orders_search || "")}">
+				</div>
+				<div class="fg-orders-filters">
+					<button type="button" class="fg-orders-filters-btn ${
+						this.state.orders_filters_open ? "is-active" : ""
+					}">${icon("filter")} ${__("Filtros")}</button>
+					${this.state.orders_filters_open ? this.render_orders_filters_popover_html(active_filter) : ""}
+				</div>
+			</div>
+			<div class="fg-orders-tabs">${chip_html}</div>
+			<div class="fg-orders-cards">${cards_html}</div>
+			<div class="fg-orders-pagination">${this.render_orders_pagination_html(
+				paged.total,
+				paged.page,
+				paged.page_count
+			)}</div>
+		`;
+	}
+
+	render_orders_filters_popover_html(active_filter) {
+		const meta = Bodega.bucket_meta();
+		const filter_order = ["pendientes", "en_alistamiento", "con_faltantes", "listos"];
+		const options = ["todos", ...filter_order]
+			.map((key) => {
+				const label = key === "todos" ? __("Todos") : meta[key].label;
+				return `<button type="button" class="fg-orders-filters-popover-item ${
+					active_filter === key ? "is-active" : ""
+				}" data-filter="${key}">${label}</button>`;
+			})
+			.join("");
+		return `<div class="fg-orders-filters-popover">${options}</div>`;
+	}
+
+	render_orders_pagination_html(total, page, page_count) {
+		if (!total) return "";
+		const start = (page - 1) * PAGE_SIZE + 1;
+		const end = Math.min(page * PAGE_SIZE, total);
+		return `
+			<div class="fg-orders-pagination-info">${__("Mostrando {0} a {1} de {2} pedidos", [start, end, total])}</div>
+			<div class="fg-orders-pagination-controls">
+				<button type="button" class="fg-orders-pagination-btn fg-orders-pagination-prev" ${
+					page <= 1 ? "disabled" : ""
+				}>${icon("chevron-left")}</button>
+				<span class="fg-orders-pagination-page">${page}</span>
+				<button type="button" class="fg-orders-pagination-btn fg-orders-pagination-next" ${
+					page >= page_count ? "disabled" : ""
+				}>${icon("chevron-right")}</button>
+			</div>
+		`;
+	}
+
+	// Pedidos' own card markup -- deliberately not render_queue_card(). Same
+	// underlying Pick List fields, same click target (open_pick_list_from),
+	// but its own fg-orders-card-* classes so nothing here can ever change
+	// how Inicio looks.
+	render_orders_card(pl, bucket) {
+		const meta = Bodega.bucket_meta()[bucket];
+		const pedido_label = pl.commercial_name || pl.sales_order || pl.name;
+		const customer = pl.customer ? frappe.utils.escape_html(pl.customer) : __("Sin cliente");
+		const started_line =
+			bucket !== "pendientes" && pl.fg_started_by
+				? `<div class="fg-orders-card-meta">${icon("user", "fg-icon-sm")} ${__(
+						"Iniciado por"
+				  )} ${frappe.utils.escape_html(pl.fg_started_by)}</div>`
+				: "";
+
+		let button_label = __("VER DETALLE");
+		let button_class = "fg-orders-card-btn--success";
+		if (bucket === "pendientes") {
+			button_label = __("INICIAR ALISTAMIENTO");
+			button_class = "fg-orders-card-btn--primary";
+		} else if (bucket === "en_alistamiento") {
+			button_label = __("CONTINUAR");
+			button_class = "fg-orders-card-btn--warning";
+		} else if (bucket === "con_faltantes") {
+			button_label = __("VER FALTANTES");
+			button_class = "fg-orders-card-btn--danger";
 		}
 
 		return `
-			<div class="fg-section-head"><div class="fg-section-title">${__("Pedidos")}</div></div>
-			<div class="fg-chip-row">${chip_html}</div>
-			<div class="fg-cards">${cards_html}</div>
+			<div class="fg-orders-card fg-orders-card--${bucket}" data-name="${frappe.utils.escape_html(
+			pl.name
+		)}" data-bucket="${bucket}">
+				<div class="fg-orders-card-main">
+					<div class="fg-orders-card-icon fg-orders-card-icon--${bucket}">${icon(meta.icon)}</div>
+					<div>
+						<div class="fg-orders-card-id">${__("PEDIDO")} #${frappe.utils.escape_html(pedido_label)}</div>
+						<div class="fg-orders-card-customer">${customer}</div>
+					</div>
+				</div>
+				<div class="fg-orders-card-info">
+					<div class="fg-orders-card-meta">${icon("package", "fg-icon-sm")} ${pl.item_count} ${
+			pl.item_count === 1 ? __("producto") : __("productos")
+		}</div>
+					${started_line}
+				</div>
+				<div class="fg-orders-card-progress">
+					<span class="fg-orders-badge fg-orders-badge--${bucket}">${meta.label}</span>
+					${orders_progress_markup(bucket)}
+				</div>
+				<button type="button" class="fg-orders-card-btn ${button_class}">${button_label} ${icon(
+			"chevron-right",
+			"fg-icon-sm"
+		)}</button>
+			</div>
 		`;
 	}
 
 	bind_orders_events() {
-		this.$body.find(".fg-chip").on("click", (e) => {
+		// Search re-renders only the cards + pagination containers (via
+		// .html() on the stable wrappers below), never the search input
+		// itself -- otherwise the input would lose focus on every keystroke.
+		const rerender = () => {
+			const filtered = this.get_filtered_orders();
+			const paged = paginate(filtered, this.state.orders_page, PAGE_SIZE);
+			this.state.orders_page = paged.page;
+			const cards_html = paged.page_items.length
+				? paged.page_items.map(({ pl, bucket }) => this.render_orders_card(pl, bucket)).join("")
+				: `<div class="fg-orders-empty">${__("No hay pedidos que coincidan.")}</div>`;
+			this.$body.find(".fg-orders-cards").html(cards_html);
+			this.$body
+				.find(".fg-orders-pagination")
+				.html(this.render_orders_pagination_html(paged.total, paged.page, paged.page_count));
+		};
+
+		this.$body.find(".fg-orders-search").on("input", (e) => {
+			this.state.orders_search = $(e.currentTarget).val();
+			this.state.orders_page = 1;
+			rerender();
+		});
+
+		this.$body.find(".fg-orders-chip").on("click", (e) => {
 			this.state.orders_filter = $(e.currentTarget).data("filter");
+			this.state.orders_page = 1;
 			this.render_body();
 		});
-		this.$body.find(".fg-order-card").on("click", (e) => {
+
+		this.$body.find(".fg-orders-filters-btn").on("click", () => {
+			this.state.orders_filters_open = !this.state.orders_filters_open;
+			this.render_body();
+		});
+
+		this.$body.find(".fg-orders-filters-popover-item").on("click", (e) => {
+			this.state.orders_filter = $(e.currentTarget).data("filter");
+			this.state.orders_filters_open = false;
+			this.state.orders_page = 1;
+			this.render_body();
+		});
+
+		// Delegated on the stable containers -- survives rerender()'s .html()
+		// swaps above without needing to be re-bound on every keystroke.
+		this.$body.find(".fg-orders-cards").on("click", ".fg-orders-card", (e) => {
 			const $card = $(e.currentTarget);
 			this.open_pick_list_from("orders", $card.data("name"), $card.data("bucket"));
+		});
+		this.$body.find(".fg-orders-pagination").on("click", ".fg-orders-pagination-prev", () => {
+			this.state.orders_page = Math.max(this.state.orders_page - 1, 1);
+			rerender();
+		});
+		this.$body.find(".fg-orders-pagination").on("click", ".fg-orders-pagination-next", () => {
+			this.state.orders_page = this.state.orders_page + 1;
+			rerender();
 		});
 	}
 
 	// -------------------------------------------------------------------
 	// Faltantes -- get_shortages(), fetched once per section entry/refresh,
-	// filtered client-side by status chip (same interaction as Pedidos).
+	// filtered client-side by status chip and free-text search, paginated.
+	// Fully isolated: its own fg-shortages-* CSS namespace and its own card
+	// renderer (render_shortages_card) -- never reuses Pedidos'/Historial's
+	// classes. reported_by_fullname is read as-is from get_shortages(),
+	// already resolved server-side; no extra user lookup added here.
 	// -------------------------------------------------------------------
+	static shortage_status_meta() {
+		return {
+			Abierto: { slug: "abierto", label: __("Abierto"), icon: "triangle-alert" },
+			"En Proceso": { slug: "en_proceso", label: __("En proceso"), icon: "clock" },
+			Resuelto: { slug: "resuelto", label: __("Resuelto"), icon: "circle-check-big" },
+		};
+	}
+
+	get_filtered_shortages() {
+		const reports = this.state.shortages || [];
+		const active_filter = this.state.shortages_filter || "todos";
+		let items = active_filter === "todos" ? reports : reports.filter((r) => r.status === active_filter);
+
+		const search = (this.state.shortages_search || "").trim().toLowerCase();
+		if (search) {
+			items = items.filter((r) => {
+				const haystack = [r.commercial_name, r.sales_order, r.item_name, r.item_code]
+					.filter(Boolean)
+					.join(" ")
+					.toLowerCase();
+				return haystack.includes(search);
+			});
+		}
+		return items;
+	}
+
 	render_shortages_html() {
-		const chip_html = this.render_shortage_chips_html();
+		const chip_html = this.render_shortages_chips_html();
+		const filtered = this.get_filtered_shortages();
+		const paged = paginate(filtered, this.state.shortages_page, PAGE_SIZE);
+		this.state.shortages_page = paged.page;
+
+		const cards_html = paged.page_items.length
+			? paged.page_items.map((r) => this.render_shortages_card(r)).join("")
+			: `<div class="fg-shortages-empty">${__("No hay faltantes que coincidan.")}</div>`;
+
 		return `
-			<div class="fg-section-head"><div class="fg-section-title">${__("Faltantes")}</div></div>
-			<div class="fg-chip-row">${chip_html}</div>
-			<div class="fg-cards fg-shortage-cards">${this.render_shortage_cards_html()}</div>
+			<div class="fg-shortages-head">
+				<div class="fg-shortages-icon">${icon("triangle-alert")}</div>
+				<div>
+					<div class="fg-shortages-title">${__("Faltantes")}</div>
+					<div class="fg-shortages-subtitle">${__("Reportes de faltante y su estado de resolución")}</div>
+				</div>
+			</div>
+			<div class="fg-shortages-toolbar">
+				<div class="fg-shortages-search-wrap">
+					${icon("search", "fg-shortages-search-icon")}
+					<input type="text" class="fg-shortages-search" placeholder="${__(
+						"Buscar pedido o producto..."
+					)}" value="${frappe.utils.escape_html(this.state.shortages_search || "")}">
+				</div>
+			</div>
+			<div class="fg-shortages-tabs">${chip_html}</div>
+			<div class="fg-shortages-cards">${cards_html}</div>
+			<div class="fg-shortages-pagination">${this.render_shortages_pagination_html(
+				paged.total,
+				paged.page,
+				paged.page_count
+			)}</div>
 		`;
 	}
 
-	render_shortage_chips_html() {
+	render_shortages_chips_html() {
 		const reports = this.state.shortages || [];
 		const statuses = ["Abierto", "En Proceso", "Resuelto"];
+		const status_meta = Bodega.shortage_status_meta();
 		const active_filter = this.state.shortages_filter || "todos";
 		return ["todos", ...statuses]
 			.map((key) => {
-				const label = key === "todos" ? __("Todos") : key;
+				const label = key === "todos" ? __("Todos") : status_meta[key].label;
+				const icon_name = key === "todos" ? "layout-grid" : status_meta[key].icon;
 				const count = key === "todos" ? reports.length : reports.filter((r) => r.status === key).length;
-				return `<button type="button" class="fg-chip ${
+				return `<button type="button" class="fg-shortages-chip ${
 					active_filter === key ? "is-active" : ""
-				}" data-filter="${key}">${label} (${count})</button>`;
+				}" data-filter="${key}">${icon(icon_name, "fg-icon-sm")} ${label} (${count})</button>`;
 			})
 			.join("");
 	}
 
-	render_shortage_cards_html() {
-		const reports = this.state.shortages || [];
-		const active_filter = this.state.shortages_filter || "todos";
-		const filtered = active_filter === "todos" ? reports : reports.filter((r) => r.status === active_filter);
-		if (!filtered.length) {
-			return `<div class="fg-empty">${__("No hay faltantes en este estado.")}</div>`;
-		}
-		return filtered.map((r) => this.render_shortage_card(r)).join("");
+	render_shortages_pagination_html(total, page, page_count) {
+		if (!total) return "";
+		const start = (page - 1) * PAGE_SIZE + 1;
+		const end = Math.min(page * PAGE_SIZE, total);
+		return `
+			<div class="fg-shortages-pagination-info">${__("Mostrando {0} a {1} de {2} faltantes", [
+			start,
+			end,
+			total,
+		])}</div>
+			<div class="fg-shortages-pagination-controls">
+				<button type="button" class="fg-shortages-pagination-btn fg-shortages-pagination-prev" ${
+					page <= 1 ? "disabled" : ""
+				}>${icon("chevron-left")}</button>
+				<span class="fg-shortages-pagination-page">${page}</span>
+				<button type="button" class="fg-shortages-pagination-btn fg-shortages-pagination-next" ${
+					page >= page_count ? "disabled" : ""
+				}>${icon("chevron-right")}</button>
+			</div>
+		`;
 	}
 
-	render_shortage_card(r) {
+	render_shortages_card(r) {
+		const status_meta = Bodega.shortage_status_meta()[r.status] || {
+			slug: "abierto",
+			label: r.status,
+			icon: "triangle-alert",
+		};
 		const pedido_label = r.commercial_name || r.sales_order || null;
-		const status_class =
-			{ Abierto: "con_faltantes", "En Proceso": "en_alistamiento", Resuelto: "listos" }[r.status] || "pendientes";
 		return `
-			<div class="fg-order-card fg-shortage-card" data-pick-list="${frappe.utils.escape_html(r.pick_list || "")}">
-				<div class="fg-order-main">
-					<div class="fg-order-icon">${icon("triangle-alert")}</div>
+			<div class="fg-shortages-card fg-shortages-card--${status_meta.slug}" data-pick-list="${frappe.utils.escape_html(
+			r.pick_list || ""
+		)}">
+				<div class="fg-shortages-card-main">
+					<div class="fg-shortages-card-icon fg-shortages-card-icon--${status_meta.slug}">${icon(status_meta.icon)}</div>
 					<div>
-						<div class="fg-order-id">${
+						<div class="fg-shortages-card-id">${
 							pedido_label
 								? __("PEDIDO") + " #" + frappe.utils.escape_html(pedido_label)
 								: __("Sin pedido vinculado")
 						}</div>
-						<div class="fg-order-customer">${frappe.utils.escape_html(r.item_name || r.item_code)}</div>
+						<div class="fg-shortages-card-product">${frappe.utils.escape_html(r.item_name || r.item_code)}</div>
 					</div>
 				</div>
-				<div class="fg-order-info fg-shortage-info">
-					<div>${__("Solicitado")}: <b>${format_qty(r.qty_solicitada)}</b></div>
-					<div>${__("Disponible")}: <b>${format_qty(r.qty_disponible)}</b></div>
-					<div>${__("Faltante")}: <b>${format_qty(r.qty_faltante)}</b></div>
-					<div>${__("Motivo")}: ${frappe.utils.escape_html(r.shortage_reason || "—")}</div>
-					<div>${r.reported_on ? frappe.datetime.str_to_user(r.reported_on) : ""}</div>
+				<div class="fg-shortages-qty-grid">
+					<div class="fg-shortages-qty-col">
+						<div class="fg-shortages-qty-label">${__("Solicitado")}</div>
+						<div class="fg-shortages-qty-value">${format_qty(r.qty_solicitada)}</div>
+					</div>
+					<div class="fg-shortages-qty-col">
+						<div class="fg-shortages-qty-label">${__("Disponible")}</div>
+						<div class="fg-shortages-qty-value">${format_qty(r.qty_disponible)}</div>
+					</div>
+					<div class="fg-shortages-qty-col fg-shortages-qty-col--danger">
+						<div class="fg-shortages-qty-label">${__("Faltante")}</div>
+						<div class="fg-shortages-qty-value">${format_qty(r.qty_faltante)}</div>
+					</div>
 				</div>
-				<span class="fg-badge fg-badge--${status_class}">${frappe.utils.escape_html(r.status)}</span>
-				${
-					r.pick_list
-						? `<button type="button" class="fg-btn fg-btn--outline-danger fg-shortage-open-btn">${__(
-								"VER PEDIDO"
-						  )}</button>`
-						: ""
-				}
+				<div class="fg-shortages-card-meta-block">
+					<div class="fg-shortages-card-meta">${icon("clipboard-list", "fg-icon-sm")} ${__(
+			"Motivo"
+		)}: ${frappe.utils.escape_html(r.shortage_reason || "—")}</div>
+					<div class="fg-shortages-card-meta">${icon("user", "fg-icon-sm")} ${__(
+			"Reportado por"
+		)} ${frappe.utils.escape_html(r.reported_by_fullname || "—")}</div>
+					<div class="fg-shortages-card-meta">${icon("clock", "fg-icon-sm")} ${
+			r.reported_on ? frappe.datetime.str_to_user(r.reported_on) : "—"
+		}</div>
+				</div>
+				<div class="fg-shortages-card-status">
+					<span class="fg-shortages-badge fg-shortages-badge--${status_meta.slug}">${frappe.utils.escape_html(
+			r.status
+		)}</span>
+					${
+						r.pick_list
+							? `<button type="button" class="fg-shortages-card-btn fg-shortages-open-btn">${__(
+									"VER PEDIDO"
+							  )} ${icon("chevron-right", "fg-icon-sm")}</button>`
+							: ""
+					}
+				</div>
 			</div>
 		`;
 	}
 
 	bind_shortages_events() {
-		this.$body.find(".fg-chip").on("click", (e) => {
-			this.state.shortages_filter = $(e.currentTarget).data("filter");
-			this.$body.find(".fg-chip-row").html(this.render_shortage_chips_html());
-			this.$body.find(".fg-shortage-cards").html(this.render_shortage_cards_html());
-			this.bind_shortages_events();
+		const rerender = () => {
+			const filtered = this.get_filtered_shortages();
+			const paged = paginate(filtered, this.state.shortages_page, PAGE_SIZE);
+			this.state.shortages_page = paged.page;
+			const cards_html = paged.page_items.length
+				? paged.page_items.map((r) => this.render_shortages_card(r)).join("")
+				: `<div class="fg-shortages-empty">${__("No hay faltantes que coincidan.")}</div>`;
+			this.$body.find(".fg-shortages-cards").html(cards_html);
+			this.$body
+				.find(".fg-shortages-pagination")
+				.html(this.render_shortages_pagination_html(paged.total, paged.page, paged.page_count));
+		};
+
+		this.$body.find(".fg-shortages-search").on("input", (e) => {
+			this.state.shortages_search = $(e.currentTarget).val();
+			this.state.shortages_page = 1;
+			rerender();
 		});
-		this.$body.find(".fg-shortage-open-btn").on("click", (e) => {
+
+		this.$body.find(".fg-shortages-chip").on("click", (e) => {
+			this.state.shortages_filter = $(e.currentTarget).data("filter");
+			this.state.shortages_page = 1;
+			this.render_body();
+		});
+
+		// Delegated on the stable containers -- survives rerender()'s .html()
+		// swaps above without needing to be re-bound on every keystroke.
+		this.$body.find(".fg-shortages-cards").on("click", ".fg-shortages-open-btn", (e) => {
 			e.stopPropagation();
-			const pick_list = $(e.currentTarget).closest(".fg-shortage-card").data("pick-list");
+			const pick_list = $(e.currentTarget).closest(".fg-shortages-card").data("pick-list");
 			if (pick_list) this.open_pick_list_from("shortages", pick_list, "con_faltantes");
+		});
+		this.$body.find(".fg-shortages-pagination").on("click", ".fg-shortages-pagination-prev", () => {
+			this.state.shortages_page = Math.max(this.state.shortages_page - 1, 1);
+			rerender();
+		});
+		this.$body.find(".fg-shortages-pagination").on("click", ".fg-shortages-pagination-next", () => {
+			this.state.shortages_page = this.state.shortages_page + 1;
+			rerender();
 		});
 	}
 
@@ -670,30 +990,19 @@ fabergray_erp.Bodega = class Bodega {
 	// `modified`, which is a last-write timestamp, not a semantic
 	// completion time, so it is deliberately never shown as one here).
 	// -------------------------------------------------------------------
-	render_history_html() {
-		return `
-			<div class="fg-section-head"><div class="fg-section-title">${__("Historial")}</div></div>
-			<div class="fg-history-filters">
-				<input type="text" class="fg-history-search" placeholder="${__(
-					"Buscar por pedido o cliente..."
-				)}" value="${frappe.utils.escape_html(this.state.history_search || "")}">
-				<div class="fg-history-date-range">
-					<input type="date" class="fg-history-date-from" value="${this.state.history_date_from || ""}">
-					<span class="fg-history-date-sep">–</span>
-					<input type="date" class="fg-history-date-to" value="${this.state.history_date_to || ""}">
-				</div>
-			</div>
-			<div class="fg-cards fg-history-cards">${this.render_history_cards_html()}</div>
-		`;
-	}
-
-	render_history_cards_html() {
+	// Fully isolated fg-history-* namespace and its own card renderer
+	// (render_history_card already had its own name -- now also its own
+	// classes) -- never reuses Pedidos'/Faltantes' classes. Only source is
+	// get_queue()["listos"], same as before. modified is still never shown
+	// as a completion timestamp -- Pick List has no reliable "finished at"
+	// field (see original note this replaces, same reasoning holds).
+	get_filtered_history() {
 		const rows = ((this.state.queue || {}).listos || []).slice();
 		const search = (this.state.history_search || "").trim().toLowerCase();
 		const from = this.state.history_date_from;
 		const to = this.state.history_date_to;
 
-		const filtered = rows.filter((pl) => {
+		return rows.filter((pl) => {
 			if (search) {
 				const haystack = [pl.commercial_name, pl.sales_order, pl.name, pl.customer]
 					.filter(Boolean)
@@ -709,69 +1018,152 @@ fabergray_erp.Bodega = class Bodega {
 			}
 			return true;
 		});
+	}
 
-		if (!filtered.length) {
-			return `<div class="fg-empty">${__("No hay alistamientos finalizados que coincidan.")}</div>`;
-		}
-		return filtered.map((pl) => this.render_history_card(pl)).join("");
+	render_history_html() {
+		const filtered = this.get_filtered_history();
+		const paged = paginate(filtered, this.state.history_page, PAGE_SIZE);
+		this.state.history_page = paged.page;
+
+		const cards_html = paged.page_items.length
+			? paged.page_items.map((pl) => this.render_history_card(pl)).join("")
+			: `<div class="fg-history-empty">${__("No hay alistamientos finalizados que coincidan.")}</div>`;
+
+		return `
+			<div class="fg-history-head">
+				<div class="fg-history-icon">${icon("clock")}</div>
+				<div>
+					<div class="fg-history-title">${__("Historial")}</div>
+					<div class="fg-history-subtitle">${__("Alistamientos ya finalizados")}</div>
+				</div>
+			</div>
+			<div class="fg-history-toolbar">
+				<div class="fg-history-search-wrap">
+					${icon("search", "fg-history-search-icon")}
+					<input type="text" class="fg-history-search" placeholder="${__(
+						"Buscar por pedido o cliente..."
+					)}" value="${frappe.utils.escape_html(this.state.history_search || "")}">
+				</div>
+				<div class="fg-history-date-range">
+					${icon("calendar", "fg-history-date-icon")}
+					<input type="date" class="fg-history-date-from" value="${this.state.history_date_from || ""}">
+					<span class="fg-history-date-sep">–</span>
+					<input type="date" class="fg-history-date-to" value="${this.state.history_date_to || ""}">
+				</div>
+			</div>
+			<div class="fg-history-cards">${cards_html}</div>
+			<div class="fg-history-pagination">${this.render_history_pagination_html(
+				paged.total,
+				paged.page,
+				paged.page_count
+			)}</div>
+		`;
+	}
+
+	render_history_pagination_html(total, page, page_count) {
+		if (!total) return "";
+		const start = (page - 1) * PAGE_SIZE + 1;
+		const end = Math.min(page * PAGE_SIZE, total);
+		return `
+			<div class="fg-history-pagination-info">${__("Mostrando {0} a {1} de {2} alistamientos", [
+			start,
+			end,
+			total,
+		])}</div>
+			<div class="fg-history-pagination-controls">
+				<button type="button" class="fg-history-pagination-btn fg-history-pagination-prev" ${
+					page <= 1 ? "disabled" : ""
+				}>${icon("chevron-left")}</button>
+				<span class="fg-history-pagination-page">${page}</span>
+				<button type="button" class="fg-history-pagination-btn fg-history-pagination-next" ${
+					page >= page_count ? "disabled" : ""
+				}>${icon("chevron-right")}</button>
+			</div>
+		`;
 	}
 
 	render_history_card(pl) {
 		const pedido_label = pl.commercial_name || pl.sales_order || pl.name;
 		const customer = pl.customer ? frappe.utils.escape_html(pl.customer) : __("Sin cliente");
 		return `
-			<div class="fg-order-card fg-order-card--listos" data-name="${frappe.utils.escape_html(pl.name)}">
-				<div class="fg-order-main">
-					<div class="fg-order-icon">${icon("circle-check-big")}</div>
+			<div class="fg-history-card" data-name="${frappe.utils.escape_html(pl.name)}">
+				<div class="fg-history-card-main">
+					<div class="fg-history-card-icon">${icon("circle-check-big")}</div>
 					<div>
-						<div class="fg-order-id">${__("PEDIDO")} #${frappe.utils.escape_html(pedido_label)}</div>
-						<div class="fg-order-customer">${customer}</div>
+						<div class="fg-history-card-id">${__("PEDIDO")} #${frappe.utils.escape_html(pedido_label)}</div>
+						<div class="fg-history-card-customer">${customer}</div>
 					</div>
 				</div>
-				<div class="fg-order-info">
-					<div class="fg-order-meta">${icon("package", "fg-icon-sm")} ${pl.item_count} ${
+				<div class="fg-history-card-info">
+					<div class="fg-history-card-meta">${icon("package", "fg-icon-sm")} ${pl.item_count} ${
 			pl.item_count === 1 ? __("producto") : __("productos")
 		}</div>
 					${
 						pl.fg_started_by
-							? `<div class="fg-order-meta">${icon("user", "fg-icon-sm")} ${__("Alistado por")} ${frappe.utils.escape_html(
-									pl.fg_started_by
-							  )}</div>`
+							? `<div class="fg-history-card-meta">${icon(
+									"user",
+									"fg-icon-sm"
+							  )} ${__("Alistado por")} ${frappe.utils.escape_html(pl.fg_started_by)}</div>`
 							: ""
 					}
 					${
 						pl.fg_started_on
-							? `<div class="fg-order-meta">${icon("clock", "fg-icon-sm")} ${__("Inicio")}: ${frappe.datetime.str_to_user(
-									pl.fg_started_on
-							  )}</div>`
+							? `<div class="fg-history-card-meta">${icon("clock", "fg-icon-sm")} ${__(
+									"Inicio"
+							  )}: ${frappe.datetime.str_to_user(pl.fg_started_on)}</div>`
 							: ""
 					}
 				</div>
-				<span class="fg-badge fg-badge--listos">${__("Listo")}</span>
-				<button type="button" class="fg-btn fg-btn--outline-success fg-history-open-btn">${__("VER DETALLE")}</button>
+				<span class="fg-history-badge fg-history-badge--listo">${__("Listo")}</span>
+				<button type="button" class="fg-history-card-btn fg-history-open-btn">${__("VER DETALLE")} ${icon(
+			"chevron-right",
+			"fg-icon-sm"
+		)}</button>
 			</div>
 		`;
 	}
 
 	bind_history_events() {
-		const rerender_cards = () => this.$body.find(".fg-history-cards").html(this.render_history_cards_html());
+		const rerender = () => {
+			const filtered = this.get_filtered_history();
+			const paged = paginate(filtered, this.state.history_page, PAGE_SIZE);
+			this.state.history_page = paged.page;
+			const cards_html = paged.page_items.length
+				? paged.page_items.map((pl) => this.render_history_card(pl)).join("")
+				: `<div class="fg-history-empty">${__("No hay alistamientos finalizados que coincidan.")}</div>`;
+			this.$body.find(".fg-history-cards").html(cards_html);
+			this.$body
+				.find(".fg-history-pagination")
+				.html(this.render_history_pagination_html(paged.total, paged.page, paged.page_count));
+		};
 
 		this.$body.find(".fg-history-search").on("input", (e) => {
 			this.state.history_search = $(e.currentTarget).val();
-			rerender_cards();
+			this.state.history_page = 1;
+			rerender();
 		});
 		this.$body.find(".fg-history-date-from").on("change", (e) => {
 			this.state.history_date_from = $(e.currentTarget).val();
-			rerender_cards();
+			this.state.history_page = 1;
+			rerender();
 		});
 		this.$body.find(".fg-history-date-to").on("change", (e) => {
 			this.state.history_date_to = $(e.currentTarget).val();
-			rerender_cards();
+			this.state.history_page = 1;
+			rerender();
 		});
-		// Delegated on the stable .fg-history-cards container -- survives
-		// rerender_cards() replacing its children, no need to re-bind.
-		this.$body.find(".fg-history-cards").on("click", ".fg-order-card", (e) => {
+		// Delegated on the stable containers -- survives rerender()'s .html()
+		// swaps above without needing to be re-bound on every keystroke.
+		this.$body.find(".fg-history-cards").on("click", ".fg-history-card", (e) => {
 			this.open_pick_list_from("history", $(e.currentTarget).data("name"), "listos");
+		});
+		this.$body.find(".fg-history-pagination").on("click", ".fg-history-pagination-prev", () => {
+			this.state.history_page = Math.max(this.state.history_page - 1, 1);
+			rerender();
+		});
+		this.$body.find(".fg-history-pagination").on("click", ".fg-history-pagination-next", () => {
+			this.state.history_page = this.state.history_page + 1;
+			rerender();
 		});
 	}
 
@@ -1344,6 +1736,45 @@ function format_today_es() {
 	} catch (e) {
 		return frappe.datetime.str_to_user(frappe.datetime.nowdate());
 	}
+}
+
+// Client-side pagination shared by Pedidos/Faltantes/Historial -- pure
+// arithmetic over an already-filtered array, no backend involved. `page` is
+// clamped into [1, page_count] so a filter/search change that shrinks the
+// result set (leaving state.*_page pointing past the new last page) never
+// renders an empty page silently; render_*_html() writes the clamped value
+// back into state.
+const PAGE_SIZE = 10;
+
+function paginate(items, page, page_size) {
+	const total = items.length;
+	const page_count = Math.max(Math.ceil(total / page_size), 1);
+	const safe_page = Math.min(Math.max(page || 1, 1), page_count);
+	const start = (safe_page - 1) * page_size;
+	return { page_items: items.slice(start, start + page_size), total, page_count, page: safe_page };
+}
+
+// Pedidos' own progress markup -- content identical to queue_progress_markup()
+// below (used by Inicio) but under fg-orders-progress-* classes, so Pedidos'
+// progress bar styling can never affect Inicio's and vice versa.
+function orders_progress_markup(bucket) {
+	if (bucket === "pendientes") {
+		return `
+			<div class="fg-orders-progress-row"><span>${__("Progreso")}</span><span class="fg-orders-progress-pct">0%</span></div>
+			<div class="fg-orders-progress-track"><div class="fg-orders-progress-fill" style="--fg-progress-width:0%"></div></div>
+		`;
+	}
+	if (bucket === "listos") {
+		return `
+			<div class="fg-orders-progress-row"><span>${__("Progreso")}</span><span class="fg-orders-progress-pct">100%</span></div>
+			<div class="fg-orders-progress-track"><div class="fg-orders-progress-fill" style="--fg-progress-width:100%"></div></div>
+		`;
+	}
+	const label = bucket === "con_faltantes" ? __("Con faltantes") : __("En progreso");
+	return `
+		<div class="fg-orders-progress-row"><span>${__("Progreso")}</span><span class="fg-orders-progress-pct">${label}</span></div>
+		<div class="fg-orders-progress-track"><div class="fg-orders-progress-fill fg-orders-progress-fill--indeterminate"></div></div>
+	`;
 }
 
 function queue_progress_markup(bucket) {
