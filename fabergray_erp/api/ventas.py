@@ -37,6 +37,7 @@ from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
 from fabergray_erp.api.bodega import _require_login
 from fabergray_erp.fulfillment.modification_service import modification_blockers_for
+from fabergray_erp.sales_order_naming import root_commercial_name
 
 # No native default exists for Sales Order.delivery_date -- confirmed by
 # reading validate_delivery_date() (sales_order.py) directly: it throws
@@ -127,32 +128,6 @@ def _default_warehouse_for_item(item_code, company):
     `frappe.db.get_value` is a raw, single-value read (not `get_all`), the
     same kind already used throughout this app's Fulfillment Engine."""
     return frappe.db.get_value("Item Default", {"parent": item_code, "company": company}, "default_warehouse")
-
-
-def _root_commercial_name(so_name):
-    """Walks the native `amended_from` chain backward to the original
-    document name -- the stable "PEDIDO-N" commercial identity shown
-    throughout /app/ventas, independent of how many times the order has
-    since been amended (Commit 18.5: the technical name becomes
-    `PEDIDO-N-1`, `PEDIDO-N-2`, ... on each amend -- confirmed directly
-    against `frappe/model/naming.py`'s `_set_amended_name()`, which always
-    takes priority over the `PEDIDO-.#` naming series once `amended_from`
-    is set, and cannot be configured to preserve the original literal name
-    -- see FULFILLMENT_ENGINE_CONTRACT.md, "Commit 18.5 -- naming"). Only
-    ever walks a chain of this Vendedora's own documents (a chain can only
-    grow through her own `modify_submitted_sales_order()` calls), so no
-    separate permission check is needed per hop -- same reasoning as
-    `_default_warehouse_for_item()` above (a raw, single-field read used
-    only to compute a label, not to expose document data)."""
-    current = so_name
-    seen = set()
-    while current not in seen:
-        seen.add(current)
-        parent = frappe.db.get_value("Sales Order", current, "amended_from")
-        if not parent:
-            return current
-        current = parent
-    return current  # defensive: amended_from can never actually cycle
 
 
 @frappe.whitelist()
@@ -316,7 +291,7 @@ def get_my_orders(limit=50):
         orders.append(
             {
                 "name": so.name,
-                "commercial_name": _root_commercial_name(so.name),
+                "commercial_name": root_commercial_name(so.name),
                 "customer": so.customer,
                 "customer_name": so.customer_name,
                 "transaction_date": so.transaction_date,
@@ -357,7 +332,7 @@ def get_order_detail(name):
 
     return {
         "name": so.name,
-        "commercial_name": _root_commercial_name(so.name),
+        "commercial_name": root_commercial_name(so.name),
         "customer": so.customer,
         "customer_name": so.customer_name,
         "transaction_date": so.transaction_date,
@@ -735,7 +710,7 @@ def modify_submitted_sales_order(name, customer, items, observations=None):
     `PEDIDO-1-1`) -- Frappe's own amend mechanism cannot preserve the
     literal original name. `commercial_name` is the stable "PEDIDO-1"
     identity `get_my_orders()`/`get_order_detail()` already show
-    throughout the UI, resolved via `_root_commercial_name()`.
+    throughout the UI, resolved via `root_commercial_name()`.
 
     Returns `{"name": "PEDIDO-1-1", "commercial_name": "PEDIDO-1"}` only --
     no economic field, matching every other write in this module.
@@ -757,7 +732,7 @@ def modify_submitted_sales_order(name, customer, items, observations=None):
     delivery_date = add_days(nowdate(), DEFAULT_DELIVERY_LEAD_DAYS)
     so_items = _validate_and_build_item_rows(items, company, delivery_date)  # fail fast -- nothing cancelled yet
 
-    commercial_name = _root_commercial_name(name)
+    commercial_name = root_commercial_name(name)
 
     so.cancel()  # no ignore_permissions -- triggers cleanup_fulfillment_for_cancelled_sales_order() via on_cancel
 

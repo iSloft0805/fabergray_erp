@@ -620,7 +620,8 @@
 }
 
 /* ------------------------------------------------------------------ */
-/* Bottom nav (decorative)                                             */
+/* Bottom nav -- real navigation between Inicio/Pedidos/Faltantes/     */
+/* Historial/Más (bodega.js's go_to_section()).                        */
 /* ------------------------------------------------------------------ */
 .fg-bottom-nav {
 	display: flex;
@@ -647,11 +648,245 @@
 	padding: 6px 10px;
 	border-radius: var(--fg-radius-sm);
 	position: relative;
-	cursor: default;
+	cursor: pointer;
+	transition: color var(--fg-transition), background var(--fg-transition);
+}
+
+.fg-nav-item:hover {
+	background: var(--fg-primary-tint);
 }
 
 .fg-nav-item.is-active {
 	color: var(--fg-primary);
+}
+
+/* ------------------------------------------------------------------ */
+/* Chip filters -- Pedidos/Faltantes status filters (lighter-weight    */
+/* than Inicio's .fg-kpi cards, same active/inactive language).        */
+/* ------------------------------------------------------------------ */
+.fg-chip-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 18px;
+}
+
+.fg-chip {
+	background: var(--fg-card);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-pill);
+	padding: 7px 16px;
+	font-size: 0.8rem;
+	font-weight: 600;
+	color: var(--fg-text-muted);
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition), color var(--fg-transition);
+}
+
+.fg-chip:hover {
+	border-color: var(--fg-primary);
+}
+
+.fg-chip.is-active {
+	background: var(--fg-primary);
+	border-color: var(--fg-primary);
+	color: #fff;
+}
+
+/* ------------------------------------------------------------------ */
+/* Faltantes card -- reuses .fg-order-card's grid, just with a taller, */
+/* multi-line info block instead of a progress bar.                    */
+/* ------------------------------------------------------------------ */
+.fg-shortage-card {
+	align-items: start;
+}
+
+.fg-shortage-info {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	line-height: 1.5;
+}
+
+/* ------------------------------------------------------------------ */
+/* Historial filters                                                   */
+/* ------------------------------------------------------------------ */
+.fg-history-filters {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin-bottom: 18px;
+}
+
+.fg-history-search {
+	flex: 1 1 220px;
+	min-width: 180px;
+	height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 0 14px;
+	font-size: 0.9rem;
+	background: var(--fg-card);
+}
+
+.fg-history-date-range {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.fg-history-date-from,
+.fg-history-date-to {
+	height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 0 10px;
+	font-size: 0.85rem;
+	background: var(--fg-card);
+	color: var(--fg-text);
+}
+
+.fg-history-date-sep {
+	color: var(--fg-text-faint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Más -- menu, Inventario, Mi usuario, Ayuda                          */
+/* ------------------------------------------------------------------ */
+.fg-more-menu {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.fg-more-menu-item {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 18px;
+	font-size: 0.95rem;
+	font-weight: 600;
+	color: var(--fg-text);
+	cursor: pointer;
+	text-align: left;
+}
+
+.fg-more-menu-item:hover {
+	border-color: var(--fg-primary-tint);
+	box-shadow: var(--fg-shadow);
+}
+
+.fg-more-menu-item span {
+	flex: 1;
+}
+
+.fg-more-subheader {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-bottom: 18px;
+	flex-wrap: wrap;
+}
+
+.fg-more-subheader .fg-section-title {
+	margin: 0;
+}
+
+.fg-inventory-search {
+	width: 100%;
+	height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 0 14px;
+	font-size: 0.9rem;
+	background: var(--fg-card);
+	margin-bottom: 16px;
+}
+
+.fg-inventory-list {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.fg-inventory-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 14px;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 14px 16px;
+}
+
+.fg-inventory-row-name {
+	font-weight: 700;
+	font-size: 0.92rem;
+}
+
+.fg-inventory-row-code {
+	font-size: 0.78rem;
+	color: var(--fg-text-muted);
+	margin-top: 2px;
+}
+
+.fg-inventory-row-qty {
+	text-align: right;
+	font-size: 0.85rem;
+}
+
+.fg-profile-card {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 10px;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 32px 20px;
+	text-align: center;
+}
+
+.fg-profile-avatar {
+	width: 64px;
+	height: 64px;
+	font-size: 1.3rem;
+}
+
+.fg-profile-name {
+	font-size: 1.1rem;
+	font-weight: 700;
+}
+
+.fg-profile-email {
+	font-size: 0.85rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-help-block {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 20px 22px;
+}
+
+.fg-help-block p {
+	margin: 0 0 14px;
+	font-size: 0.88rem;
+	line-height: 1.6;
+	color: var(--fg-text);
+}
+
+.fg-help-block p:last-child {
+	margin-bottom: 0;
 }
 
 .fg-nav-badge {
@@ -1318,5 +1553,24 @@
 
 	.fg-bottom-nav {
 		overflow-x: auto;
+	}
+
+	.fg-history-filters {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.fg-history-date-range {
+		justify-content: space-between;
+	}
+
+	.fg-inventory-row {
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 8px;
+	}
+
+	.fg-inventory-row-qty {
+		text-align: left;
 	}
 }

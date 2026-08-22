@@ -15,7 +15,10 @@ from frappe.utils import flt, now_datetime
 
 from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
+from fabergray_erp.sales_order_naming import root_commercial_name
+
 OPEN_SHORTAGE_STATUSES = ["Abierto", "En Proceso"]
+ALL_SHORTAGE_STATUSES = ["Abierto", "En Proceso", "Resuelto"]
 
 
 def _require_login():
@@ -247,8 +250,20 @@ def get_queue():
 			if row.sales_order and row.parent not in sales_order_by_pick_list:
 				sales_order_by_pick_list[row.parent] = row.sales_order
 
+	# One root_commercial_name() lookup per distinct Sales Order, not per Pick
+	# List -- several Pick Lists (or none) can share the same Sales Order.
+	commercial_name_cache = {}
+
+	def _commercial_name(sales_order):
+		if not sales_order:
+			return None
+		if sales_order not in commercial_name_cache:
+			commercial_name_cache[sales_order] = root_commercial_name(sales_order)
+		return commercial_name_cache[sales_order]
+
 	buckets = {"listos": [], "con_faltantes": [], "en_alistamiento": [], "pendientes": []}
 	for pl in pick_lists:
+		sales_order = sales_order_by_pick_list.get(pl.name)
 		entry = {
 			"name": pl.name,
 			"status": pl.status,
@@ -258,7 +273,8 @@ def get_queue():
 			"fg_started_by": pl.fg_started_by,
 			"fg_started_on": pl.fg_started_on,
 			"item_count": line_counts.get(pl.name, 0),
-			"sales_order": sales_order_by_pick_list.get(pl.name),
+			"sales_order": sales_order,
+			"commercial_name": _commercial_name(sales_order),
 		}
 		if pl.docstatus == 1:
 			buckets["listos"].append(entry)
@@ -321,6 +337,7 @@ def get_pick_list(name):
 		"parent_warehouse": pl.parent_warehouse,
 		"customer": pl.customer,
 		"sales_order": sales_order,
+		"commercial_name": root_commercial_name(sales_order) if sales_order else None,
 		"fg_started_by": pl.fg_started_by,
 		"fg_started_on": pl.fg_started_on,
 		"rows": rows,
@@ -552,3 +569,159 @@ def finish_picking(name):
 		"status": pl.status,
 		"per_picked_by_sales_order": per_picked_by_so,
 	}
+
+
+@frappe.whitelist()
+def get_shortages(status=None):
+	"""Reporte de Faltante records visible to the current Bodega user, for
+	the "Faltantes" tab.
+
+	Same read pattern as api.jefe_bodega.get_open_shortage_reports() (that
+	function stays untouched -- this is Bodega's own version, not a call
+	into the Jefe de Bodega module, which would be the wrong direction:
+	jefe_bodega.py already imports from api.bodega, never the reverse).
+	`frappe.get_list` (not `get_all`) so Role Permissions AND User
+	Permissions apply automatically -- Reporte de Faltante has its own
+	`warehouse` field, so the same per-Warehouse User Permission that
+	already scopes Pick List/get_queue() scopes this list too, with no
+	extra filtering written here.
+
+	item_name is resolved by reading the linked Pick List (a child-table
+	lookup, exempt from its own permission model, after check_permission
+	("read") on that specific Pick List) -- never by querying the Item
+	doctype directly for a bare item_code, exactly like jefe_bodega.py's
+	version does it. Bodega's own read permission on Item (granted
+	alongside get_inventory() below) is unused here on purpose: resolving
+	item_name via the already-authorized Pick List keeps this endpoint
+	working the same way even for a report whose Pick List still exists
+	but whose item happens to sit outside whatever Item-level visibility
+	rules a future change might add.
+	"""
+	_require_login()
+	frappe.has_permission("Reporte de Faltante", "read", throw=True)
+
+	filters = {}
+	if status:
+		if status not in ALL_SHORTAGE_STATUSES:
+			frappe.throw(_("Estado de faltante inválido: {0}").format(status))
+		filters["status"] = status
+
+	reports = frappe.get_list(
+		"Reporte de Faltante",
+		filters=filters,
+		fields=[
+			"name",
+			"item_code",
+			"warehouse",
+			"sales_order",
+			"pick_list",
+			"pick_list_item",
+			"qty_solicitada",
+			"qty_disponible",
+			"qty_faltante",
+			"shortage_reason",
+			"status",
+			"reported_by",
+			"reported_on",
+		],
+		order_by="reported_on desc",
+		limit_page_length=0,
+	)
+
+	pick_list_cache = {}
+
+	def _pick_list(pick_list_name):
+		if pick_list_name not in pick_list_cache:
+			doc = frappe.get_doc("Pick List", pick_list_name)
+			doc.check_permission("read")
+			pick_list_cache[pick_list_name] = doc
+		return pick_list_cache[pick_list_name]
+
+	commercial_name_cache = {}
+
+	def _commercial_name(sales_order):
+		if not sales_order:
+			return None
+		if sales_order not in commercial_name_cache:
+			commercial_name_cache[sales_order] = root_commercial_name(sales_order)
+		return commercial_name_cache[sales_order]
+
+	for report in reports:
+		item_name = None
+		if report.pick_list and report.pick_list_item:
+			try:
+				pl_doc = _pick_list(report.pick_list)
+				rows = pl_doc.get("locations", {"name": report.pick_list_item})
+				if rows:
+					item_name = rows[0].item_name
+			except frappe.PermissionError:
+				# Report references a Pick List this user can no longer read
+				# (e.g. outside their Warehouse User Permission any more).
+				# Fall back to the report's own item_code rather than
+				# failing the whole list or reading Item data instead.
+				item_name = None
+
+		report["item_name"] = item_name or report.item_code
+		report["reported_by_fullname"] = frappe.utils.get_fullname(report.reported_by)
+		report["commercial_name"] = _commercial_name(report.sales_order)
+
+	return reports
+
+
+@frappe.whitelist()
+def get_inventory():
+	"""Read-only stock snapshot for the "Inventario" tab (Más section).
+
+	Bin already had read=1 for the Bodega role before this commit (see
+	get_pick_list()'s own use of get_actual_qty(), which reads Bin
+	underneath). Item did not -- reading item_name/stock_uom for display is
+	the one new permission this feature needed (Custom DocPerm, read=1
+	only, same shape already granted to Vendedora -- no write/create/
+	delete). `frappe.get_list` on both, never `get_all`, never
+	`ignore_permissions` -- Role Permissions AND the existing per-Warehouse
+	User Permission (already applied to Bin/Pick List, unchanged here)
+	scope the Bin rows automatically. Read-only end to end: no Stock
+	Entry, no Bin write, no adjustment path exists anywhere in this
+	function or is reachable from it.
+	"""
+	_require_login()
+	frappe.has_permission("Bin", "read", throw=True)
+	frappe.has_permission("Item", "read", throw=True)
+
+	bins = frappe.get_list(
+		"Bin",
+		fields=["item_code", "warehouse", "actual_qty", "reserved_qty", "projected_qty"],
+		order_by="item_code asc",
+		limit_page_length=0,
+	)
+	if not bins:
+		return []
+
+	item_codes = list({b.item_code for b in bins})
+	items = frappe.get_list(
+		"Item",
+		filters={"name": ["in", item_codes]},
+		fields=["name", "item_name", "stock_uom"],
+		limit_page_length=0,
+	)
+	item_by_code = {i.name: i for i in items}
+
+	result = []
+	for b in bins:
+		item = item_by_code.get(b.item_code)
+		if not item:
+			# Bin row for an item Bodega cannot (or can no longer) read via
+			# Item -- skip rather than show a code with no name.
+			continue
+		result.append(
+			{
+				"item_code": b.item_code,
+				"item_name": item.item_name,
+				"uom": item.stock_uom,
+				"warehouse": b.warehouse,
+				"actual_qty": flt(b.actual_qty),
+				"reserved_qty": flt(b.reserved_qty),
+				"available_qty": flt(b.actual_qty) - flt(b.reserved_qty),
+			}
+		)
+	return result
