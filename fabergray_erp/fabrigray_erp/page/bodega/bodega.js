@@ -45,9 +45,31 @@ fabergray_erp.Bodega = class Bodega {
 
 	// -------------------------------------------------------------------
 	// Thin API wrappers -- the only place that talks to the server.
+	//
+	// frappe.call() itself does NOT return a real Promise -- it returns the
+	// jQuery Deferred/jqXHR from $.ajax(), whose promise object only
+	// implements state/always/catch/pipe/then/done/fail/progress/notify
+	// (see node_modules/jquery/dist/jquery.js, Deferred's `promise` object)
+	// -- there is no .finally(). Every .finally(...) chained after
+	// this.call(...) elsewhere in this file (load_queue, load_detail,
+	// open_pick_list, finish_picking) was therefore throwing a synchronous
+	// TypeError the moment it was chained, before .finally() ever got
+	// registered -- so set_shell_busy(false) never ran and the refresh
+	// button stayed disabled forever, in both the success and the error
+	// case. This is exactly why frappe's own frappe.xcall() (request.js)
+	// wraps frappe.call() in `new Promise(...)`; do the same thing here so
+	// every .then()/.catch()/.finally() below this point behaves like a
+	// standard Promise.
 	// -------------------------------------------------------------------
 	call(method, args) {
-		return frappe.call({ method: this.method_prefix + method, args: args || {} }).then((r) => r.message);
+		return new Promise((resolve, reject) => {
+			frappe.call({
+				method: this.method_prefix + method,
+				args: args || {},
+				callback: (r) => resolve(r.message),
+				error: (r) => reject(r),
+			});
+		});
 	}
 
 	load_queue() {
