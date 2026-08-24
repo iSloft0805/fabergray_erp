@@ -386,3 +386,241 @@ class TestCreateAndSubmitQuotation(IntegrationTestCase):
 				cotizaciones.create_and_submit_quotation(
 					customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 0}]
 				)
+
+
+class TestUpdateDraftQuotation(IntegrationTestCase):
+	"""Commit 20.6 -- get_editable_quotation()/update_draft_quotation().
+	Only docstatus==0 (Draft) may ever be edited -- same "Draft only"
+	boundary Commit 18.5 already established for Sales Order. A real Draft
+	Quotation is never produced by create_and_submit_quotation() itself
+	(it always submits in the same call) -- exactly like
+	test_ventas_api.py's own `_draft_so()`, `_draft_quotation()` below
+	builds one directly, mirroring the real-world case this feature exists
+	for: `.insert()` succeeded but `.submit()` never ran (a network drop,
+	an exception between the two calls, etc.), leaving an orphaned Draft
+	the Vendedora can fix or complete later.
+	"""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.world = fx.TestWorld()
+		cls.addClassCleanup(cls.world.cleanup)
+
+		cls.item = cls.world.item("FG20-6-ITEM")
+		cls.other_item = cls.world.item("FG20-6-OTHER-ITEM")
+		cls.customer = cls.world.customer("FG20-6 Customer")
+		cls.other_customer = cls.world.customer("FG20-6 Other Customer")
+
+		cls.vendedora_a = cls.world.user("fg20-6-vendedora-a@example.com", ["Vendedora"])
+		cls.vendedora_b = cls.world.user("fg20-6-vendedora-b@example.com", ["Vendedora"])
+
+	def _draft_quotation(self, as_user, items=None, terms=None, valid_till=None):
+		items = items or [{"item_code": self.item.name, "qty": 1}]
+		doc_dict = {
+			"doctype": "Quotation",
+			"quotation_to": "Customer",
+			"party_name": self.customer.name,
+			"company": fx.COMPANY,
+			"items": items,
+		}
+		if terms:
+			doc_dict["terms"] = terms
+		if valid_till:
+			doc_dict["valid_till"] = valid_till
+		with fx.as_user(as_user):
+			qtn = frappe.get_doc(doc_dict)
+			qtn.insert()
+		self.world.track_existing("Quotation", qtn.name)
+		return qtn
+
+	# -- Lectura para edición: get_editable_quotation() ------------------------
+
+	def test_vendedora_can_read_her_own_draft_for_editing(self):
+		qtn = self._draft_quotation(self.vendedora_a)
+		with fx.as_user(self.vendedora_a):
+			editable = cotizaciones.get_editable_quotation(qtn.name)
+		self.assertEqual(editable["name"], qtn.name)
+		self.assertEqual(editable["status"], "Draft")
+
+	def test_another_vendedora_cannot_read_it_for_editing(self):
+		qtn = self._draft_quotation(self.vendedora_a)
+		with fx.as_user(self.vendedora_b):
+			with self.assertRaises(frappe.PermissionError):
+				cotizaciones.get_editable_quotation(qtn.name)
+			with self.assertRaises(frappe.PermissionError):
+				cotizaciones.update_draft_quotation(
+					name=qtn.name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
+				)
+
+	# -- Ediciones permitidas ---------------------------------------------------
+
+	def test_update_draft_quotation_updates_customer(self):
+		qtn = self._draft_quotation(self.vendedora_a)
+		with fx.as_user(self.vendedora_a):
+			result = cotizaciones.update_draft_quotation(
+				name=qtn.name,
+				customer=self.other_customer.name,
+				items=[{"item_code": self.item.name, "qty": 1}],
+			)
+		self.assertEqual(result["name"], qtn.name)
+		qtn.reload()
+		self.assertEqual(qtn.docstatus, 0)
+		self.assertEqual(qtn.party_name, self.other_customer.name)
+
+	def test_update_draft_quotation_adds_a_product(self):
+		qtn = self._draft_quotation(self.vendedora_a, items=[{"item_code": self.item.name, "qty": 2}])
+		with fx.as_user(self.vendedora_a):
+			cotizaciones.update_draft_quotation(
+				name=qtn.name,
+				customer=self.customer.name,
+				items=[
+					{"item_code": self.item.name, "qty": 2},
+					{"item_code": self.other_item.name, "qty": 5},
+				],
+			)
+		qtn.reload()
+		self.assertEqual(qtn.docstatus, 0)
+		self.assertEqual(len(qtn.items), 2)
+		self.assertEqual({d.item_code for d in qtn.items}, {self.item.name, self.other_item.name})
+
+	def test_update_draft_quotation_removes_a_product(self):
+		qtn = self._draft_quotation(
+			self.vendedora_a,
+			items=[
+				{"item_code": self.item.name, "qty": 2},
+				{"item_code": self.other_item.name, "qty": 5},
+			],
+		)
+		with fx.as_user(self.vendedora_a):
+			cotizaciones.update_draft_quotation(
+				name=qtn.name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 2}]
+			)
+		qtn.reload()
+		self.assertEqual(qtn.docstatus, 0)
+		self.assertEqual(len(qtn.items), 1)
+		self.assertEqual(qtn.items[0].item_code, self.item.name)
+
+	def test_update_draft_quotation_changes_qty(self):
+		qtn = self._draft_quotation(self.vendedora_a, items=[{"item_code": self.item.name, "qty": 1}])
+		with fx.as_user(self.vendedora_a):
+			cotizaciones.update_draft_quotation(
+				name=qtn.name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 42}]
+			)
+		qtn.reload()
+		self.assertEqual(qtn.docstatus, 0)
+		self.assertEqual(qtn.items[0].qty, 42)
+
+	def test_update_draft_quotation_changes_valid_till(self):
+		qtn = self._draft_quotation(self.vendedora_a)
+		new_valid_till = add_days(nowdate(), 30)
+		with fx.as_user(self.vendedora_a):
+			cotizaciones.update_draft_quotation(
+				name=qtn.name,
+				customer=self.customer.name,
+				items=[{"item_code": self.item.name, "qty": 1}],
+				valid_till=new_valid_till,
+			)
+		qtn.reload()
+		self.assertEqual(qtn.docstatus, 0)
+		self.assertEqual(str(qtn.valid_till), new_valid_till)
+
+	def test_update_draft_quotation_changes_terms(self):
+		qtn = self._draft_quotation(self.vendedora_a)
+		with fx.as_user(self.vendedora_a):
+			cotizaciones.update_draft_quotation(
+				name=qtn.name,
+				customer=self.customer.name,
+				items=[{"item_code": self.item.name, "qty": 1}],
+				terms="Condiciones actualizadas",
+			)
+		qtn.reload()
+		self.assertEqual(qtn.docstatus, 0)
+		self.assertEqual(qtn.terms, "Condiciones actualizadas")
+
+	def test_update_draft_quotation_keeps_docstatus_zero(self):
+		qtn = self._draft_quotation(self.vendedora_a)
+		with fx.as_user(self.vendedora_a):
+			cotizaciones.update_draft_quotation(
+				name=qtn.name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
+			)
+		qtn.reload()
+		self.assertEqual(qtn.docstatus, 0)
+		self.assertNotEqual(qtn.status, "Cancelled")
+
+	# -- Estados no editables: Submitted / Cancelled -----------------------------
+
+	def test_editing_a_submitted_quotation_fails(self):
+		with fx.as_user(self.vendedora_a):
+			result = cotizaciones.create_and_submit_quotation(
+				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
+			)
+		self.world.track_existing("Quotation", result["name"])
+
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.ValidationError):
+				cotizaciones.get_editable_quotation(result["name"])
+			with self.assertRaises(frappe.ValidationError):
+				cotizaciones.update_draft_quotation(
+					name=result["name"], customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 2}]
+				)
+
+	def test_editing_a_cancelled_quotation_fails(self):
+		with fx.as_user(self.vendedora_a):
+			result = cotizaciones.create_and_submit_quotation(
+				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
+			)
+		self.world.track_existing("Quotation", result["name"])
+		qtn = frappe.get_doc("Quotation", result["name"])
+		qtn.cancel()
+
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.ValidationError):
+				cotizaciones.get_editable_quotation(result["name"])
+			with self.assertRaises(frappe.ValidationError):
+				cotizaciones.update_draft_quotation(
+					name=result["name"], customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 2}]
+				)
+
+	# -- Rechazo de campos económicos y desconocidos (mismo allowlist que 20.3) --
+
+	def test_update_draft_quotation_rejects_forbidden_economic_fields(self):
+		qtn = self._draft_quotation(self.vendedora_a)
+		for field in _FORBIDDEN_ITEM_FIELDS:
+			with self.subTest(field=field):
+				with fx.as_user(self.vendedora_a):
+					with self.assertRaises(frappe.ValidationError):
+						cotizaciones.update_draft_quotation(
+							name=qtn.name,
+							customer=self.customer.name,
+							items=[{"item_code": self.item.name, "qty": 1, field: 999}],
+						)
+
+	def test_update_draft_quotation_rejects_unknown_field(self):
+		qtn = self._draft_quotation(self.vendedora_a)
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.ValidationError):
+				cotizaciones.update_draft_quotation(
+					name=qtn.name,
+					customer=self.customer.name,
+					items=[{"item_code": self.item.name, "qty": 1, "some_unexpected_field": "x"}],
+				)
+
+	# -- Ninguna respuesta trae datos económicos ---------------------------------
+
+	def test_get_editable_quotation_response_never_contains_economic_data(self):
+		qtn = self._draft_quotation(self.vendedora_a)
+		with fx.as_user(self.vendedora_a):
+			editable = cotizaciones.get_editable_quotation(qtn.name)
+		self.assertFalse(_ECONOMIC_KEYS & set(editable.keys()))
+		for row in editable.get("items", []):
+			self.assertFalse(_ECONOMIC_KEYS & set(row.keys()))
+
+	def test_update_draft_quotation_response_never_contains_economic_data(self):
+		qtn = self._draft_quotation(self.vendedora_a)
+		with fx.as_user(self.vendedora_a):
+			result = cotizaciones.update_draft_quotation(
+				name=qtn.name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
+			)
+		self.assertEqual(set(result.keys()), {"name"})
+		self.assertFalse(_ECONOMIC_KEYS & set(result.keys()))

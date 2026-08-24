@@ -52,6 +52,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 
 	blank_nueva_cotizacion_state() {
 		return {
+			editing_quotation_name: null, // Commit 20.6: null -> "Nueva cotización"; a Draft Quotation name -> "Editar cotización"
 			customer: null, // {name, customer_name}
 			cart: new Map(), // item_code -> {item_code, item_name, stock_uom, qty}
 			customer_results: [],
@@ -259,11 +260,35 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 					<span>${q.item_count} ${q.item_count === 1 ? __("referencia") : __("referencias")}</span>
 					<span>${format_qty(q.total_qty)} ${__("unidades")}</span>
 				</div>
-				<div class="fg-quotation-card-actions">
-					<button type="button" class="fg-order-card-action fg-quotation-card-view" data-quotation-name="${frappe.utils.escape_html(q.name)}">
-						${icon("eye", "fg-icon-sm")} ${__("VER COTIZACIÓN")}
-					</button>
-				</div>
+				${this.render_quotation_card_actions(q)}
+			</div>
+		`;
+	}
+
+	// Commit 20.6: VER COTIZACIÓN always shows; EDITAR only for a Draft
+	// (`q.status` is the native Quotation.status string already returned
+	// by get_my_quotations() -- no new field needed to tell it apart, same
+	// convention as render_order_card_actions() in Ventas). Eliminar/
+	// Cancelar are Commits 20.7, not built yet -- omitted entirely, not
+	// shown disabled.
+	render_quotation_card_actions(q) {
+		const name_attr = `data-quotation-name="${frappe.utils.escape_html(q.name)}"`;
+		const view_btn = `
+			<button type="button" class="fg-order-card-action fg-quotation-card-view" ${name_attr}>
+				${icon("eye", "fg-icon-sm")} ${__("VER COTIZACIÓN")}
+			</button>
+		`;
+
+		if (q.status !== "Draft") {
+			return `<div class="fg-quotation-card-actions">${view_btn}</div>`;
+		}
+
+		return `
+			<div class="fg-quotation-card-actions">
+				${view_btn}
+				<button type="button" class="fg-order-card-action fg-quotation-card-edit" ${name_attr}>
+					${icon("pencil", "fg-icon-sm")} ${__("EDITAR")}
+				</button>
 			</div>
 		`;
 	}
@@ -294,6 +319,9 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 
 		this.$body.find(".fg-quotation-card-view").on("click", (e) => {
 			this.open_quotation_detail($(e.currentTarget).data("quotation-name"));
+		});
+		this.$body.find(".fg-quotation-card-edit").on("click", (e) => {
+			this.open_edit_cotizacion($(e.currentTarget).data("quotation-name"));
 		});
 	}
 
@@ -393,15 +421,50 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		this.render_nueva_cotizacion();
 	}
 
+	// Commit 20.6: reuses the exact same "Nueva cotización" screen,
+	// prefilled via get_editable_quotation() (server already enforces
+	// docstatus==0 -- only a Draft can ever reach this). Never submits on
+	// save -- see save_draft_edit()/confirm_quotation() below. No price is
+	// ever fetched or shown here -- get_editable_quotation() never returns
+	// one, same as every other read in this module.
+	open_edit_cotizacion(name) {
+		if (!name) return;
+		this.nc = this.blank_nueva_cotizacion_state();
+		this._item_info_cache = new Map();
+		this.state.view = "nueva_cotizacion";
+		this.set_busy(true);
+
+		this.call("get_editable_quotation", { name: name })
+			.then((detail) => {
+				this.nc.editing_quotation_name = detail.name;
+				this.nc.customer = { name: detail.customer, customer_name: detail.customer_name };
+				this.nc.valid_till = detail.valid_till || "";
+				this.nc.terms = detail.observations || "";
+				for (const item of detail.items || []) {
+					this.nc.cart.set(item.item_code, {
+						item_code: item.item_code,
+						item_name: item.item_name,
+						stock_uom: item.stock_uom,
+						qty: item.qty,
+					});
+				}
+				this.render_nueva_cotizacion();
+			})
+			.catch(() => this.back_to_dashboard())
+			.finally(() => this.set_busy(false));
+	}
+
 	back_to_dashboard() {
 		this.load_dashboard();
 	}
 
 	render_nueva_cotizacion() {
+		const editing = !!this.nc.editing_quotation_name;
+		const title = editing ? __("Editar cotización") : __("Nueva cotización");
 		this.$body.html(`
 			<div class="fg-np-header">
 				<button type="button" class="fg-np-back">${icon("arrow-left")} ${__("Volver")}</button>
-				<div class="fg-np-title">${__("Nueva cotización")}</div>
+				<div class="fg-np-title">${title}</div>
 			</div>
 
 			<div class="fg-np-section">
@@ -733,7 +796,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 				)}">${frappe.utils.escape_html(this.nc.terms || "")}</textarea>
 			</div>
 			<button type="button" class="fg-btn fg-btn--solid-primary fg-btn--lg fg-confirm-btn" disabled>
-				${icon("check")} ${__("CREAR COTIZACIÓN")}
+				${icon("check")} ${this.nc.editing_quotation_name ? __("GUARDAR CAMBIOS") : __("CREAR COTIZACIÓN")}
 			</button>
 		`);
 
@@ -819,6 +882,15 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 			return;
 		}
 
+		if (this.nc.editing_quotation_name) {
+			// Commit 20.6: "GUARDAR CAMBIOS" never submits -- straight to
+			// update_draft_quotation(), no confirmation dialog (matches
+			// ordinary "save" conventions, same as save_draft_edit() in
+			// Ventas' own Commit 18.5).
+			this.save_draft_edit(payload);
+			return;
+		}
+
 		this.busy = true;
 		const $btn = this.$body.find(".fg-confirm-btn").prop("disabled", true).addClass("fg-btn--loading");
 
@@ -854,6 +926,44 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 				$btn.prop("disabled", false).removeClass("fg-btn--loading");
 			}
 		);
+	}
+
+	// Commit 20.6: update_draft_quotation() never submits -- the Quotation
+	// stays exactly whatever docstatus it already was (Draft, since the
+	// server itself rejects editing anything else). No price is ever sent
+	// or read back here, same as every other call in this module.
+	save_draft_edit(payload) {
+		this.busy = true;
+		const $btn = this.$body.find(".fg-confirm-btn").prop("disabled", true).addClass("fg-btn--loading");
+
+		this.call("update_draft_quotation", {
+			name: this.nc.editing_quotation_name,
+			customer: payload.customer,
+			items: payload.items,
+			valid_till: payload.valid_till,
+			terms: payload.terms,
+		})
+			.then((result) => {
+				frappe.show_alert(
+					{
+						message: `${icon("check", "fg-icon-sm")} ${__("Cambios guardados")} — ${frappe.utils.escape_html(
+							result.name
+						)}`,
+						indicator: "green",
+					},
+					5
+				);
+				this.back_to_dashboard();
+			})
+			.catch(() => {
+				// same reasoning as confirm_quotation()'s own .catch() -- the
+				// server's default error dialog already showed the real message.
+			})
+			.finally(() => {
+				this.busy = false;
+				$btn.prop("disabled", false).removeClass("fg-btn--loading");
+				this.refresh_confirm_state();
+			});
 	}
 };
 

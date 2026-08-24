@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Commits 20.2-20.3 -- Fase 5 (Cotizaciones). API layer for the future
-Page Cotizaciones (Commit 20.5), used by the Vendedora role. Every read
-goes through `frappe.get_list()`/`frappe.get_doc()`+`check_permission()`,
-and the one write (`create_and_submit_quotation()`, Commit 20.3) goes
-through a plain `.insert()`/`.submit()` under Vendedora's own real
-session -- never `frappe.get_all()`, never `frappe.set_user()`, never
+"""Commits 20.2-20.6 -- Fase 5 (Cotizaciones). API layer for Page
+Cotizaciones (Commit 20.5), used by the Vendedora role. Every read goes
+through `frappe.get_list()`/`frappe.get_doc()`+`check_permission()`, and
+every write (`create_and_submit_quotation()`, Commit 20.3;
+`update_draft_quotation()`, Commit 20.6) goes through a plain
+`.insert()`/`.submit()`/`.save()` under Vendedora's own real session --
+never `frappe.get_all()`, never `frappe.set_user()`, never
 `ignore_permissions=True`, never `db_set`/`frappe.db.set_value` to skip a
 validation. Vendedora always operates with her own real, restricted
 `if_owner=1` permission on Quotation (Commit 20.1). No Pick List/Reporte
@@ -359,3 +360,95 @@ def create_and_submit_quotation(customer, items, valid_till=None, terms=None):
         "item_count": len(qtn.items),
         "total_qty": qtn.total_qty,
     }
+
+
+@frappe.whitelist()
+def get_editable_quotation(name):
+    """Prefill data for the "Editar cotización" view (Commit 20.6) --
+    reuses `get_quotation_detail()`'s own exact response shape verbatim
+    (same allowlist, same field-by-field construction, same static
+    guardrail in `test_regression.py`), since editing reuses the
+    identical "Nueva Cotización" screen just prefilled. The one thing
+    added on top: only a Draft quotation can be prefilled for editing
+    here -- `check_permission("read")` (if_owner=1, Commit 20.1) is where
+    ownership is actually enforced, exactly like every other read in this
+    module; the `docstatus` check is the read-side half of the same
+    "Draft only" boundary `update_draft_quotation()` enforces
+    independently on the write side below.
+    """
+    _require_login()
+
+    qtn = frappe.get_doc("Quotation", name)
+    qtn.check_permission("read")
+
+    if qtn.docstatus != 0:
+        frappe.throw(_("Solo se pueden editar cotizaciones en borrador."))
+
+    return get_quotation_detail(name)
+
+
+@frappe.whitelist()
+def update_draft_quotation(name, customer, items, valid_till=None, terms=None):
+    """Edits one of Vendedora's own Draft Quotations in place (Commit
+    20.6) -- `customer`, `items` (`item_code`/`qty` only, via the exact
+    same `_validate_and_build_quotation_item_rows()` allowlist
+    `create_and_submit_quotation()` uses, Commit 20.3 -- one shared
+    security boundary, not two independently-maintained copies), and
+    `valid_till`/`terms`. Replaces the entire item list rather than
+    patching individual rows -- exactly what "Editar cotización" reusing
+    the "Nueva Cotización" screen naturally produces (she rebuilds her
+    cart from the prefilled state, the same UI flow as creating a new
+    quotation).
+
+    Never submits -- "GUARDAR CAMBIOS" is deliberately not "CREAR
+    COTIZACIÓN"; `.save()` alone lets ERPNext's own native pipeline
+    (`SellingController.validate()` -> `set_missing_values()` ->
+    `calculate_taxes_and_totals()`) re-resolve pricing/taxes/totals
+    internally, exactly as it already does on insert -- nothing here
+    reads or writes a price field, and the response below never returns
+    one either.
+
+    `check_permission("write")` is where if_owner=1 (Commit 20.1) is
+    actually enforced -- a different Vendedora's own quotation raises
+    `PermissionError` here exactly like `get_quotation_detail()`/
+    `get_my_quotations()` already do for read. `docstatus == 0` is
+    required explicitly, throwing a clear, specific message -- ERPNext's
+    own docstatus-transition guard would eventually reject writing to a
+    submitted document too, but only after doing more work first, and
+    with a more generic message.
+
+    Nothing here ever touches the document's naming series field, `owner`,
+    `status`, `docstatus`, `currency`, `selling_price_list`, `rate`,
+    `taxes`, or any discount/total field -- this function has no
+    parameter that could carry any of them in, and
+    `_validate_and_build_quotation_item_rows()` rejects
+    any attempt to smuggle one through a line.
+
+    Returns only `{"name": qtn.name}` -- no economic field, matching
+    `update_draft_sales_order()`'s own minimal response shape (Commit
+    18.5). (Deliberately avoids spelling out the Quotation naming series'
+    own prefix anywhere in this docstring -- Commit 20.4's own guardrail
+    confirms this module's source never contains it.)
+    """
+    _require_login()
+
+    qtn = frappe.get_doc("Quotation", name)
+    qtn.check_permission("write")
+
+    if qtn.docstatus != 0:
+        frappe.throw(_("Solo se pueden editar cotizaciones en borrador."))
+
+    qtn_items = _validate_and_build_quotation_item_rows(items)
+
+    qtn.party_name = customer
+    qtn.set("items", [])
+    for row in qtn_items:
+        qtn.append("items", row)
+    if valid_till is not None:
+        qtn.valid_till = valid_till or None
+    if terms is not None:
+        qtn.terms = terms
+
+    qtn.save()  # no ignore_permissions -- her real if_owner=1 write permission already covers this
+
+    return {"name": qtn.name}
