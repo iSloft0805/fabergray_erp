@@ -18,7 +18,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import flt
 
-from fabergray_erp.api import bodega, jefe_bodega, ventas
+from fabergray_erp.api import bodega, cotizaciones, jefe_bodega, ventas
 from fabergray_erp.fulfillment import shortage_service
 from fabergray_erp.tests import fixtures as fx
 
@@ -135,7 +135,7 @@ class TestStaticGuardrails(IntegrationTestCase):
 		api/bodega.py, api/jefe_bodega.py and (Commit 18.2) api/ventas.py --
 		none of them ever reaches the bypass directly; only Sales
 		Order.submit()'s own on_submit hook does."""
-		for module in (bodega, jefe_bodega, ventas):
+		for module in (bodega, jefe_bodega, ventas, cotizaciones):
 			self.assertFalse(
 				_hardcodes_ignore_permissions_true(module),
 				f"{module.__name__} must never hardcode ignore_permissions=True",
@@ -148,7 +148,7 @@ class TestStaticGuardrails(IntegrationTestCase):
 		# and no @frappe.whitelist()-decorated function anywhere accepts
 		# either name as one of its own parameters, so a client could never
 		# supply the value over HTTP even indirectly.
-		for module in (bodega, jefe_bodega, ventas):
+		for module in (bodega, jefe_bodega, ventas, cotizaciones):
 			tree = ast.parse(inspect.getsource(module))
 			for node in ast.walk(tree):
 				if not isinstance(node, ast.FunctionDef):
@@ -195,6 +195,93 @@ class TestStaticGuardrails(IntegrationTestCase):
 			"api/ventas.py must never call frappe.set_user -- Vendedora's own session "
 			"must be used for every read and write",
 		)
+
+	def test_cotizaciones_api_never_calls_get_all_or_set_user(self):
+		"""Commit 20.2 structural guardrail, same reasoning as
+		`test_ventas_api_never_calls_get_all_or_set_user` above: api/
+		cotizaciones.py must always read through Vendedora's own, real,
+		if_owner-restricted Quotation permission (Commit 20.1) --
+		frappe.get_all() and frappe.set_user() are exactly the two
+		mechanisms that could silently defeat that."""
+		calls = _dotted_calls_in(cotizaciones)
+		self.assertNotIn(
+			"frappe.get_all",
+			calls,
+			"api/cotizaciones.py must never call frappe.get_all -- use frappe.get_list so "
+			"if_owner and Role Permissions are actually applied",
+		)
+		self.assertNotIn(
+			"frappe.set_user",
+			calls,
+			"api/cotizaciones.py must never call frappe.set_user -- Vendedora's own session "
+			"must be used for every read and write",
+		)
+
+	def test_commit_20_2_cotizaciones_endpoints_never_leak_economic_data_or_bypass_permissions(self):
+		"""Commit 20.2 guardrail, same shape as the Commit 18.4/18.5 guardrails
+		above: get_item_info()/get_quotation_summary()/get_my_quotations()/
+		get_quotation_detail() must never return an economic field and must
+		never gain a bypass (no `.as_dict()`, no hardcoded
+		`ignore_permissions=True`, no `frappe.get_all`, no `frappe.set_user`)
+		-- checked statically so a future edit that starts forwarding
+		`rate`/`amount`/`grand_total`/etc. fails here immediately, before any
+		behavioural test would catch it.
+		"""
+		economic_keys = {
+			"rate",
+			"price_list_rate",
+			"amount",
+			"net_rate",
+			"net_amount",
+			"base_rate",
+			"base_amount",
+			"total",
+			"grand_total",
+			"net_total",
+			"base_grand_total",
+			"base_net_total",
+			"discount_percentage",
+			"discount_amount",
+			"taxes",
+			"margin_rate_or_amount",
+		}
+		functions_with_own_return_dict = [
+			cotizaciones.get_item_info,
+			cotizaciones.get_quotation_summary,
+			cotizaciones.get_my_quotations,
+			cotizaciones.get_quotation_detail,
+		]
+
+		for fn in functions_with_own_return_dict:
+			source = inspect.getsource(fn)
+			tree = ast.parse(source)
+
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Attribute) and node.attr == "as_dict":
+					self.fail(f"{fn.__name__}() must never call .as_dict() -- builds/forwards a safe dict only")
+
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Call):
+					for kw in node.keywords:
+						if kw.arg == "ignore_permissions" and _is_true_literal(kw.value):
+							self.fail(f"{fn.__name__}() must never hardcode ignore_permissions=True")
+						if kw.arg == "via_fulfillment_engine" and _is_true_literal(kw.value):
+							self.fail(f"{fn.__name__}() must never pass via_fulfillment_engine=True")
+
+			calls = _dotted_calls_in_tree(tree)
+			self.assertNotIn("frappe.get_all", calls, f"{fn.__name__}() must never call frappe.get_all")
+			self.assertNotIn("frappe.set_user", calls, f"{fn.__name__}() must never call frappe.set_user")
+
+			found_keys = set()
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Dict):
+					for key in node.keys:
+						if isinstance(key, ast.Constant) and isinstance(key.value, str):
+							found_keys.add(key.value)
+			self.assertTrue(found_keys, f"expected at least one dict literal key in {fn.__name__}()")
+			self.assertFalse(
+				economic_keys & found_keys, f"{fn.__name__}() returns economic key(s): {economic_keys & found_keys}"
+			)
 
 	def test_get_order_detail_never_calls_as_dict_and_only_returns_allowlisted_keys(self):
 		"""Commit 18.4 guardrail: get_order_detail() must build its response
