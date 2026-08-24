@@ -1,12 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Commit 20.2 -- Fase 5 (Cotizaciones). Read-only API layer for the future
+"""Commits 20.2-20.3 -- Fase 5 (Cotizaciones). API layer for the future
 Page Cotizaciones (Commit 20.5), used by the Vendedora role. Every read
 goes through `frappe.get_list()`/`frappe.get_doc()`+`check_permission()`,
-never `frappe.get_all()`, never `frappe.set_user()`, never
-`ignore_permissions=True` -- Vendedora always operates with her own real,
-restricted `if_owner=1` permission on Quotation (Commit 20.1). No Pick
-List/Reporte de Faltante/Fulfillment Engine involvement at all -- this
-module has nothing to bypass a permission for, unlike api/ventas.py.
+and the one write (`create_and_submit_quotation()`, Commit 20.3) goes
+through a plain `.insert()`/`.submit()` under Vendedora's own real
+session -- never `frappe.get_all()`, never `frappe.set_user()`, never
+`ignore_permissions=True`, never `db_set`/`frappe.db.set_value` to skip a
+validation. Vendedora always operates with her own real, restricted
+`if_owner=1` permission on Quotation (Commit 20.1). No Pick List/Reporte
+de Faltante/Fulfillment Engine/Sales Order/Material Request involvement
+at all -- this module has nothing to bypass a permission for, unlike
+api/ventas.py.
 
 `search_customers()`/`search_items()` are NOT duplicated here -- both are
 already generic, carry nothing Sales-Order-specific, and are already
@@ -14,15 +18,16 @@ already generic, carry nothing Sales-Order-specific, and are already
 `fabergray_erp.api.ventas.search_customers`/`search_items` directly.
 
 Fundamental rule this whole module exists to enforce (per the user's
-explicit approval of the Fase 5 architecture): Vendedora never sees a
-price, a discount, a tax amount, or a total on a Quotation either --
-same policy as `api/ventas.py`. Every function below either omits
+explicit approval of the Fase 5 architecture): Vendedora never sees or
+sends a price, a discount, a tax amount, or a total on a Quotation either
+-- same policy as `api/ventas.py`. Every read function below omits
 economic fields entirely from its response (built field by field, never
-`.as_dict()`), or -- for `create_and_submit_quotation()`, Commit 20.3 --
-will explicitly reject any economic field the caller tries to send.
-ERPNext's own native pricing engine resolves `rate`/`price_list_rate`/
-taxes/`grand_total` server-side, automatically, the moment the Quotation
-is inserted -- nothing here duplicates or second-guesses that.
+`.as_dict()`); `create_and_submit_quotation()` explicitly rejects any
+economic field the caller tries to send, via a strict per-line allowlist
+(`_ALLOWED_ITEM_FIELDS = {"item_code", "qty"}`). ERPNext's own native
+pricing engine resolves `rate`/`price_list_rate`/taxes/`grand_total`
+server-side, automatically, the moment the Quotation is inserted --
+nothing here duplicates or second-guesses that.
 
 Stock/inventory is out of scope entirely for this module, by design (the
 user's explicit instruction) -- unlike `api/ventas.py`'s `get_item_info()`,
@@ -30,15 +35,18 @@ this module's own `get_item_info()` never reads `Bin`/`get_actual_qty()`.
 """
 
 import frappe
-from frappe.utils import cint, nowdate
+from frappe import _
+from frappe.utils import cint, flt, nowdate
 
 from fabergray_erp.api.bodega import _require_login
 
-# The only two fields a Quotation Item line may carry in from the client
-# (Commit 20.3, `create_and_submit_quotation()`). Declared here, not just
-# in 20.3, so it is visible from the top of this module as the standing
-# rule the whole file exists to enforce -- not yet enforced by any
-# function in this commit (Commit 20.2 has no write endpoint at all).
+# The only two fields a Quotation Item line may carry in from the client,
+# enforced by `_validate_and_build_quotation_item_rows()` below (Commit
+# 20.3) -- any other key (`rate`, `price_list_rate`, `discount_percentage`,
+# `discount_amount`, `amount`, `net_rate`, `net_amount`,
+# `margin_rate_or_amount`, `margin_type`, `currency`, `conversion_rate`,
+# `taxes`, `total`/`grand_total`, or anything else, present or future) is
+# rejected outright, never silently dropped.
 _ALLOWED_ITEM_FIELDS = {"item_code", "qty"}
 
 
@@ -226,4 +234,128 @@ def get_quotation_detail(name):
             }
             for row in qtn.items
         ],
+    }
+
+
+def _validate_and_build_quotation_item_rows(items):
+    """The one place a Quotation Item row list is built from
+    client-supplied data. Rejects any line carrying a key outside
+    `_ALLOWED_ITEM_FIELDS` -- `rate`, `price_list_rate`,
+    `discount_percentage`, `discount_amount`, `amount`, `net_rate`,
+    `net_amount`, `margin_rate_or_amount`, `margin_type`, `currency`,
+    `conversion_rate`, `taxes`, `total`, or anything else, present or
+    future -- never silently dropped. No warehouse, no delivery_date, no
+    stock check of any kind (unlike `ventas._validate_and_build_item_rows()`)
+    -- inventory has no role in a Quotation, by explicit design."""
+    items = frappe.parse_json(items) if isinstance(items, str) else items
+    if not items:
+        frappe.throw(_("La cotización debe tener al menos un producto."))
+
+    qtn_items = []
+    for row in items:
+        if not isinstance(row, dict):
+            frappe.throw(_("Formato de línea de cotización inválido."))
+
+        disallowed = set(row.keys()) - _ALLOWED_ITEM_FIELDS
+        if disallowed:
+            frappe.throw(
+                _("Campos no permitidos en la línea de la cotización: {0}").format(", ".join(sorted(disallowed)))
+            )
+
+        if "item_code" not in row or "qty" not in row:
+            frappe.throw(_("Cada línea de la cotización debe incluir item_code y qty."))
+
+        item_code = row["item_code"]
+        qty = flt(row["qty"])
+
+        if not frappe.db.exists("Item", item_code):
+            frappe.throw(_("El producto {0} no existe.").format(item_code))
+        if qty <= 0:
+            frappe.throw(_("La cantidad debe ser mayor a cero para {0}.").format(item_code))
+
+        qtn_items.append({"item_code": item_code, "qty": qty})
+
+    return qtn_items
+
+
+@frappe.whitelist()
+def create_and_submit_quotation(customer, items, valid_till=None, terms=None):
+    """The critical operation: build and submit a standard Quotation from
+    exactly what Vendedora is allowed to send -- `customer`, an optional
+    `valid_till`/`terms`, and, per line, `item_code`/`qty` only -- and let
+    `.insert()` run ERPNext's own native pipeline
+    (`SellingController.validate()` -> `set_missing_values()` ->
+    `calculate_taxes_and_totals()`) to resolve pricing/taxes/totals.
+    Nothing in this function reads or writes a price field, queries `Item
+    Price`, or calls any inventory helper (`get_actual_qty()`/`Bin`/Pick
+    List/the Fulfillment Analyzer) -- a Quotation may be submitted
+    regardless of stock level, by explicit design.
+
+    Native field names used to build the document (confirmed against the
+    installed ERPNext 16.32.1 `Quotation` doctype, and already proven live
+    across every test in Commits 20.1/20.2 -- every one of those tests
+    inserts and submits a real Quotation with exactly this shape):
+    `quotation_to` (hard-set to `"Customer"`, never accepted from the
+    client -- Vendedora only ever quotes an existing Customer),
+    `party_name` (Dynamic Link, the actual customer -- there is no plain
+    `customer` field on Quotation, unlike Sales Order), `company`,
+    `items` (child table `Quotation Item`), `valid_till` (Date, optional,
+    native `validate_valid_till()` rejects a value before
+    `transaction_date` -- not re-validated here, ERPNext's own check is
+    sufficient), `terms` (`Text Editor`, optional, NATIVE field -- not a
+    Custom Field, see `get_my_quotations()`'s docstring). `currency`,
+    `conversion_rate`, `selling_price_list`, `taxes_and_charges`,
+    `order_type`, `transaction_date` are all left unset here and resolve
+    to their own native defaults during `.insert()` -- exactly as already
+    proven by every Commit 20.1/20.2 test, none of which sets them either.
+
+    Security: each line is checked against `_ALLOWED_ITEM_FIELDS =
+    {"item_code", "qty"}` via `_validate_and_build_quotation_item_rows()`
+    -- any other key makes this function raise `frappe.ValidationError`
+    immediately, before any Quotation is even constructed.
+
+    No `ignore_permissions`, no `frappe.get_all`, no `frappe.set_user`, no
+    `db_set`/`frappe.db.set_value` anywhere in this function -- `owner`
+    ends up as `frappe.session.user` purely because `.insert()` runs
+    under Vendedora's own real, unmodified session, and she can read the
+    result back afterward only because of the real `if_owner=1` Custom
+    DocPerm grant from Commit 20.1, not because of anything special done
+    here.
+
+    Returns only non-economic fields -- never `grand_total`,
+    `rounded_total`, `total`, `taxes`, `rate`, or `amount`, all of which
+    ERPNext computed internally and this function never reads.
+    """
+    _require_login()
+    frappe.has_permission("Quotation", "create", throw=True)
+
+    company = frappe.defaults.get_global_default("company")
+    qtn_items = _validate_and_build_quotation_item_rows(items)
+
+    qtn = frappe.get_doc(
+        {
+            "doctype": "Quotation",
+            "quotation_to": "Customer",
+            "party_name": customer,
+            "company": company,
+            "items": qtn_items,
+        }
+    )
+    if valid_till:
+        qtn.valid_till = valid_till
+    if terms:
+        qtn.terms = terms
+
+    qtn.insert()
+    qtn.submit()
+
+    return {
+        "name": qtn.name,
+        "status": qtn.status,
+        "customer": qtn.party_name,
+        "customer_name": qtn.customer_name,
+        "transaction_date": qtn.transaction_date,
+        "valid_till": qtn.valid_till,
+        "item_count": len(qtn.items),
+        "total_qty": qtn.total_qty,
     }

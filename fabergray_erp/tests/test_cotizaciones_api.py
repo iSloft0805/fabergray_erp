@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Commit 20.2 -- Fase 5 (Cotizaciones): api/cotizaciones.py's four
-read-only endpoints (get_item_info, get_quotation_summary,
-get_my_quotations, get_quotation_detail). No create_and_submit_quotation()
-yet (Commit 20.3) -- Quotation fixtures needed here are built as raw
+"""Commits 20.2-20.3 -- Fase 5 (Cotizaciones): api/cotizaciones.py.
+`TestCotizacionesApi` (Commit 20.2) covers the four read-only endpoints;
+Quotation fixtures there are built as raw
 `frappe.get_doc({"doctype": "Quotation", ...})` documents, same pattern
 `test_cotizaciones_permissions.py` (Commit 20.1) already established.
+`TestCreateAndSubmitQuotation` (Commit 20.3, below) covers
+`create_and_submit_quotation()` itself.
 
 Central theme, tested from several angles, same policy as
-`test_ventas_api.py`: Vendedora never sees a price/discount/tax/total on
-a Quotation either -- every response here is checked against a strict
-key allowlist and against `_ECONOMIC_KEYS`.
+`test_ventas_api.py`: Vendedora never sees or sends a price/discount/tax/
+total on a Quotation either -- every response here is checked against a
+strict key allowlist and against `_ECONOMIC_KEYS`, and every economic
+field name a line could carry is proven rejected, not silently dropped.
 """
 
 import frappe
@@ -202,3 +204,185 @@ class TestCotizacionesApi(IntegrationTestCase):
 		with fx.as_user(self.vendedora_b):
 			with self.assertRaises(frappe.PermissionError):
 				cotizaciones.get_quotation_detail(qtn_a.name)
+
+
+# Every field create_and_submit_quotation() must reject if a line tries to
+# send it -- the exact list from the approved Commit 20.3 brief.
+_FORBIDDEN_ITEM_FIELDS = [
+	"rate",
+	"price_list_rate",
+	"amount",
+	"net_rate",
+	"net_amount",
+	"discount_percentage",
+	"discount_amount",
+	"margin_type",
+	"margin_rate_or_amount",
+	"currency",
+	"conversion_rate",
+	"taxes",
+	"total",
+	"grand_total",
+]
+
+
+class TestCreateAndSubmitQuotation(IntegrationTestCase):
+	"""Commit 20.3 -- create_and_submit_quotation()."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.world = fx.TestWorld()
+		cls.addClassCleanup(cls.world.cleanup)
+
+		cls.wh = cls.world.warehouse("FG20-3 Main")
+		cls.item = cls.world.item("FG20-3-ITEM", default_warehouse=cls.wh.name)
+		cls.customer = cls.world.customer("FG20-3 Customer")
+
+		cls.vendedora_a = cls.world.user("fg20-3-vendedora-a@example.com", ["Vendedora"])
+		cls.vendedora_b = cls.world.user("fg20-3-vendedora-b@example.com", ["Vendedora"])
+
+	@staticmethod
+	def _side_effect_counts():
+		return {
+			"Sales Order": frappe.db.count("Sales Order"),
+			"Pick List": frappe.db.count("Pick List"),
+			"Reporte de Faltante": frappe.db.count("Reporte de Faltante"),
+			"Material Request": frappe.db.count("Material Request"),
+		}
+
+	# -- Camino feliz: crea y somete, owner correcto, response allowlist --------
+
+	def test_vendedora_can_create_and_submit_her_own_quotation(self):
+		with fx.as_user(self.vendedora_a):
+			result = cotizaciones.create_and_submit_quotation(
+				customer=self.customer.name,
+				items=[{"item_code": self.item.name, "qty": 3}],
+				terms="Válida por 15 días",
+			)
+		self.world.track_existing("Quotation", result["name"])
+
+		self.assertEqual(
+			set(result.keys()),
+			{
+				"name",
+				"status",
+				"customer",
+				"customer_name",
+				"transaction_date",
+				"valid_till",
+				"item_count",
+				"total_qty",
+			},
+		)
+		self.assertFalse(_ECONOMIC_KEYS & set(result.keys()))
+
+		qtn = frappe.get_doc("Quotation", result["name"])
+		self.assertEqual(qtn.docstatus, 1)  # Quotation queda docstatus=1
+		self.assertEqual(qtn.owner, self.vendedora_a)  # owner queda siendo la Vendedora
+		self.assertEqual(qtn.party_name, self.customer.name)
+		self.assertEqual(qtn.items[0].qty, 3)
+		self.assertEqual(qtn.terms, "Válida por 15 días")
+
+	def test_another_vendedora_cannot_read_it_afterward(self):
+		with fx.as_user(self.vendedora_a):
+			result = cotizaciones.create_and_submit_quotation(
+				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
+			)
+		self.world.track_existing("Quotation", result["name"])
+
+		with fx.as_user(self.vendedora_b):
+			with self.assertRaises(frappe.PermissionError):
+				cotizaciones.get_quotation_detail(result["name"])
+
+	# -- Inventario: stock 0 nunca bloquea --------------------------------------
+
+	def test_zero_stock_does_not_block_submission(self):
+		self.world.stock_up(self.item.name, self.wh.name, 0)  # Bin.actual_qty explícitamente 0
+
+		with fx.as_user(self.vendedora_a):
+			result = cotizaciones.create_and_submit_quotation(
+				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 50}]
+			)
+		self.world.track_existing("Quotation", result["name"])
+
+		qtn = frappe.get_doc("Quotation", result["name"])
+		self.assertEqual(qtn.docstatus, 1)
+		self.assertEqual(qtn.items[0].qty, 50)
+
+	# -- Pricing: ERPNext calcula internamente, nunca sale en la respuesta ------
+
+	def test_erpnext_computes_a_real_price_but_it_never_appears_in_the_response(self):
+		price_list = frappe.db.get_single_value("Selling Settings", "selling_price_list") or "Standard Selling"
+		if not frappe.db.exists("Item Price", {"item_code": self.item.name, "price_list": price_list}):
+			ip = frappe.get_doc(
+				{
+					"doctype": "Item Price",
+					"item_code": self.item.name,
+					"price_list": price_list,
+					"price_list_rate": 250,
+				}
+			)
+			ip.insert()
+			self.world.track_existing("Item Price", ip.name)
+
+		with fx.as_user(self.vendedora_a):
+			result = cotizaciones.create_and_submit_quotation(
+				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 2}]
+			)
+		self.world.track_existing("Quotation", result["name"])
+
+		self.assertFalse(_ECONOMIC_KEYS & set(result.keys()))
+
+		qtn = frappe.get_doc("Quotation", result["name"])
+		self.assertEqual(qtn.items[0].rate, 250)  # ERPNext sí calculó un precio válido
+		self.assertEqual(qtn.grand_total, 500)
+
+	# -- Ningún efecto secundario: nada de SO/Pick List/Faltante/MR -------------
+
+	def test_no_side_effects_created(self):
+		before = self._side_effect_counts()
+
+		with fx.as_user(self.vendedora_a):
+			result = cotizaciones.create_and_submit_quotation(
+				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 5}]
+			)
+		self.world.track_existing("Quotation", result["name"])
+
+		after = self._side_effect_counts()
+		self.assertEqual(before, after, "create_and_submit_quotation() must never create a Sales Order, "
+		"Pick List, Reporte de Faltante or Material Request")
+
+	# -- Inyección de campos económicos: rechazo explícito, uno por uno ---------
+
+	def test_injecting_forbidden_economic_fields_is_rejected(self):
+		for field in _FORBIDDEN_ITEM_FIELDS:
+			with self.subTest(field=field):
+				with fx.as_user(self.vendedora_a):
+					with self.assertRaises(frappe.ValidationError):
+						cotizaciones.create_and_submit_quotation(
+							customer=self.customer.name,
+							items=[{"item_code": self.item.name, "qty": 1, field: 999}],
+						)
+
+	def test_injecting_an_unknown_field_is_rejected(self):
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.ValidationError):
+				cotizaciones.create_and_submit_quotation(
+					customer=self.customer.name,
+					items=[{"item_code": self.item.name, "qty": 1, "some_unexpected_field": "x"}],
+				)
+
+	def test_missing_item_code_or_qty_is_rejected(self):
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.ValidationError):
+				cotizaciones.create_and_submit_quotation(customer=self.customer.name, items=[{"item_code": self.item.name}])
+			with self.assertRaises(frappe.ValidationError):
+				cotizaciones.create_and_submit_quotation(customer=self.customer.name, items=[{"qty": 1}])
+
+	def test_zero_or_negative_qty_is_rejected(self):
+		with fx.as_user(self.vendedora_a):
+			with self.assertRaises(frappe.ValidationError):
+				cotizaciones.create_and_submit_quotation(
+					customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 0}]
+				)

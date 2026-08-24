@@ -283,6 +283,118 @@ class TestStaticGuardrails(IntegrationTestCase):
 				economic_keys & found_keys, f"{fn.__name__}() returns economic key(s): {economic_keys & found_keys}"
 			)
 
+	def test_commit_20_3_create_and_submit_quotation_never_leaks_or_accepts_economic_fields(self):
+		"""Commit 20.3 guardrail: create_and_submit_quotation() and its
+		helper _validate_and_build_quotation_item_rows() must never leak an
+		economic field (no `.as_dict()`, response allowlisted), must never
+		gain a bypass (no `frappe.get_all`/`frappe.set_user`/hardcoded
+		`ignore_permissions=True`/`via_fulfillment_engine=True`/`db_set`/
+		`frappe.db.set_value` used to skip a validation), and must keep
+		actually enforcing `_ALLOWED_ITEM_FIELDS == {"item_code", "qty"}` --
+		both that the constant itself hasn't silently widened, and that the
+		validator function still references it (proving the allowlist is
+		wired into the rejection logic, not just declared and unused).
+		"""
+		self.assertEqual(
+			cotizaciones._ALLOWED_ITEM_FIELDS,
+			{"item_code", "qty"},
+			"cotizaciones._ALLOWED_ITEM_FIELDS must stay exactly {item_code, qty}",
+		)
+
+		economic_keys = {
+			"rate",
+			"price_list_rate",
+			"amount",
+			"net_rate",
+			"net_amount",
+			"base_rate",
+			"base_amount",
+			"total",
+			"grand_total",
+			"net_total",
+			"base_grand_total",
+			"base_net_total",
+			"discount_percentage",
+			"discount_amount",
+			"taxes",
+			"margin_rate_or_amount",
+			"currency",
+			"conversion_rate",
+		}
+
+		functions = [cotizaciones.create_and_submit_quotation, cotizaciones._validate_and_build_quotation_item_rows]
+
+		for fn in functions:
+			source = inspect.getsource(fn)
+			tree = ast.parse(source)
+
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Attribute) and node.attr == "as_dict":
+					self.fail(f"{fn.__name__}() must never call .as_dict() -- builds/forwards a safe dict only")
+				if isinstance(node, ast.Attribute) and node.attr == "db_set":
+					self.fail(f"{fn.__name__}() must never call .db_set() -- never skip a native validation")
+
+			for node in ast.walk(tree):
+				if isinstance(node, ast.Call):
+					for kw in node.keywords:
+						if kw.arg == "ignore_permissions" and _is_true_literal(kw.value):
+							self.fail(f"{fn.__name__}() must never hardcode ignore_permissions=True")
+						if kw.arg == "via_fulfillment_engine" and _is_true_literal(kw.value):
+							self.fail(f"{fn.__name__}() must never pass via_fulfillment_engine=True")
+
+			calls = _dotted_calls_in_tree(tree)
+			self.assertNotIn("frappe.get_all", calls, f"{fn.__name__}() must never call frappe.get_all")
+			self.assertNotIn("frappe.set_user", calls, f"{fn.__name__}() must never call frappe.set_user")
+			self.assertNotIn(
+				"frappe.db.set_value", calls, f"{fn.__name__}() must never call frappe.db.set_value"
+			)
+
+		# create_and_submit_quotation()'s own RETURN dict must be built from
+		# an allowlisted, non-economic set of keys only -- scoped to the
+		# `return {...}` statement specifically, not the whole function body
+		# (which also contains the frappe.get_doc({"doctype": "Quotation",
+		# ...}) construction dict, a different, legitimately-broader set of
+		# keys that must not be confused with the response).
+		tree = ast.parse(inspect.getsource(cotizaciones.create_and_submit_quotation))
+		return_dicts = [
+			node.value
+			for node in ast.walk(tree)
+			if isinstance(node, ast.Return) and isinstance(node.value, ast.Dict)
+		]
+		self.assertEqual(len(return_dicts), 1, "expected exactly one return {...} statement")
+		found_keys = set()
+		for key in return_dicts[0].keys:
+			if isinstance(key, ast.Constant) and isinstance(key.value, str):
+				found_keys.add(key.value)
+		allowed_keys = {
+			"name",
+			"status",
+			"customer",
+			"customer_name",
+			"transaction_date",
+			"valid_till",
+			"item_count",
+			"total_qty",
+		}
+		self.assertTrue(found_keys, "expected at least one dict literal key in create_and_submit_quotation()")
+		self.assertTrue(
+			found_keys.issubset(allowed_keys),
+			f"create_and_submit_quotation() returns unexpected key(s): {found_keys - allowed_keys}",
+		)
+		self.assertFalse(economic_keys & found_keys)
+
+		# _validate_and_build_quotation_item_rows() must actually reference
+		# _ALLOWED_ITEM_FIELDS -- proves the allowlist above is wired into
+		# the real rejection logic, not merely declared and unused.
+		validator_tree = ast.parse(inspect.getsource(cotizaciones._validate_and_build_quotation_item_rows))
+		referenced = any(
+			isinstance(node, ast.Name) and node.id == "_ALLOWED_ITEM_FIELDS" for node in ast.walk(validator_tree)
+		)
+		self.assertTrue(
+			referenced,
+			"_validate_and_build_quotation_item_rows() must reference _ALLOWED_ITEM_FIELDS to actually enforce it",
+		)
+
 	def test_get_order_detail_never_calls_as_dict_and_only_returns_allowlisted_keys(self):
 		"""Commit 18.4 guardrail: get_order_detail() must build its response
 		dict field by field (never `so.as_dict()`/`row.as_dict()`, both of
