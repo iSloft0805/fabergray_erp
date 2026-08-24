@@ -30,5 +30,37 @@
   "property_type": "Text",
   "row_name": null,
   "value": "PEDIDO-.#"
+ },
+ {
+  "default_value": null,
+  "doc_type": "Quotation",
+  "doctype": "Property Setter",
+  "doctype_or_field": "DocField",
+  "docstatus": 0,
+  "field_name": "naming_series",
+  "is_system_generated": 1,
+  "modified": "2026-08-24 00:00:00.000000",
+  "module": null,
+  "name": "Quotation-naming_series-options",
+  "property": "options",
+  "property_type": "Text",
+  "row_name": null,
+  "value": "COTIZACION-.#\nSAL-QTN-.YYYY.-"
+ },
+ {
+  "default_value": null,
+  "doc_type": "Quotation",
+  "doctype": "Property Setter",
+  "doctype_or_field": "DocField",
+  "docstatus": 0,
+  "field_name": "naming_series",
+  "is_system_generated": 1,
+  "modified": "2026-08-24 00:00:00.000000",
+  "module": null,
+  "name": "Quotation-naming_series-default",
+  "property": "default",
+  "property_type": "Text",
+  "row_name": null,
+  "value": "COTIZACION-.#"
  }
 ]

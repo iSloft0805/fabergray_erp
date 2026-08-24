@@ -199,11 +199,13 @@ fixtures = [
 	},
 	{
 		# Commit 18.5a -- Sales Order naming series (PEDIDO-.# as default,
-		# SAL-ORD-.YYYY.- kept as a non-default second option). Native
+		# SAL-ORD-.YYYY.- kept as a non-default second option). Commit 20.4
+		# -- same mechanism for Quotation (COTIZACION-.# as default,
+		# SAL-QTN-.YYYY.- kept as a non-default second option). Native
 		# Document Naming Settings mechanism (frappe.custom.doctype.
-		# property_setter) -- no custom Python counter.
+		# property_setter) -- no custom Python counter, either doctype.
 		"dt": "Property Setter",
-		"filters": [["doc_type", "=", "Sales Order"], ["field_name", "=", "naming_series"]],
+		"filters": [["doc_type", "in", ["Sales Order", "Quotation"]], ["field_name", "=", "naming_series"]],
 	},
 ]
 
