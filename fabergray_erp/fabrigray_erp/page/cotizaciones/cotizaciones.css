@@ -1,0 +1,913 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Commit 20.5 -- Page Cotizaciones. Everything generic (header, KPI card
+ * shell, badge shell, buttons, skeleton loaders, design tokens) comes from
+ * the shared fg_shell.css (loaded globally via app_include_css, same file
+ * Ventas/Bodega/Jefe de Bodega already use) -- this file only styles what
+ * is genuinely new here, reproduced (not imported) from
+ * page/ventas/ventas.css, same reasoning as Commit 6: a few dozen rules,
+ * zero business logic, keeps this Page's asset loading independent of
+ * Ventas'. Scoped under .fg-cotizaciones so nothing leaks outside this
+ * Page; ventas.css/bodega.css/jefe_de_bodega.css are not touched or
+ * depended on.
+ *
+ * Deliberately smaller than ventas.css: no disponibilidad/stock classes
+ * (inventory has no role in a Quotation, by explicit design), no
+ * EDITAR/ELIMINAR/MODIFICAR/CANCELAR action-row styling yet (Commits
+ * 20.6/20.7) -- only the VER COTIZACIÓN action exists in this commit.
+ */
+
+.fg-cotizaciones .fg-body {
+	display: flex;
+	flex-direction: column;
+}
+
+.fg-cotizaciones .fg-btn--lg {
+	height: 52px;
+	padding: 0 26px;
+	font-size: 0.92rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Button loading spinner -- same pattern as page/ventas/ventas.css.   */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-btn--loading {
+	position: relative;
+	color: transparent !important;
+}
+
+.fg-cotizaciones .fg-btn--loading::after {
+	content: "";
+	position: absolute;
+	width: 16px;
+	height: 16px;
+	border-radius: 50%;
+	border: 2px solid rgba(255, 255, 255, 0.55);
+	border-top-color: #fff;
+	animation: fg-cotizaciones-spin 0.7s linear infinite;
+}
+
+@keyframes fg-cotizaciones-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* KPI colors specific to Cotizaciones (Quotation status buckets) --   */
+/* distinct modifier names from fg_shell.css's/ventas.css's own        */
+/* so nothing collides with the Pages that share this stylesheet file. */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-kpi--cotizaciones-hoy {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-cotizaciones .fg-kpi--cotizaciones-pendientes {
+	--fg-kpi-color: var(--fg-warning-dark);
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-cotizaciones .fg-kpi--cotizaciones-aprobadas {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+.fg-cotizaciones .fg-kpi--cotizaciones-vencidas {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+.fg-cotizaciones .fg-kpi-sub {
+	font-size: 0.76rem;
+	color: var(--fg-text-faint);
+	margin-top: -6px;
+}
+
+.fg-cotizaciones.fg-shell .fg-kpis--cotizaciones {
+	grid-template-columns: repeat(4, 1fr);
+}
+
+/* ------------------------------------------------------------------ */
+/* Nueva cotización CTA                                                */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-np-cta-row {
+	margin-bottom: 28px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Filter chip (KPI -> Mis cotizaciones filter)                        */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-filter-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+	border-radius: var(--fg-radius-pill);
+	padding: 6px 8px 6px 14px;
+	font-size: 0.82rem;
+	margin-bottom: 14px;
+}
+
+.fg-cotizaciones .fg-filter-chip-clear {
+	width: 24px;
+	height: 24px;
+	border-radius: 50%;
+	border: none;
+	background: rgba(255, 255, 255, 0.6);
+	color: inherit;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+/* ------------------------------------------------------------------ */
+/* Mis cotizaciones -- quotation cards                                 */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-quotation-list {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	margin-bottom: 8px;
+}
+
+.fg-cotizaciones .fg-quotation-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.fg-cotizaciones .fg-quotation-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+
+.fg-cotizaciones .fg-quotation-card-id {
+	font-weight: 700;
+	font-size: 1rem;
+}
+
+.fg-cotizaciones .fg-quotation-card-customer {
+	font-size: 0.88rem;
+	color: var(--fg-text);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.fg-cotizaciones .fg-quotation-card-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 16px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-cotizaciones .fg-quotation-card-meta span {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.fg-cotizaciones .fg-quotation-card-counts {
+	display: flex;
+	gap: 16px;
+	font-size: 0.82rem;
+	font-weight: 600;
+	color: var(--fg-text);
+}
+
+.fg-cotizaciones .fg-empty--sm {
+	padding: 24px 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Quotation card actions -- VER COTIZACIÓN only in this commit         */
+/* (EDITAR/ELIMINAR/CANCELAR are Commits 20.6/20.7, reuses the exact    */
+/* same .fg-order-card-action shell ventas.css already defines under    */
+/* its own scope -- reproduced here under .fg-cotizaciones instead of   */
+/* imported, same reasoning as the rest of this file).                  */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-quotation-card-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 4px;
+}
+
+.fg-cotizaciones .fg-order-card-action {
+	appearance: none;
+	flex: 1 1 auto;
+	min-height: 44px;
+	padding: 0 14px;
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	font-size: 0.78rem;
+	font-weight: 700;
+	letter-spacing: 0.01em;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition);
+	white-space: nowrap;
+}
+
+.fg-cotizaciones .fg-order-card-action:hover {
+	background: var(--fg-bg);
+}
+
+.fg-cotizaciones .fg-quotation-card-view {
+	color: var(--fg-primary);
+	border-color: var(--fg-primary-tint);
+	background: var(--fg-primary-tint);
+}
+
+.fg-cotizaciones .fg-quotation-card-view:hover {
+	background: #d9e9fc;
+	color: var(--fg-primary-dark);
+}
+
+/* ------------------------------------------------------------------ */
+/* Status badges (Quotation.status)                                    */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-badge--qtn-draft,
+.fg-cotizaciones .fg-badge--qtn-expired {
+	background: #f1f5f9;
+	color: #475569;
+}
+
+.fg-cotizaciones .fg-badge--qtn-open,
+.fg-cotizaciones .fg-badge--qtn-replied,
+.fg-cotizaciones .fg-badge--qtn-partial {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-cotizaciones .fg-badge--qtn-ordered {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-cotizaciones .fg-badge--qtn-lost,
+.fg-cotizaciones .fg-badge--qtn-cancelled {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+/* ------------------------------------------------------------------ */
+/* Nueva cotización -- header, sections                                */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-np-header {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	margin-bottom: 20px;
+}
+
+.fg-cotizaciones .fg-np-back {
+	appearance: none;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	height: var(--fg-touch);
+	padding: 0 16px;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 600;
+	font-size: 0.85rem;
+	color: var(--fg-text);
+	cursor: pointer;
+}
+
+.fg-cotizaciones .fg-np-back:hover {
+	background: var(--fg-bg);
+}
+
+.fg-cotizaciones .fg-np-title {
+	font-size: 1.3rem;
+	font-weight: 700;
+}
+
+.fg-cotizaciones .fg-np-section {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 20px;
+	margin-bottom: 20px;
+}
+
+.fg-cotizaciones .fg-np-section-title {
+	font-weight: 700;
+	font-size: 1rem;
+	margin-bottom: 14px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Search box / dropdown (Cliente, Producto)                           */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-search-box {
+	position: relative;
+	display: flex;
+	align-items: center;
+}
+
+.fg-cotizaciones .fg-search-box .fg-icon {
+	position: absolute;
+	left: 14px;
+	color: var(--fg-text-faint);
+	pointer-events: none;
+}
+
+.fg-cotizaciones .fg-search-input {
+	width: 100%;
+	height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 0 14px 0 40px;
+	font-size: 0.9rem;
+	background: var(--fg-card);
+	color: var(--fg-text);
+}
+
+.fg-cotizaciones .fg-search-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+.fg-cotizaciones .fg-np-customer-area {
+	position: relative;
+}
+
+.fg-cotizaciones .fg-search-dropdown {
+	display: none;
+	position: relative;
+	margin-top: 6px;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	box-shadow: var(--fg-shadow);
+	max-height: 260px;
+	overflow-y: auto;
+}
+
+.fg-cotizaciones .fg-search-dropdown.is-open {
+	display: block;
+}
+
+.fg-cotizaciones .fg-search-result {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 12px 14px;
+	font-size: 0.88rem;
+	cursor: pointer;
+	border-bottom: 1px solid var(--fg-border);
+}
+
+.fg-cotizaciones .fg-search-result:last-child {
+	border-bottom: none;
+}
+
+.fg-cotizaciones .fg-search-result:hover {
+	background: var(--fg-bg);
+}
+
+.fg-cotizaciones .fg-selected-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+	border-radius: var(--fg-radius-pill);
+	padding: 8px 10px 8px 16px;
+	font-weight: 600;
+	font-size: 0.9rem;
+}
+
+.fg-cotizaciones .fg-chip-remove {
+	width: 28px;
+	height: 28px;
+	border-radius: 50%;
+	border: none;
+	background: rgba(255, 255, 255, 0.65);
+	color: inherit;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Product results grid -- no disponibilidad row (explicit design:      */
+/* inventory has no role in a Quotation), so cards are slightly         */
+/* shorter than Ventas' own equivalent.                                 */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-item-results {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: 12px;
+	margin-top: 16px;
+}
+
+.fg-cotizaciones .fg-product-skeleton {
+	height: 84px;
+}
+
+.fg-cotizaciones .fg-product-card {
+	background: var(--fg-bg);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 12px;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	transition: border-color var(--fg-transition), background var(--fg-transition);
+}
+
+.fg-cotizaciones .fg-product-card--in-cart {
+	border-color: var(--fg-primary);
+	background: var(--fg-primary-tint);
+}
+
+.fg-cotizaciones .fg-product-thumb {
+	width: 52px;
+	height: 52px;
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	color: var(--fg-text-faint);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	overflow: hidden;
+}
+
+.fg-cotizaciones .fg-product-thumb .fg-icon {
+	width: 24px;
+	height: 24px;
+}
+
+.fg-cotizaciones .fg-product-thumb-img {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+}
+
+.fg-cotizaciones .fg-product-info {
+	flex: 1;
+	min-width: 0;
+}
+
+.fg-cotizaciones .fg-product-name {
+	font-weight: 700;
+	font-size: 0.9rem;
+	line-height: 1.25;
+	overflow-wrap: anywhere;
+}
+
+.fg-cotizaciones .fg-product-code {
+	font-size: 0.76rem;
+	color: var(--fg-text-faint);
+	margin-top: 1px;
+}
+
+.fg-cotizaciones .fg-product-meta {
+	display: flex;
+	gap: 10px;
+	font-size: 0.76rem;
+	color: var(--fg-text-muted);
+	margin-top: 4px;
+	flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* Stepper -- reproduced from page/ventas/ventas.css (same values,     */
+/* scoped here under .fg-cotizaciones rather than importing that file).*/
+/* Buttons stay at var(--fg-touch) (44px), the minimum tap target.      */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-stepper {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.fg-cotizaciones .fg-stepper-btn {
+	width: var(--fg-touch);
+	height: var(--fg-touch);
+	border-radius: var(--fg-radius-sm);
+	border: none;
+	font-size: 1.2rem;
+	line-height: 1;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	flex-shrink: 0;
+	transition: background var(--fg-transition), transform 120ms ease;
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-cotizaciones .fg-stepper-btn:active {
+	transform: scale(0.92);
+}
+
+.fg-cotizaciones .fg-stepper-plus {
+	background: var(--fg-primary);
+	color: #fff;
+}
+
+.fg-cotizaciones .fg-stepper-plus:hover:not(:disabled) {
+	background: var(--fg-primary-dark);
+}
+
+.fg-cotizaciones .fg-stepper-minus:hover:not(:disabled) {
+	background: #d9e9fc;
+}
+
+.fg-cotizaciones .fg-stepper-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.fg-cotizaciones .fg-stepper-input {
+	width: 44px;
+	height: var(--fg-touch);
+	text-align: center;
+	font-size: 1rem;
+	font-weight: 700;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	-moz-appearance: textfield;
+}
+
+.fg-cotizaciones .fg-stepper-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+.fg-cotizaciones .fg-stepper--sm .fg-stepper-btn,
+.fg-cotizaciones .fg-stepper--sm .fg-stepper-input {
+	width: 36px;
+	height: 36px;
+	font-size: 0.95rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Resumen / carrito                                                   */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-np-summary-counts {
+	font-weight: 700;
+	font-size: 0.98rem;
+	margin-bottom: 14px;
+}
+
+.fg-cotizaciones .fg-cart-list {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	margin-bottom: 18px;
+}
+
+.fg-cotizaciones .fg-cart-line {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	background: var(--fg-bg);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 10px 12px;
+	flex-wrap: wrap;
+}
+
+.fg-cotizaciones .fg-cart-line-name {
+	font-size: 0.88rem;
+	font-weight: 600;
+	flex: 1;
+	min-width: 160px;
+	overflow-wrap: anywhere;
+}
+
+.fg-cotizaciones .fg-cart-line-controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-cotizaciones .fg-cart-line-remove {
+	width: 36px;
+	height: 36px;
+	border-radius: 50%;
+	border: 1px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-danger);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+.fg-cotizaciones .fg-cart-line-remove:hover {
+	background: var(--fg-danger-tint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Campos adicionales del resumen: "Válida hasta" y "Observaciones /    */
+/* condiciones" -- ambos comparten la misma envoltura .fg-np-field.     */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-np-field {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-bottom: 18px;
+}
+
+.fg-cotizaciones .fg-np-field label {
+	font-size: 0.82rem;
+	font-weight: 600;
+	color: var(--fg-text-muted);
+}
+
+.fg-cotizaciones .fg-valid-till-input {
+	width: 100%;
+	max-width: 220px;
+	height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 0 12px;
+	font-size: 0.88rem;
+	font-family: inherit;
+	color: var(--fg-text);
+	background: var(--fg-card);
+}
+
+.fg-cotizaciones .fg-valid-till-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+.fg-cotizaciones .fg-observations-input {
+	width: 100%;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 10px 12px;
+	font-size: 0.88rem;
+	font-family: inherit;
+	color: var(--fg-text);
+	resize: vertical;
+	min-height: 72px;
+}
+
+.fg-cotizaciones .fg-observations-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+.fg-cotizaciones .fg-np-summary .fg-confirm-btn {
+	width: 100%;
+}
+
+/* ------------------------------------------------------------------ */
+/* Detalle de cotización ("VER COTIZACIÓN") -- operational only, same   */
+/* non-economic allowlist as get_quotation_detail() (Commit 20.2).      */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-quotation-detail-overlay {
+	position: fixed;
+	inset: 0;
+	background: rgba(16, 24, 40, 0.45);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 20px;
+	z-index: 100;
+}
+
+.fg-cotizaciones .fg-quotation-detail-panel {
+	background: var(--fg-card);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow);
+	width: min(480px, 100%);
+	max-height: min(640px, 90vh);
+	overflow-y: auto;
+	padding: 20px;
+}
+
+.fg-cotizaciones .fg-quotation-detail-header {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-bottom: 14px;
+}
+
+.fg-cotizaciones .fg-quotation-detail-id {
+	font-size: 1.1rem;
+	font-weight: 700;
+	flex: 1;
+}
+
+.fg-cotizaciones .fg-quotation-detail-close {
+	appearance: none;
+	width: 36px;
+	height: 36px;
+	border-radius: 50%;
+	border: 1px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	flex-shrink: 0;
+}
+
+.fg-cotizaciones .fg-quotation-detail-close:hover {
+	background: var(--fg-bg);
+}
+
+.fg-cotizaciones .fg-quotation-detail-customer {
+	font-size: 0.92rem;
+	font-weight: 600;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 8px;
+}
+
+.fg-cotizaciones .fg-quotation-detail-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 16px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	margin-bottom: 14px;
+}
+
+.fg-cotizaciones .fg-quotation-detail-meta span {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.fg-cotizaciones .fg-quotation-detail-obs {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-sm);
+	padding: 8px 10px;
+	margin-bottom: 14px;
+}
+
+.fg-cotizaciones .fg-quotation-detail-section-title {
+	font-weight: 700;
+	font-size: 0.9rem;
+	margin-bottom: 10px;
+}
+
+.fg-cotizaciones .fg-quotation-detail-lines {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 16px;
+}
+
+.fg-cotizaciones .fg-quotation-detail-line {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	background: var(--fg-bg);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 10px 12px;
+}
+
+.fg-cotizaciones .fg-quotation-detail-line-info {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.fg-cotizaciones .fg-quotation-detail-line-name {
+	font-size: 0.86rem;
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+
+.fg-cotizaciones .fg-quotation-detail-line-code {
+	font-size: 0.74rem;
+	color: var(--fg-text-faint);
+}
+
+.fg-cotizaciones .fg-quotation-detail-line-qty {
+	font-size: 0.84rem;
+	font-weight: 700;
+	white-space: nowrap;
+	flex-shrink: 0;
+}
+
+.fg-cotizaciones .fg-quotation-detail-footer {
+	font-weight: 700;
+	font-size: 0.9rem;
+	padding-top: 4px;
+	border-top: 1px solid var(--fg-border);
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive -- desktop first, then tablet (~860px), then mobile      */
+/* (~640px), matching the breakpoints already approved for /app/ventas */
+/* and every other Page in this app.                                   */
+/* ------------------------------------------------------------------ */
+@media (max-width: 860px) {
+	.fg-cotizaciones.fg-shell .fg-kpis--cotizaciones {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-cotizaciones .fg-item-results {
+		grid-template-columns: 1fr;
+	}
+
+	.fg-cotizaciones .fg-quotation-card-meta {
+		gap: 10px;
+	}
+}
+
+@media (max-width: 640px) {
+	.fg-cotizaciones.fg-shell .fg-kpis--cotizaciones {
+		grid-template-columns: 1fr 1fr;
+		gap: 10px;
+	}
+
+	.fg-cotizaciones .fg-np-section {
+		padding: 16px;
+	}
+
+	.fg-cotizaciones .fg-np-header {
+		flex-wrap: wrap;
+	}
+
+	.fg-cotizaciones .fg-cart-line {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.fg-cotizaciones .fg-cart-line-controls {
+		justify-content: space-between;
+	}
+
+	.fg-cotizaciones .fg-np-cta-row .fg-btn {
+		width: 100%;
+	}
+
+	.fg-cotizaciones .fg-valid-till-input {
+		max-width: 100%;
+	}
+
+	/* Stepper drops to its own row on mobile, same convention as Ventas --
+	 * thumb/name/code/UOM keep the first row, tap targets unchanged. */
+	.fg-cotizaciones .fg-product-card {
+		flex-wrap: wrap;
+	}
+
+	.fg-cotizaciones .fg-product-card .fg-stepper {
+		flex-basis: 100%;
+		justify-content: flex-end;
+		margin-top: 4px;
+	}
+
+	.fg-cotizaciones .fg-quotation-detail-panel {
+		width: 100%;
+		max-height: 100%;
+		border-radius: var(--fg-radius-lg) var(--fg-radius-lg) 0 0;
+	}
+
+	.fg-cotizaciones .fg-quotation-detail-overlay {
+		align-items: flex-end;
+	}
+}
