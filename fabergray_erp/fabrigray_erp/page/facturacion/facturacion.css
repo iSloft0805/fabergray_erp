@@ -1,0 +1,582 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Commit 21.4 -- Page Facturación. Everything generic (header, KPI card
+ * shell, badge shell, buttons, progress bars, skeleton loaders, design
+ * tokens) comes from the shared fg_shell.css (loaded globally via
+ * app_include_css, same file Ventas/Bodega/Jefe de Bodega/Cotizaciones
+ * already use) -- this file only styles what is genuinely new here,
+ * reproduced (not imported) from page/cotizaciones/cotizaciones.css and
+ * page/bodega/bodega.css, same reasoning as Commit 6: a few dozen rules,
+ * zero business logic, keeps this Page's asset loading independent of
+ * theirs. Scoped under .fg-facturacion so nothing leaks outside this Page;
+ * cotizaciones.css/ventas.css/bodega.css/jefe_de_bodega.css are not
+ * touched or depended on.
+ *
+ * Read-only in this commit: no checkbox, no GENERAR FACTURA styling --
+ * only REVISAR (a plain solid-primary button, reusing fg_shell's own
+ * .fg-btn shell) exists here.
+ */
+
+.fg-facturacion .fg-body {
+	display: flex;
+	flex-direction: column;
+}
+
+/* ------------------------------------------------------------------ */
+/* KPI colors specific to Facturación -- distinct modifier names from   */
+/* fg_shell.css's/other Pages' own so nothing collides with the Pages   */
+/* that share this stylesheet file. Purely informational cards (not     */
+/* buttons) in this commit -- no hover/active state needed.             */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-kpi--fact-pendientes {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-facturacion .fg-kpi--fact-parciales {
+	--fg-kpi-color: var(--fg-warning-dark);
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-facturacion .fg-kpi--fact-facturados-hoy {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+.fg-facturacion .fg-kpi--fact-con-incidencia {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+.fg-facturacion .fg-kpi-sub {
+	font-size: 0.76rem;
+	color: var(--fg-text-faint);
+	margin-top: -6px;
+}
+
+.fg-facturacion.fg-shell .fg-kpis--facturacion {
+	grid-template-columns: repeat(4, 1fr);
+}
+
+/* ------------------------------------------------------------------ */
+/* Cola -- toolbar (búsqueda), tabs                                    */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-fact-toolbar {
+	display: flex;
+	gap: 12px;
+	margin-bottom: 16px;
+	flex-wrap: wrap;
+}
+
+.fg-facturacion .fg-fact-search-wrap {
+	position: relative;
+	flex: 1 1 260px;
+}
+
+.fg-facturacion .fg-fact-search-icon {
+	position: absolute;
+	left: 14px;
+	top: 50%;
+	transform: translateY(-50%);
+	color: var(--fg-text-faint);
+	pointer-events: none;
+}
+
+.fg-facturacion .fg-fact-search-input {
+	width: 100%;
+	height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	padding: 0 14px 0 40px;
+	font-size: 0.9rem;
+	color: var(--fg-text);
+}
+
+.fg-facturacion .fg-fact-search-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+.fg-facturacion .fg-fact-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 8px;
+	margin-bottom: 18px;
+}
+
+.fg-facturacion .fg-fact-tab {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: transparent;
+	border: none;
+	border-radius: var(--fg-radius-md);
+	padding: 10px 16px;
+	min-height: 40px;
+	font-size: 0.82rem;
+	font-weight: 600;
+	color: var(--fg-text-muted);
+	cursor: pointer;
+	transition: background var(--fg-transition), color var(--fg-transition);
+}
+
+.fg-facturacion .fg-fact-tab:hover {
+	background: var(--fg-bg);
+}
+
+.fg-facturacion .fg-fact-tab.is-active {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+/* ------------------------------------------------------------------ */
+/* Cola -- pedido cards                                                 */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-fact-queue-cards {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	margin-bottom: 18px;
+}
+
+.fg-facturacion .fg-fact-queue-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	cursor: pointer;
+	transition: box-shadow var(--fg-transition), border-color var(--fg-transition);
+}
+
+.fg-facturacion .fg-fact-queue-card:hover {
+	box-shadow: var(--fg-shadow);
+}
+
+.fg-facturacion .fg-fact-queue-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.fg-facturacion .fg-fact-queue-card-id {
+	font-weight: 700;
+	font-size: 1rem;
+}
+
+.fg-facturacion .fg-fact-queue-card-badges {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.fg-facturacion .fg-fact-queue-card-customer {
+	font-size: 0.88rem;
+	color: var(--fg-text);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.fg-facturacion .fg-fact-queue-card-meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 16px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-facturacion .fg-fact-queue-card-meta span {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.fg-facturacion .fg-fact-queue-card-picklist {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.74rem;
+	color: var(--fg-text-faint);
+}
+
+.fg-facturacion .fg-fact-queue-card .fg-progress-block {
+	margin-top: 2px;
+}
+
+.fg-facturacion .fg-fact-review-btn {
+	align-self: flex-start;
+	margin-top: 4px;
+}
+
+@media (min-width: 641px) {
+	.fg-facturacion .fg-fact-review-btn {
+		align-self: flex-end;
+	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Badges -- delivery_status + incidencia. Distinct modifier names from */
+/* fg_shell.css's own bucket badges so nothing collides.                */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-badge--fact-pendiente {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-facturacion .fg-badge--fact-parcial {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-facturacion .fg-badge--fact-facturado {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-facturacion .fg-badge--fact-incidencia {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+/* ------------------------------------------------------------------ */
+/* Paginación                                                           */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-fact-queue-pagination {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 12px;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 14px 18px;
+}
+
+.fg-facturacion .fg-fact-pagination-info {
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-facturacion .fg-fact-pagination-controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-facturacion .fg-fact-pagination-btn {
+	width: var(--fg-touch);
+	height: var(--fg-touch);
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+.fg-facturacion .fg-fact-pagination-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.fg-facturacion .fg-fact-pagination-btn:hover:not(:disabled) {
+	border-color: var(--fg-primary);
+	color: var(--fg-primary);
+}
+
+.fg-facturacion .fg-fact-pagination-page {
+	min-width: var(--fg-touch);
+	height: var(--fg-touch);
+	padding: 0 12px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-primary);
+	color: var(--fg-primary);
+	font-weight: 700;
+	font-size: 0.9rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Detalle ("REVISAR") -- header/back/section shell, reproduced from    */
+/* page/cotizaciones/cotizaciones.css's own Nueva Cotización screen.    */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-np-header {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	margin-bottom: 20px;
+	flex-wrap: wrap;
+}
+
+.fg-facturacion .fg-np-back {
+	appearance: none;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	height: var(--fg-touch);
+	padding: 0 16px;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 600;
+	font-size: 0.85rem;
+	color: var(--fg-text);
+	cursor: pointer;
+}
+
+.fg-facturacion .fg-np-back:hover {
+	background: var(--fg-bg);
+}
+
+.fg-facturacion .fg-np-title {
+	font-size: 1.3rem;
+	font-weight: 700;
+}
+
+.fg-facturacion .fg-np-section {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 20px;
+	margin-bottom: 20px;
+}
+
+.fg-facturacion .fg-np-section-title {
+	font-weight: 700;
+	font-size: 1rem;
+	margin-bottom: 14px;
+}
+
+.fg-facturacion .fg-product-skeleton {
+	height: 84px;
+	margin-bottom: 14px;
+}
+
+.fg-facturacion .fg-empty--sm {
+	padding: 24px 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Detalle -- info card (PEDIDO-N, Pick List técnico, cliente,          */
+/* bodeguero, fecha, progreso)                                          */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-fact-detail-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 20px;
+	margin-bottom: 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.fg-facturacion .fg-fact-detail-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.fg-facturacion .fg-fact-detail-id {
+	font-weight: 700;
+	font-size: 1.15rem;
+}
+
+.fg-facturacion .fg-fact-detail-picklist {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.8rem;
+	color: var(--fg-text-faint);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.fg-facturacion .fg-fact-detail-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 18px;
+	font-size: 0.85rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-facturacion .fg-fact-detail-meta span {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Detalle -- product cards (per línea: alistada/facturada/pendiente/   */
+/* stock, precio unitario/importe). Flex-column shell, own internal     */
+/* grids for the two number rows -- collapses cleanly on mobile without */
+/* ever needing horizontal scroll.                                      */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-fact-detail-items {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.fg-facturacion .fg-fact-item-card {
+	background: var(--fg-bg);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 14px 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.fg-facturacion .fg-fact-item-identity {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	min-width: 0;
+}
+
+.fg-facturacion .fg-fact-item-thumb {
+	width: 44px;
+	height: 44px;
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+.fg-facturacion .fg-fact-item-thumb .fg-icon {
+	width: 20px;
+	height: 20px;
+}
+
+.fg-facturacion .fg-fact-item-name {
+	font-weight: 700;
+	font-size: 0.92rem;
+	line-height: 1.25;
+	overflow-wrap: anywhere;
+}
+
+.fg-facturacion .fg-fact-item-code {
+	font-size: 0.76rem;
+	color: var(--fg-text-faint);
+	margin-top: 2px;
+}
+
+.fg-facturacion .fg-fact-item-qtygrid {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	gap: 10px;
+	padding: 10px 0;
+	border-top: 1px solid var(--fg-border);
+	border-bottom: 1px solid var(--fg-border);
+}
+
+.fg-facturacion .fg-fact-item-price {
+	display: grid;
+	grid-template-columns: repeat(2, 1fr);
+	gap: 10px;
+}
+
+.fg-facturacion .fg-fact-qty-col,
+.fg-facturacion .fg-fact-price-col {
+	text-align: center;
+}
+
+.fg-facturacion .fg-fact-qty-label {
+	font-size: 0.7rem;
+	color: var(--fg-text-muted);
+	margin-bottom: 4px;
+}
+
+.fg-facturacion .fg-fact-qty-label small {
+	color: var(--fg-text-faint);
+	font-weight: 400;
+}
+
+.fg-facturacion .fg-fact-qty-value {
+	font-size: 1rem;
+	font-weight: 700;
+	color: var(--fg-text);
+}
+
+.fg-facturacion .fg-fact-qty-col--pending .fg-fact-qty-value {
+	color: var(--fg-primary-dark);
+}
+
+.fg-facturacion .fg-fact-qty-col--stock .fg-fact-qty-value {
+	color: var(--fg-text-muted);
+	font-weight: 600;
+}
+
+.fg-facturacion .fg-fact-price-col--amount .fg-fact-qty-value {
+	color: var(--fg-success-dark);
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive -- desktop first, then tablet (~860px), then mobile       */
+/* (~640px), matching the breakpoints already approved for every other  */
+/* Page in this app. Touch targets stay >=44px (var(--fg-touch)) at     */
+/* every width -- no rule here ever shrinks a button/input below it.    */
+/* ------------------------------------------------------------------ */
+@media (max-width: 860px) {
+	.fg-facturacion.fg-shell .fg-kpis--facturacion {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-facturacion .fg-fact-item-qtygrid {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+
+@media (max-width: 640px) {
+	.fg-facturacion.fg-shell .fg-kpis--facturacion {
+		grid-template-columns: 1fr 1fr;
+		gap: 10px;
+	}
+
+	.fg-facturacion .fg-np-section {
+		padding: 16px;
+	}
+
+	.fg-facturacion .fg-fact-detail-card {
+		padding: 16px;
+	}
+
+	.fg-facturacion .fg-fact-queue-card {
+		padding: 14px 16px;
+	}
+
+	.fg-facturacion .fg-fact-review-btn {
+		align-self: stretch;
+		justify-content: center;
+	}
+
+	.fg-facturacion .fg-fact-item-price {
+		grid-template-columns: 1fr 1fr;
+	}
+}
