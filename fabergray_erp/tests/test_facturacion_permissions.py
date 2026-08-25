@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Commit 21.1 -- permission tests for the new Facturación role.
 
-Scope of this commit (per the approved brief): create the Facturación role
+Scope of Commit 21.1 (per the approved brief): create the Facturación role
 and grant EXACTLY 6 Custom DocPerm rows, no if_owner (Facturación is a shared
 queue, not a per-owner one like Vendedora's Sales Order/Quotation):
 
@@ -12,11 +12,40 @@ queue, not a per-owner one like Vendedora's Sales Order/Quotation):
 - Item: read
 - Account: select
 
-No api/facturacion.py, no Page, no other permission grant in this commit --
-those are explicitly out of scope. This file proves the 6 grants work and
-that nothing beyond them was accidentally opened up, especially the 5
-doctypes the brief explicitly says NOT to grant unless a real test fails
-(Item Price, Cost Center, Sales Taxes and Charges Template, Item Tax
+**Amended in Commit 21.2** with read-only access to `Reporte de Faltante` --
+discovered live while building api/facturacion.py:
+`get_facturacion_summary()`'s `con_incidencia` bucket and
+`get_pending_pick_lists()`'s `has_open_shortage` indicator both require
+reading it, which 21.1's exact-6 grant did not include. Presented to the
+user as an explicit choice before adding it.
+
+**Critical discovery made while adding it, fixed within this same commit --
+not a Custom DocPerm row:** `Reporte de Faltante` is a doctype fabergray_erp
+itself owns (Commit 2), so unlike every other Facturación/Vendedora/Bodega
+grant so far (all on core Frappe/ERPNext doctypes), its permissions live
+natively in its own `reporte_de_faltante.json` `permissions` array. Adding a
+Custom DocPerm row for it instead (the first attempt) triggered a real,
+confirmed-live Frappe mechanism (`frappe.permissions.get_valid_perms()`,
+`get_doctypes_with_custom_docperms()`): once ANY Custom DocPerm row exists
+for a given doctype, ALL of that doctype's own native DocPerm rows are
+ignored for EVERY role, not just the one being granted -- this silently
+wiped out Bodega's and Jefe de Bodega's own pre-existing, load-bearing
+Reporte de Faltante permissions (System Manager's too), confirmed by a real
+regression in test_bodega_permissions.py before the fix. Corrected by
+reverting the Custom DocPerm row entirely and instead adding one native
+permission row (`{"read": 1, "print": 1, "report": 1, "role":
+"Facturación"}`, no write/create/delete) directly to
+`reporte_de_faltante.json`, alongside System Manager/Bodega/Jefe de
+Bodega's existing rows -- the correct, idiomatic mechanism for an own-app
+doctype (see [[fabrigray-permission-pattern]]: Custom DocPerm is for
+doctypes this app does NOT own). `fixtures/custom_docperm.json` therefore
+still holds exactly the same 6 Facturación rows as Commit 21.1 -- unchanged.
+
+No api/facturacion.py Page, no other permission grant beyond these 6 Custom
+DocPerm rows + 1 native DocPerm row. This file proves all of it works and
+that nothing beyond it was accidentally opened up, especially the 5
+doctypes the 21.1 brief explicitly says NOT to grant unless a real test
+fails (Item Price, Cost Center, Sales Taxes and Charges Template, Item Tax
 Template, Payment Terms Template) -- none did, so none are granted.
 """
 
@@ -39,7 +68,7 @@ _STILL_DENIED_DOCTYPES = (
 )
 
 # Doctypes Facturación can read but never write/create/submit/cancel/delete.
-_READ_ONLY_DOCTYPES = ("Pick List", "Sales Order", "Customer", "Item")
+_READ_ONLY_DOCTYPES = ("Pick List", "Sales Order", "Customer", "Item", "Reporte de Faltante")
 
 
 class TestFacturacionRoleExists(IntegrationTestCase):
@@ -47,6 +76,9 @@ class TestFacturacionRoleExists(IntegrationTestCase):
 		self.assertTrue(frappe.db.exists("Role", "Facturación"))
 
 	def test_exactly_six_custom_docperm_rows_for_facturacion(self):
+		"""Unchanged from Commit 21.1 -- Reporte de Faltante access (Commit
+		21.2) is a native DocPerm row on the doctype's own JSON, never a
+		Custom DocPerm row (see this module's docstring for why)."""
 		rows = frappe.get_all(
 			"Custom DocPerm", filters={"role": "Facturación"}, fields=["parent", "if_owner"]
 		)
@@ -57,6 +89,20 @@ class TestFacturacionRoleExists(IntegrationTestCase):
 		self.assertEqual(
 			parents, {"Sales Invoice", "Pick List", "Sales Order", "Customer", "Item", "Account"}
 		)
+
+	def test_reporte_de_faltante_grant_is_native_docperm_not_custom_docperm(self):
+		"""The specific regression this commit found and fixed: Reporte de
+		Faltante must have ZERO Custom DocPerm rows at all -- one existing
+		for any role/doctype combination would mask every native DocPerm
+		row on that doctype for every role (Bodega/Jefe de Bodega/System
+		Manager included), per frappe.permissions.get_valid_perms()."""
+		self.assertFalse(frappe.db.exists("Custom DocPerm", {"parent": "Reporte de Faltante"}))
+		native = frappe.get_all(
+			"DocPerm", filters={"parent": "Reporte de Faltante", "role": "Facturación"}, fields=["read", "write"]
+		)
+		self.assertEqual(len(native), 1)
+		self.assertEqual(native[0].read, 1)
+		self.assertEqual(native[0].write, 0)
 
 
 class TestFacturacionPermissions(IntegrationTestCase):
@@ -73,11 +119,20 @@ class TestFacturacionPermissions(IntegrationTestCase):
 		so = cls.world.submitted_sales_order(cls.item.name, cls.wh.name, 5, cls.customer.name)
 		cls.pl = cls.world.pick_list_for(so, cls.wh.name)
 		cls.so = so
+		cls.report = cls.world.shortage_report(
+			item_code=cls.item.name,
+			warehouse=cls.wh.name,
+			pick_list=cls.pl.name,
+			qty_solicitada=5,
+			qty_disponible=3,
+			detected_by="Bodega",
+			shortage_reason="Stock insuficiente",
+		)
 
 		cls.facturacion_a = cls.world.user("fg21-facturacion-a@example.com", ["Facturación"])
 		cls.facturacion_b = cls.world.user("fg21-facturacion-b@example.com", ["Facturación"])
 
-	# -- Positive: the 6 granted permissions ------------------------------
+	# -- Positive: the 7 granted permissions ------------------------------
 
 	def test_can_read_pick_list(self):
 		with fx.as_user(self.facturacion_a):
@@ -94,6 +149,10 @@ class TestFacturacionPermissions(IntegrationTestCase):
 	def test_can_read_item(self):
 		with fx.as_user(self.facturacion_a):
 			frappe.get_doc("Item", self.item.name).check_permission("read")
+
+	def test_can_read_reporte_de_faltante(self):
+		with fx.as_user(self.facturacion_a):
+			frappe.get_doc("Reporte de Faltante", self.report.name).check_permission("read")
 
 	def test_has_select_on_account_not_read(self):
 		with fx.as_user(self.facturacion_a):
@@ -153,6 +212,11 @@ class TestFacturacionPermissions(IntegrationTestCase):
 			with self.assertRaises(frappe.PermissionError):
 				frappe.get_doc("Item", self.item.name).check_permission("write")
 
+	def test_cannot_write_reporte_de_faltante(self):
+		with fx.as_user(self.facturacion_a):
+			with self.assertRaises(frappe.PermissionError):
+				frappe.get_doc("Reporte de Faltante", self.report.name).check_permission("write")
+
 	def test_cannot_delete_sales_invoice(self):
 		with fx.as_user(self.facturacion_a):
 			self.assertFalse(frappe.has_permission("Sales Invoice", "delete"))
@@ -176,3 +240,22 @@ class TestFacturacionPermissions(IntegrationTestCase):
 		)
 		self.assertFalse(frappe.db.exists("Custom DocPerm", {"parent": "Sales Invoice", "role": "Vendedora"}))
 		self.assertFalse(frappe.db.exists("Custom DocPerm", {"parent": "Sales Invoice", "role": "Bodega"}))
+
+		# The specific regression this commit found and fixed: Bodega/Jefe
+		# de Bodega's own, pre-existing (native, Commit 2) Reporte de
+		# Faltante permissions must still be intact.
+		bodega_perm = frappe.get_all(
+			"DocPerm", filters={"parent": "Reporte de Faltante", "role": "Bodega"}, fields=["read", "write", "create"]
+		)
+		self.assertEqual(len(bodega_perm), 1)
+		self.assertEqual((bodega_perm[0].read, bodega_perm[0].write, bodega_perm[0].create), (1, 1, 1))
+
+		jefe_perm = frappe.get_all(
+			"DocPerm", filters={"parent": "Reporte de Faltante", "role": "Jefe de Bodega"}, fields=["read", "write"]
+		)
+		self.assertEqual(len(jefe_perm), 1)
+		self.assertEqual((jefe_perm[0].read, jefe_perm[0].write), (1, 1))
+
+		with fx.as_user(self.world.user("fg21-bodega-regression@example.com", ["Bodega"])):
+			frappe.has_permission("Reporte de Faltante", "read", throw=True)
+			frappe.has_permission("Reporte de Faltante", "write", throw=True)

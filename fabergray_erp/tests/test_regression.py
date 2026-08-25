@@ -18,7 +18,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import flt
 
-from fabergray_erp.api import bodega, cotizaciones, jefe_bodega, ventas
+from fabergray_erp.api import bodega, cotizaciones, facturacion, jefe_bodega, ventas
 from fabergray_erp.fulfillment import shortage_service
 from fabergray_erp.tests import fixtures as fx
 
@@ -135,7 +135,7 @@ class TestStaticGuardrails(IntegrationTestCase):
 		api/bodega.py, api/jefe_bodega.py and (Commit 18.2) api/ventas.py --
 		none of them ever reaches the bypass directly; only Sales
 		Order.submit()'s own on_submit hook does."""
-		for module in (bodega, jefe_bodega, ventas, cotizaciones):
+		for module in (bodega, jefe_bodega, ventas, cotizaciones, facturacion):
 			self.assertFalse(
 				_hardcodes_ignore_permissions_true(module),
 				f"{module.__name__} must never hardcode ignore_permissions=True",
@@ -148,7 +148,7 @@ class TestStaticGuardrails(IntegrationTestCase):
 		# and no @frappe.whitelist()-decorated function anywhere accepts
 		# either name as one of its own parameters, so a client could never
 		# supply the value over HTTP even indirectly.
-		for module in (bodega, jefe_bodega, ventas, cotizaciones):
+		for module in (bodega, jefe_bodega, ventas, cotizaciones, facturacion):
 			tree = ast.parse(inspect.getsource(module))
 			for node in ast.walk(tree):
 				if not isinstance(node, ast.FunctionDef):
@@ -215,6 +215,35 @@ class TestStaticGuardrails(IntegrationTestCase):
 			calls,
 			"api/cotizaciones.py must never call frappe.set_user -- Vendedora's own session "
 			"must be used for every read and write",
+		)
+
+	def test_facturacion_api_never_calls_get_all_ignore_permissions_or_set_user(self):
+		"""Commit 21.2 structural guardrail, same reasoning as the Ventas/
+		Cotizaciones ones above: api/facturacion.py must always read
+		through the calling Facturación user's own real permissions
+		(Commit 21.1) -- frappe.get_all() and frappe.set_user() are exactly
+		the two mechanisms that could silently defeat that. Unlike Ventas/
+		Cotizaciones there is no if_owner to preserve here (Facturación is
+		a shared queue) and no economic-data allowlist to enforce (the
+		brief explicitly allows rate/amount) -- so this guardrail is
+		narrower than the Commit 18.4/18.5/20.2/20.3/20.6 ones, on purpose."""
+		calls = _dotted_calls_in(facturacion)
+		self.assertNotIn(
+			"frappe.get_all",
+			calls,
+			"api/facturacion.py must never call frappe.get_all -- use frappe.get_list or "
+			"get_doc()+check_permission() so Role Permissions are actually applied",
+		)
+		self.assertNotIn(
+			"frappe.set_user",
+			calls,
+			"api/facturacion.py must never call frappe.set_user -- the calling Facturación "
+			"user's own session must be used for every read",
+		)
+		self.assertFalse(
+			_hardcodes_ignore_permissions_true(facturacion),
+			"api/facturacion.py must never hardcode ignore_permissions=True -- it is read-only "
+			"and must always go through the caller's own real permissions",
 		)
 
 	def test_commit_20_2_cotizaciones_endpoints_never_leak_economic_data_or_bypass_permissions(self):
