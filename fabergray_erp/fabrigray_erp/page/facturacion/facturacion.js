@@ -13,14 +13,20 @@ frappe.pages["facturacion"].on_page_load = function (wrapper) {
 };
 
 // Commit 21.4 -- Page Facturación: dashboard + cola, read-only, one action
-// (REVISAR). All server communication in this file goes through the three
-// endpoints closed in Commit 21.2 (fabergray_erp.api.facturacion.*):
-// get_facturacion_summary, get_pending_pick_lists, get_pick_list_for_facturacion.
-// generate_invoice() (Commit 21.3) is never called anywhere in this file --
-// there is no button, checkbox or code path here that could trigger it. No
-// economic field is hidden here (unlike Ventas/Cotizaciones) -- Facturación's
-// own permission model (Commit 21.1) already allows seeing rate/amount, so
-// this Page renders whatever get_pick_list_for_facturacion() returns as-is.
+// (REVISAR). Commit 21.5 adds the only write this Page ever performs: a
+// per-line "VERIFICADO" checklist (frontend-only, never persisted -- no
+// Custom Field, no write to Pick List, reset on every detail load/exit,
+// never localStorage) gating a GENERAR FACTURA button that calls
+// fabergray_erp.api.facturacion.generate_invoice(pick_list_name) with
+// nothing else -- no qty/rate/amount/checks are ever sent, the backend
+// recomputes everything from the real Pick List via its own audited
+// native mapper (Commit 21.3). All server communication in this file goes
+// through the four endpoints in fabergray_erp.api.facturacion: the three
+// read-only ones from Commit 21.2 plus generate_invoice() from Commit
+// 21.3, called exactly once per confirmed click. No economic field is
+// hidden here (unlike Ventas/Cotizaciones) -- Facturación's own permission
+// model (Commit 21.1) already allows seeing rate/amount, so this Page
+// renders whatever the server returns as-is.
 fabergray_erp.Facturacion = class Facturacion {
 	constructor(page) {
 		this.page = page;
@@ -34,9 +40,16 @@ fabergray_erp.Facturacion = class Facturacion {
 		this.queue_search = "";
 		this.queue_page = 1;
 
-		// Detalle (view: "detail") -- read-only, loaded via REVISAR.
+		// Detalle (view: "detail") -- loaded via REVISAR.
 		this.detail = null;
 		this.detail_pick_list = null;
+		this.detail_has_shortage = false; // pulled from the queue card that opened this detail, never from a new endpoint
+
+		// Commit 21.5 -- "VERIFICADO" checklist state, keyed by row_name.
+		// Frontend-only for V1 (explicit instruction): never written to Pick
+		// List, no Custom Field, no localStorage -- reset on every detail
+		// open/close, so reloading the page always starts unchecked again.
+		this.verified_rows = new Set();
 
 		this.state = { view: "dashboard" };
 
@@ -371,14 +384,21 @@ fabergray_erp.Facturacion = class Facturacion {
 	}
 
 	// =====================================================================
-	// Detalle ("REVISAR") -- read-only, get_pick_list_for_facturacion() only.
-	// No checkbox, no GENERAR FACTURA, no call to generate_invoice()
-	// anywhere below -- Commit 21.4 scope is strictly a read-only view.
+	// Detalle ("REVISAR") -- get_pick_list_for_facturacion() for the read
+	// side, generate_invoice() (Commit 21.3) for the one write this Page
+	// performs, gated by the frontend-only "VERIFICADO" checklist below.
 	// =====================================================================
 	open_detail(name) {
 		if (!name) return;
 		this.detail_pick_list = name;
 		this.detail = null;
+		// has_open_shortage is only ever returned by get_pending_pick_lists()
+		// (the queue), never by get_pick_list_for_facturacion() -- read it
+		// off the already-fetched queue entry instead of adding a new field
+		// to the detail endpoint. Purely a display flag, never a gate.
+		const pl = (this.queue || []).find((p) => p.name === name);
+		this.detail_has_shortage = pl ? !!pl.has_open_shortage : false;
+		this.verified_rows = new Set();
 		this.state.view = "detail";
 		this.set_busy(true);
 		this.render_detail_skeleton();
@@ -392,9 +412,17 @@ fabergray_erp.Facturacion = class Facturacion {
 			.finally(() => this.set_busy(false));
 	}
 
+	// Reached from "Volver", from a failed detail load, and (via the
+	// success dialog's onhide) after a factura is generated -- every path
+	// discards the checklist (never persisted, per the brief) and reloads
+	// both the KPIs and the queue from the server, so a Pick List that just
+	// became Fully Delivered disappears and one that's now Partly Delivered
+	// shows only the real remainder on its next detail load.
 	back_to_dashboard() {
 		this.detail = null;
 		this.detail_pick_list = null;
+		this.detail_has_shortage = false;
+		this.verified_rows = new Set();
 		this.load_dashboard();
 	}
 
@@ -457,18 +485,43 @@ fabergray_erp.Facturacion = class Facturacion {
 				<div class="fg-np-section-title">${__("Productos")}</div>
 				<div class="fg-fact-detail-items">${rows_html}</div>
 			</div>
+
+			<div class="fg-fact-generate-wrap">${this.render_generate_section()}</div>
 		`);
 		this.$body.find(".fg-np-back").on("click", () => this.back_to_dashboard());
+		this.bind_item_verify_checkboxes();
+		this.bind_generate_section_events();
 	}
 
 	// Per producto, exactly per brief: item_name, item_code, qty alistada,
 	// qty ya facturada, qty pendiente de facturar, stock actual
 	// (informativo), precio unitario, importe. actual_qty never influences
 	// anything here -- it is rendered purely as information, same as the
-	// server's own contract for it.
+	// server's own contract for it. Commit 21.5 adds the one interactive
+	// element on this card: a "VERIFICADO" checkbox, only for lines that
+	// actually have something pending (qty_to_invoice > 0) -- a line
+	// already fully invoiced never demands a check, per the brief.
 	render_detail_item_card(r) {
+		const has_pending = flt(r.qty_to_invoice) > 0;
+		const is_verified = this.verified_rows.has(r.row_name);
+
+		const verify_html = has_pending
+			? `
+				<label class="fg-fact-verify-row">
+					<input type="checkbox" class="fg-fact-verify-checkbox" ${is_verified ? "checked" : ""}>
+					<span>${__("VERIFICADO")}</span>
+				</label>
+			`
+			: `
+				<div class="fg-fact-verify-row fg-fact-verify-row--none">
+					${icon("check", "fg-icon-sm")} ${__("Nada pendiente de facturar")}
+				</div>
+			`;
+
 		return `
-			<div class="fg-fact-item-card">
+			<div class="fg-fact-item-card ${is_verified ? "is-verified" : ""}" data-row="${frappe.utils.escape_html(
+			r.row_name
+		)}">
 				<div class="fg-fact-item-identity">
 					<div class="fg-fact-item-thumb">${icon("package")}</div>
 					<div>
@@ -504,8 +557,205 @@ fabergray_erp.Facturacion = class Facturacion {
 						<div class="fg-fact-qty-value">${fg_format_currency(r.amount)}</div>
 					</div>
 				</div>
+				${verify_html}
 			</div>
 		`;
+	}
+
+	bind_item_verify_checkboxes() {
+		// Delegated on the stable items container -- render_detail() always
+		// replaces the whole $body via .html() before this runs, so there is
+		// never a stale duplicate binding to worry about.
+		this.$body.find(".fg-fact-detail-items").on("change", ".fg-fact-verify-checkbox", (e) => {
+			const $cb = $(e.currentTarget);
+			const $card = $cb.closest(".fg-fact-item-card");
+			const row_name = $card.data("row");
+			if ($cb.is(":checked")) {
+				this.verified_rows.add(row_name);
+			} else {
+				this.verified_rows.delete(row_name);
+			}
+			$card.toggleClass("is-verified", $cb.is(":checked"));
+			this.refresh_generate_gate();
+		});
+	}
+
+	// =====================================================================
+	// GENERAR FACTURA -- gated purely by the frontend-only checklist above;
+	// the request itself never carries a check, a qty, a rate or a total --
+	// only pick_list_name. The server (generate_invoice(), Commit 21.3)
+	// recomputes everything from the real, current Pick List.
+	// =====================================================================
+	get_required_rows() {
+		const rows = (this.detail && this.detail.rows) || [];
+		return rows.filter((r) => flt(r.qty_to_invoice) > 0);
+	}
+
+	can_generate_invoice() {
+		const required = this.get_required_rows();
+		if (!required.length || this.busy) return false;
+		return required.every((r) => this.verified_rows.has(r.row_name));
+	}
+
+	// Resumen previo + botón. Total a facturar is a plain sum of the
+	// `amount` values the server already returned for the still-pending
+	// lines -- no rate/amount is ever recomputed here.
+	render_generate_section() {
+		const required = this.get_required_rows();
+		const verified_count = required.filter((r) => this.verified_rows.has(r.row_name)).length;
+		const total = required.reduce((sum, r) => sum + flt(r.amount), 0);
+		const can_generate = this.can_generate_invoice();
+
+		const shortage_html = this.detail_has_shortage
+			? `
+				<div class="fg-fact-shortage-warning">
+					${icon("triangle-alert", "fg-icon-sm")}
+					${__("Este pedido tiene un faltante/incidencia abierta.")}
+				</div>
+			`
+			: "";
+
+		return `
+			${shortage_html}
+			<div class="fg-fact-generate-section">
+				<div class="fg-fact-generate-summary">
+					<span>${__("Productos verificados")}: <strong>${verified_count} / ${required.length}</strong></span>
+					<span>${__("Total a facturar")}: <strong>${fg_format_currency(total)}</strong></span>
+				</div>
+				<button type="button" class="fg-btn fg-btn--solid-primary fg-btn--lg fg-fact-generate-btn" ${
+					can_generate ? "" : "disabled"
+				}>
+					${icon("check")} ${this.busy ? __("Generando factura...") : __("GENERAR FACTURA")}
+				</button>
+			</div>
+		`;
+	}
+
+	bind_generate_section_events() {
+		this.$body.find(".fg-fact-generate-btn").on("click", () => this.open_generate_invoice_dialog());
+	}
+
+	// Re-renders only the summary/button block -- checkbox toggles and the
+	// busy state around generate_invoice() never re-render the whole
+	// detail (would lose scroll position and re-fetch nothing new).
+	refresh_generate_gate() {
+		const $wrap = this.$body.find(".fg-fact-generate-wrap");
+		if (!$wrap.length) return;
+		$wrap.html(this.render_generate_section());
+		this.bind_generate_section_events();
+	}
+
+	// Confirmación previa a la llamada real -- cliente, número de productos,
+	// unidades y total, todos leídos de this.detail (ya devuelto por el
+	// backend), nunca recalculados.
+	open_generate_invoice_dialog() {
+		if (!this.can_generate_invoice()) return;
+		const d = this.detail;
+		const required = this.get_required_rows();
+
+		const pedido_label = d.commercial_name || d.sales_order || d.pick_list;
+		const customer_label = frappe.utils.escape_html(d.customer_name || d.customer || __("Sin cliente"));
+		const total_units = required.reduce((sum, r) => sum + flt(r.qty_to_invoice), 0);
+		const total = required.reduce((sum, r) => sum + flt(r.amount), 0);
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("Generar factura"),
+			fields: [{ fieldtype: "HTML", fieldname: "confirm_html" }],
+			primary_action_label: __("GENERAR FACTURA"),
+			primary_action: () => {
+				dialog.hide();
+				this.submit_generate_invoice();
+			},
+			secondary_action_label: __("CANCELAR"),
+			secondary_action: () => dialog.hide(),
+		});
+
+		dialog.$wrapper.addClass("fg-fact-confirm-dialog");
+		dialog.fields_dict.confirm_html.$wrapper.html(`
+			<div class="fg-fact-confirm-summary">
+				<div class="fg-fact-confirm-question">${__("¿Generar factura para PEDIDO #{0}?", [
+					frappe.utils.escape_html(pedido_label),
+				])}</div>
+				<div class="fg-fact-confirm-row"><span>${__("Cliente")}</span><strong>${customer_label}</strong></div>
+				<div class="fg-fact-confirm-row"><span>${__("Productos")}</span><strong>${required.length}</strong></div>
+				<div class="fg-fact-confirm-row"><span>${__("Unidades")}</span><strong>${format_qty(total_units)}</strong></div>
+				<div class="fg-fact-confirm-row"><span>${__("Total")}</span><strong>${fg_format_currency(total)}</strong></div>
+			</div>
+		`);
+		dialog.show();
+	}
+
+	// The one write in this Page -- pick_list_name only, nothing else.
+	// this.busy is the same single-flight guard render_generate_section()
+	// already reads to disable/relabel the button, so a second click while
+	// a request is in flight cannot start a second one (the button is
+	// disabled) and this early-return covers any other path that could
+	// reach here (e.g. a stale dialog reference).
+	submit_generate_invoice() {
+		if (this.busy) return;
+		const pick_list_name = this.detail_pick_list;
+		if (!pick_list_name) return;
+
+		this.set_busy(true);
+		this.refresh_generate_gate();
+
+		this.call("generate_invoice", { pick_list_name: pick_list_name })
+			.then((result) => {
+				this.show_invoice_success_dialog(result);
+			})
+			.catch(() => {
+				// The server already showed the real error via frappe.call()'s
+				// own default error dialog -- including the known 131505-
+				// Ventas-FG accounting blocker, never worked around here. The
+				// user stays on the detail, the checklist is left exactly as
+				// it was (never cleared on failure), and nothing here assumes
+				// an invoice was actually created.
+			})
+			.finally(() => {
+				this.set_busy(false);
+				this.refresh_generate_gate();
+			});
+	}
+
+	// ✓ FACTURA GENERADA -- every number here comes straight from
+	// generate_invoice()'s own response (Commit 21.3:
+	// {sales_invoice, pick_list, sales_order, commercial_name, status,
+	// item_count, total_qty, grand_total}), nothing recomputed. Closing the
+	// dialog by ANY means (either action button, the close icon, or ESC)
+	// always routes through onhide -> back_to_dashboard(), so the checklist
+	// is cleared and the KPIs/cola are reloaded from the server exactly
+	// once, regardless of how the user leaves this screen.
+	show_invoice_success_dialog(result) {
+		const dialog = new frappe.ui.Dialog({
+			title: "✓ " + __("FACTURA GENERADA"),
+			fields: [{ fieldtype: "HTML", fieldname: "success_html" }],
+			primary_action_label: __("VOLVER A FACTURACIÓN"),
+			primary_action: () => dialog.hide(),
+			secondary_action_label: __("VER FACTURA"),
+			secondary_action: () => {
+				dialog.hide();
+				frappe.set_route("Form", "Sales Invoice", result.sales_invoice);
+			},
+			onhide: () => this.back_to_dashboard(),
+		});
+
+		dialog.$wrapper.addClass("fg-fact-success-dialog");
+		dialog.fields_dict.success_html.$wrapper.html(`
+			<div class="fg-fact-success-summary">
+				<div class="fg-fact-success-pedido">${frappe.utils.escape_html(
+					result.commercial_name || result.sales_order || result.pick_list || ""
+				)}</div>
+				<div class="fg-fact-success-invoice">${__("Factura")}: <strong>${frappe.utils.escape_html(
+			result.sales_invoice
+		)}</strong></div>
+				<div class="fg-fact-success-counts">
+					<span>${result.item_count} ${result.item_count === 1 ? __("referencia") : __("referencias")}</span>
+					<span>${format_qty(result.total_qty)} ${__("unidades")}</span>
+				</div>
+				<div class="fg-fact-success-total">${__("Total")}: <strong>${fg_format_currency(result.grand_total)}</strong></div>
+			</div>
+		`);
+		dialog.show();
 	}
 };
 

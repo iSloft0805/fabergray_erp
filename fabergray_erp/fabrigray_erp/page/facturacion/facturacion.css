@@ -538,6 +538,167 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Commit 21.5 -- checklist "VERIFICADO" per línea. Frontend-only state, */
+/* so the only thing styled here is the checkbox row itself; nothing     */
+/* about it is ever persisted.                                           */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-fact-verify-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: var(--fg-touch);
+	padding: 4px 2px;
+	font-size: 0.85rem;
+	font-weight: 700;
+	color: var(--fg-text);
+	cursor: pointer;
+	user-select: none;
+}
+
+.fg-facturacion .fg-fact-verify-row input[type="checkbox"] {
+	width: 22px;
+	height: 22px;
+	flex-shrink: 0;
+	accent-color: var(--fg-success-dark);
+	cursor: pointer;
+}
+
+.fg-facturacion .fg-fact-verify-row--none {
+	color: var(--fg-text-faint);
+	font-weight: 500;
+	cursor: default;
+}
+
+.fg-facturacion .fg-fact-item-card.is-verified {
+	border-color: var(--fg-success-dark);
+	background: var(--fg-success-tint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Incidencia warning -- purely visual, never a gate on the button.     */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-fact-shortage-warning {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+	border: 1px solid var(--fg-danger);
+	border-radius: var(--fg-radius-md);
+	padding: 12px 16px;
+	font-size: 0.85rem;
+	font-weight: 600;
+	margin-bottom: 16px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Resumen previo + GENERAR FACTURA                                     */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-fact-generate-wrap {
+	margin-top: 4px;
+}
+
+.fg-facturacion .fg-fact-generate-section {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 18px 20px;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 16px;
+	flex-wrap: wrap;
+}
+
+.fg-facturacion .fg-fact-generate-summary {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 0.85rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-facturacion .fg-fact-generate-summary strong {
+	color: var(--fg-text);
+	font-size: 0.95rem;
+}
+
+.fg-facturacion .fg-fact-generate-btn {
+	flex-shrink: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Diálogos (confirmación GENERAR FACTURA / éxito FACTURA GENERADA) --   */
+/* frappe.ui.Dialog renders into a modal appended to <body>, outside     */
+/* .fg-facturacion entirely, so these rules are deliberately unscoped -- */
+/* same convention page/bodega/bodega.css already established for its   */
+/* own .fg-shortage-dialog/.fg-shortage-summary. Prefixed fg-fact- so    */
+/* nothing here can collide with that or any other Page's own dialog.    */
+/* ------------------------------------------------------------------ */
+.fg-fact-confirm-summary,
+.fg-fact-success-summary {
+	font-family: var(--font-stack, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif);
+}
+
+.fg-fact-confirm-question {
+	font-weight: 700;
+	font-size: 1rem;
+	margin-bottom: 14px;
+}
+
+.fg-fact-confirm-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 9px 0;
+	border-bottom: 1px solid var(--fg-border, #e5e9f0);
+	font-size: 0.88rem;
+}
+
+.fg-fact-confirm-row:last-child {
+	border-bottom: none;
+}
+
+.fg-fact-confirm-row span {
+	color: #667085;
+}
+
+.fg-fact-success-summary {
+	text-align: center;
+	padding: 8px 0;
+}
+
+.fg-fact-success-pedido {
+	font-weight: 800;
+	font-size: 1.15rem;
+	margin-bottom: 4px;
+}
+
+.fg-fact-success-invoice {
+	font-size: 0.92rem;
+	color: #475569;
+	margin-bottom: 14px;
+}
+
+.fg-fact-success-counts {
+	display: flex;
+	justify-content: center;
+	gap: 18px;
+	font-size: 0.88rem;
+	color: #667085;
+	margin-bottom: 10px;
+}
+
+.fg-fact-success-total {
+	font-size: 1.05rem;
+	font-weight: 700;
+	padding-top: 10px;
+	border-top: 1px solid #e5e9f0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Responsive -- desktop first, then tablet (~860px), then mobile       */
 /* (~640px), matching the breakpoints already approved for every other  */
 /* Page in this app. Touch targets stay >=44px (var(--fg-touch)) at     */
@@ -578,5 +739,16 @@
 
 	.fg-facturacion .fg-fact-item-price {
 		grid-template-columns: 1fr 1fr;
+	}
+
+	.fg-facturacion .fg-fact-generate-section {
+		flex-direction: column;
+		align-items: stretch;
+		padding: 16px;
+	}
+
+	.fg-facturacion .fg-fact-generate-btn {
+		width: 100%;
+		justify-content: center;
 	}
 }
