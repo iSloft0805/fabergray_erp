@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Commit 21.2 -- strictly read-only API layer for the future Page
+"""api/facturacion.py -- interactive API layer for the future Page
 Facturación.
 
 Same permission policy as every other interactive module in this app
@@ -12,26 +12,30 @@ so unlike api/ventas.py/api/cotizaciones.py there is no owner-scoping to
 preserve -- every Facturación user sees the same queue.
 
 Unlike Ventas/Cotizaciones, Facturación's own Custom DocPerm grant (Commit
-21.1) explicitly INCLUDES seeing money: `rate`/`amount` below are read
-straight off the real, already-submitted Sales Order Item row a Pick List
-Item points to (`Pick List Item.sales_order_item`) -- never off Item Price,
-which can change after the order was placed and would silently misprice an
-invoice built from a Pick List. No `.as_dict()` anywhere -- every response is
-built field-by-field, same discipline the rest of the app uses even where
-(like here) there is no economic-data allowlist to enforce, just to keep one
-consistent, auditable style.
+21.1) explicitly INCLUDES seeing money: `rate`/`amount`/`grand_total` below
+are read straight off the real, already-submitted Sales Order Item row a
+Pick List Item points to (`Pick List Item.sales_order_item`) -- never off
+Item Price, which can change after the order was placed and would silently
+misprice an invoice built from a Pick List. No `.as_dict()` anywhere -- every
+response is built field-by-field, same discipline the rest of the app uses
+even where (like here) there is no economic-data allowlist to enforce, just
+to keep one consistent, auditable style.
 
-Read-only end to end: no doc.save()/insert()/submit()/cancel()/db_set()
-anywhere in this module. generate_invoice(), a checklist workflow, the Page
-itself, any new Custom Field, and any new hook are all explicitly out of
-scope for this commit -- see the Commit 21.2 brief.
+Commit 21.1/21.2 were read-only end to end. Commit 21.3 adds the one write
+this module has: `generate_invoice()`, which does NOT reimplement invoice
+creation -- it is a thin, validating wrapper around ERPNext's own audited
+mapper, `erpnext.stock.doctype.pick_list.pick_list.create_delivery(...,
+target="Sales Invoice")`. A checklist workflow, the Page itself, any new
+Custom Field, any new hook, and a cancellation endpoint are all still
+explicitly out of scope -- see the Commit 21.3 brief.
 """
 
 import frappe
 from frappe import _
+from frappe.model.document import Document
 from frappe.utils import flt, nowdate
 
-from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
+from erpnext.stock.doctype.pick_list.pick_list import create_delivery, get_actual_qty
 
 from fabergray_erp.api.bodega import OPEN_SHORTAGE_STATUSES, _require_login
 from fabergray_erp.sales_order_naming import root_commercial_name
@@ -294,4 +298,135 @@ def get_pick_list_for_facturacion(name):
 		"delivery_status": pl.delivery_status,
 		"per_delivered": flt(pl.per_delivered),
 		"rows": rows,
+	}
+
+
+@frappe.whitelist()
+def generate_invoice(pick_list_name):
+	"""Generate and submit a native Sales Invoice from an already-submitted,
+	still-invoiceable Pick List -- via ERPNext's own audited mapper,
+	`erpnext.stock.doctype.pick_list.pick_list.create_delivery(...,
+	target="Sales Invoice")` (the exact function api.ventas/Commit 21.1's
+	own functional test already proved works correctly under a real,
+	restricted Facturación session, with zero `ignore_permissions`). This
+	function does not reimplement any of that mapping -- it only validates
+	before calling it and submits after.
+
+	Quantity: never computed here. The mapper itself (`map_pl_locations()`)
+	sets `child_item.qty = picked_qty - delivered_qty` per line and removes
+	any line whose result is <= 0 -- this is exactly why calling this
+	function twice on the same Pick List is safe without any custom
+	idempotency field: the first call's own `delivered_qty` update (native,
+	via Sales Invoice's own `on_submit` -> `update_prevdoc_status()`) is
+	what the mapper reads on the second call. A Fully Delivered Pick List
+	is rejected outright (nothing left); a Partly Delivered one produces an
+	invoice for only the real remainder.
+
+	Price: never touched. `rate` on every mapped line comes straight from
+	the real Sales Order Item row (`field_map: {"rate": "rate"}` inside
+	`create_delivery_from_so()`) -- this function reads it back afterwards
+	only to report it, never to set or recompute it, and never queries Item
+	Price.
+
+	Write: `create_delivery()` already calls `.save()` internally (its own
+	`create_delivery_with_so()` -- confirmed during the Commit 21.1 audit,
+	re-confirmed live by the `isinstance` check below) -- this function
+	never calls `.insert()` a second time, only `.submit()`.
+
+	Security: runs entirely under the caller's own real Facturación
+	session -- no `ignore_permissions`, no `frappe.set_user`, no
+	`frappe.get_all`, no manual `frappe.db.commit()` anywhere in this
+	function. Atomicity beyond that is exactly what `create_delivery()` +
+	`.submit()` already natively provide -- nothing here adds, skips, or
+	reorders any database work relative to what a human clicking "Create
+	Sales Invoice" on the Pick List would trigger.
+	"""
+	_require_login()
+
+	pl = frappe.get_doc("Pick List", pick_list_name)
+	pl.check_permission("read")
+
+	if pl.docstatus != 1:
+		frappe.throw(_("Este Pick List no está sometido; no puede facturarse todavía."))
+
+	if pl.delivery_status == "Fully Delivered":
+		frappe.throw(_("Este Pick List ya fue facturado por completo; no queda nada pendiente."))
+
+	locations = pl.get("locations") or []
+	if not any(flt(row.picked_qty) - flt(row.delivered_qty) > 0 for row in locations):
+		frappe.throw(_("Este Pick List no tiene líneas pendientes de facturar."))
+
+	row_sales_orders = [row.sales_order for row in locations]
+	if not all(row_sales_orders):
+		frappe.throw(
+			_(
+				"Este Pick List tiene líneas sin Orden de Venta asociada; "
+				"Facturación todavía no soporta esa combinación."
+			)
+		)
+	distinct_sales_orders = set(row_sales_orders)
+	if len(distinct_sales_orders) > 1:
+		frappe.throw(
+			_(
+				"Este Pick List está asociado a más de una Orden de Venta ({0}); "
+				"Facturación todavía no soporta facturación multi-orden."
+			).format(", ".join(sorted(distinct_sales_orders)))
+		)
+	sales_order = next(iter(distinct_sales_orders))
+
+	# The audited mapper itself -- no target_doc supplied, so it always
+	# builds and inserts a brand-new Sales Invoice.
+	invoice = create_delivery(pl.name, target="Sales Invoice")
+
+	# Defensive checks against divergence from the audited behaviour --
+	# stop and surface a clear diagnostic rather than improvise around it.
+	# create_delivery() returns a single Document only when it produced
+	# exactly one target document (erpnext/stock/doctype/pick_list/
+	# pick_list.py); for a single-Sales-Order Pick List (already validated
+	# above) this is the only real ERPNext path -- any other outcome
+	# (None, because 0 or >1 documents were produced; or a docstatus that
+	# isn't still 0) means create_delivery()'s behaviour diverged from
+	# what Commit 21.1 audited, not a normal business rejection.
+	if not isinstance(invoice, Document) or invoice.doctype != "Sales Invoice":
+		frappe.throw(
+			_(
+				"create_delivery() no devolvió una única Sales Invoice para este Pick List "
+				"(posiblemente generó ninguna o más de una). Facturación solo admite una "
+				"factura por Pick List -- deteniendo antes de improvisar."
+			),
+			title=_("Divergencia respecto al comportamiento auditado"),
+		)
+	if invoice.docstatus != 0:
+		frappe.throw(
+			_("La Sales Invoice generada no quedó en estado Borrador antes de someterla; deteniendo."),
+			title=_("Divergencia respecto al comportamiento auditado"),
+		)
+
+	if not any(flt(item.qty) > 0 for item in invoice.items):
+		frappe.throw(_("La factura generada no tiene ninguna línea con cantidad pendiente de facturar."))
+
+	if not invoice.update_stock:
+		# Per the brief: never set this manually -- create_delivery() (via
+		# create_delivery_with_so(), Commit 21.1's own audit) always sets
+		# it for target="Sales Invoice"; if it's missing, that is itself a
+		# divergence worth stopping for, not a gap to silently patch.
+		frappe.throw(
+			_(
+				"La factura generada no quedó con update_stock=1 -- esto contradice el "
+				"comportamiento auditado de create_delivery(). Deteniendo antes de improvisar."
+			),
+			title=_("Divergencia respecto al comportamiento auditado"),
+		)
+
+	invoice.submit()
+
+	return {
+		"sales_invoice": invoice.name,
+		"pick_list": pl.name,
+		"sales_order": sales_order,
+		"commercial_name": root_commercial_name(sales_order),
+		"status": invoice.status,
+		"item_count": len(invoice.items),
+		"total_qty": flt(invoice.total_qty),
+		"grand_total": flt(invoice.grand_total),
 	}

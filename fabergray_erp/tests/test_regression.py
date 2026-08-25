@@ -217,16 +217,19 @@ class TestStaticGuardrails(IntegrationTestCase):
 			"must be used for every read and write",
 		)
 
-	def test_facturacion_api_never_calls_get_all_ignore_permissions_or_set_user(self):
-		"""Commit 21.2 structural guardrail, same reasoning as the Ventas/
-		Cotizaciones ones above: api/facturacion.py must always read
-		through the calling Facturación user's own real permissions
-		(Commit 21.1) -- frappe.get_all() and frappe.set_user() are exactly
-		the two mechanisms that could silently defeat that. Unlike Ventas/
-		Cotizaciones there is no if_owner to preserve here (Facturación is
-		a shared queue) and no economic-data allowlist to enforce (the
-		brief explicitly allows rate/amount) -- so this guardrail is
-		narrower than the Commit 18.4/18.5/20.2/20.3/20.6 ones, on purpose."""
+	def test_facturacion_api_never_calls_get_all_ignore_permissions_set_user_or_commit(self):
+		"""Commit 21.2 structural guardrail, extended in Commit 21.3 with a
+		`frappe.db.commit` check now that this module writes
+		(generate_invoice()): api/facturacion.py must always act through
+		the calling Facturación user's own real permissions (Commit 21.1)
+		and never commit a transaction of its own -- `frappe.get_all()`,
+		`frappe.set_user()`, `ignore_permissions=True`, and a manual
+		`frappe.db.commit()` are exactly the mechanisms that could silently
+		defeat that or break atomicity. Unlike Ventas/Cotizaciones there is
+		no if_owner to preserve here (Facturación is a shared queue) and no
+		economic-data allowlist to enforce (the brief explicitly allows
+		rate/amount/grand_total) -- so this guardrail is narrower than the
+		Commit 18.4/18.5/20.2/20.3/20.6 ones, on purpose."""
 		calls = _dotted_calls_in(facturacion)
 		self.assertNotIn(
 			"frappe.get_all",
@@ -238,12 +241,18 @@ class TestStaticGuardrails(IntegrationTestCase):
 			"frappe.set_user",
 			calls,
 			"api/facturacion.py must never call frappe.set_user -- the calling Facturación "
-			"user's own session must be used for every read",
+			"user's own session must be used for every read and write",
+		)
+		self.assertNotIn(
+			"frappe.db.commit",
+			calls,
+			"api/facturacion.py must never call frappe.db.commit -- generate_invoice() relies "
+			"entirely on create_delivery()/.submit()'s own native transaction handling",
 		)
 		self.assertFalse(
 			_hardcodes_ignore_permissions_true(facturacion),
-			"api/facturacion.py must never hardcode ignore_permissions=True -- it is read-only "
-			"and must always go through the caller's own real permissions",
+			"api/facturacion.py must never hardcode ignore_permissions=True -- every read and "
+			"write must always go through the caller's own real permissions",
 		)
 
 	def test_commit_20_2_cotizaciones_endpoints_never_leak_economic_data_or_bypass_permissions(self):
