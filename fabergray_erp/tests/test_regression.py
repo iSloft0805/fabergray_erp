@@ -872,3 +872,274 @@ class TestFullFlowRegression(IntegrationTestCase):
 		pl_doc = frappe.get_doc("Pick List", pl.name)
 		self.assertEqual(pl_doc.docstatus, 1)
 		self.assertEqual(flt(frappe.db.get_value("Sales Order", so.name, "per_picked")), 100.0)
+
+
+class TestPageRoles(IntegrationTestCase):
+	"""Every Fabrigray Page must grant System Manager (not just the
+	Administrator account, which holds every role natively) -- otherwise
+	the Workspace "Fabrigray ERP" (below)'s own shortcut visibility, which
+	is derived entirely from each Page's real roles via
+	frappe.desk.desk_views.DeskViews.is_item_allowed(), would silently
+	under-show for a plain System Manager session. Guards against the
+	exact gap found and fixed here: bodega.json was missing "System
+	Manager", unlike every one of its sibling Pages."""
+
+	def test_bodega_page_now_includes_system_manager(self):
+		"""The gap this commit fixes: before, only the literal Administrator
+		account (which holds every role natively) -- never a real user with
+		just the System Manager role -- could open /app/bodega, because
+		Page.is_permitted() is a plain has_common(user_roles, page.roles)
+		check with no implicit System Manager bypass (confirmed by reading
+		frappe/core/doctype/page/page.py directly, not assumed)."""
+		roles = set(frappe.get_all("Has Role", filters={"parent": "bodega", "parenttype": "Page"}, pluck="role"))
+		self.assertEqual(roles, {"Bodega", "System Manager"})
+
+	def test_every_fabrigray_page_grants_system_manager(self):
+		"""Every Page this app has built so far must let a plain System
+		Manager session (not just the Administrator account) open it."""
+		expected_operational_role = {
+			"bodega": "Bodega",
+			"jefe-de-bodega": "Jefe de Bodega",
+			"ventas": "Vendedora",
+			"cotizaciones": "Vendedora",
+			"facturacion": "Facturación",
+		}
+		for page_name, operational_role in expected_operational_role.items():
+			roles = set(frappe.get_all("Has Role", filters={"parent": page_name, "parenttype": "Page"}, pluck="role"))
+			with self.subTest(page=page_name):
+				self.assertIn("System Manager", roles)
+				self.assertIn(operational_role, roles)
+
+
+class TestFabrigrayWorkspace(IntegrationTestCase):
+	"""Home Fabrigray -- native Workspace "Fabrigray ERP" (module-JSON
+	fixture at fabrigray_erp/workspace/fabrigray_erp/fabrigray_erp.json,
+	auto-exported by Workspace.on_update() while developer_mode is on,
+	same lifecycle as every Page in this app), not a Page-based launcher
+	(that attempt was retired -- see FULFILLMENT_ENGINE_CONTRACT.md-style
+	reasoning in the roadmap memory: a Page can never be the Desk's
+	bare-route landing view, confirmed by reading
+	frappe/public/js/frappe/views/workspace/workspace.js::get_page_to_show()
+	directly -- only a Workspace, chosen by lowest sequence_id among the
+	ones frappe.desk.desktop.get_workspaces() returns for that session, can
+	be). Every visibility check below calls the real native machinery
+	(get_workspaces(), Workspace.is_permitted(), DeskViews.is_item_allowed()
+	via Workspace.get_shortcuts()) under a real throwaway session per role
+	-- never a hand-rolled authorization table."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		from fabergray_erp.tests import fixtures as fx
+
+		cls.world = fx.TestWorld()
+		cls.addClassCleanup(cls.world.cleanup)
+
+		cls.role_to_email = {
+			"Vendedora": "fg22w-vendedora@example.com",
+			"Bodega": "fg22w-bodega@example.com",
+			"Jefe de Bodega": "fg22w-jefebodega@example.com",
+			"Facturación": "fg22w-facturacion@example.com",
+			"System Manager": "fg22w-sysmanager@example.com",
+		}
+		cls.users = {role: cls.world.user(email, [role]) for role, email in cls.role_to_email.items()}
+		cls.no_role_user = cls.world.user("fg22w-norole@example.com", [])
+
+	# -- Static configuration -------------------------------------------
+
+	def test_workspace_exists_exactly_once(self):
+		self.assertEqual(frappe.db.count("Workspace", {"name": "Fabrigray ERP"}), 1)
+
+	def test_workspace_configuration(self):
+		ws = frappe.get_doc("Workspace", "Fabrigray ERP")
+		self.assertEqual(ws.public, 1)
+		self.assertEqual(flt(ws.sequence_id), 0.0)
+		self.assertEqual(ws.is_hidden, 0)
+		self.assertEqual(ws.type, "Workspace")
+		# `module` is deliberately left unset -- see
+		# test_module_left_unset_on_purpose()'s own docstring for why.
+		self.assertFalse(ws.module)
+
+	def test_module_left_unset_on_purpose(self):
+		"""Real finding, verified live during this commit:
+		frappe.desk.desktop.Workspace.__init__ (frappe/desk/desktop.py:38-44)
+		raises PermissionError before is_permitted()'s own roles check ever
+		runs, whenever the Workspace's `module` is set AND the viewing
+		user's `allow_modules` (built from whatever doctype permissions
+		they already hold) doesn't include it. Bodega/Jefe de Bodega/
+		Facturación all already have real permission on "Reporte de
+		Faltante" (module "Fabrigray ERP"), so a module="Fabrigray ERP"
+		gate passes for them for free -- but Vendedora, by Commit 18.1's
+		own deliberate design ruling, has ZERO permission on any doctype
+		this app owns, so she could never pass that gate without a new
+		business-data grant (explicitly out of scope for this commit).
+		Leaving `module` unset removes the gate entirely for everyone,
+		leaving is_permitted()'s real roles check as the only one -- zero
+		Role/Custom DocPerm change needed. Confirmed both the
+		Workspace.__init__ constructor and get_workspaces()'s own SQL
+		"module not in blocked_modules" filter both still work correctly
+		with a NULL module (tested live, not assumed)."""
+		self.assertFalse(frappe.get_doc("Workspace", "Fabrigray ERP").module)
+
+	def test_workspace_roles(self):
+		roles = set(frappe.get_all("Has Role", filters={"parent": "Fabrigray ERP", "parenttype": "Workspace"}, pluck="role"))
+		self.assertEqual(roles, {"Vendedora", "Bodega", "Jefe de Bodega", "Facturación", "System Manager"})
+
+	def test_workspace_shortcuts_are_exactly_the_five_pages_no_more_no_less(self):
+		"""No Compras/Producción/Despachos yet -- exactly the 5 Pages that
+		exist today, each a native type="Page" shortcut (never a raw URL/
+		DocType shortcut, which would bypass is_item_allowed()'s real
+		Page-permission derivation)."""
+		shortcuts = frappe.get_all(
+			"Workspace Shortcut", filters={"parent": "Fabrigray ERP"}, fields=["type", "link_to", "label"]
+		)
+		self.assertEqual(
+			{(s.type, s.link_to, s.label) for s in shortcuts},
+			{
+				("Page", "ventas", "Ventas"),
+				("Page", "cotizaciones", "Cotizaciones"),
+				("Page", "bodega", "Bodega"),
+				("Page", "jefe-de-bodega", "Jefe de Bodega"),
+				("Page", "facturacion", "Facturación"),
+			},
+		)
+
+	# -- Live resolution --------------------------------------------------
+
+	def _first_workspace_name(self):
+		from frappe.desk.desktop import get_workspaces
+
+		pages = get_workspaces()["pages"]
+		self.assertTrue(pages, "get_workspaces() returned no pages for this session")
+		return pages[0]["name"]
+
+	def _visible_shortcut_routes(self):
+		"""Exactly what a real Desk session would render for this
+		Workspace's shortcut grid -- frappe.desk.desktop.Workspace(...).
+		get_shortcuts(), the same method boot.py/get_desktop_page() call."""
+		from frappe.desk.desktop import Workspace
+
+		ws = Workspace(frappe._dict({"name": "Fabrigray ERP", "title": "Fabrigray ERP", "public": 1}))
+		page_name_to_route = {
+			"ventas": "/app/ventas",
+			"cotizaciones": "/app/cotizaciones",
+			"bodega": "/app/bodega",
+			"jefe-de-bodega": "/app/jefe-de-bodega",
+			"facturacion": "/app/facturacion",
+		}
+		return {page_name_to_route[s["link_to"]] for s in ws.get_shortcuts()}
+
+	def test_fabrigray_erp_is_the_first_workspace_for_every_fabrigray_role(self):
+		"""sequence_id=0 winning frappe.boot.workspaces[0] -- the real
+		mechanism behind get_page_to_show()'s fallback -- for every role
+		this Workspace grants, including a plain System Manager session
+		(not just Administrator)."""
+		from fabergray_erp.tests import fixtures as fx
+
+		for role, user in self.users.items():
+			with self.subTest(role=role), fx.as_user(user):
+				self.assertEqual(self._first_workspace_name(), "Fabrigray ERP")
+
+	def test_administrator_also_gets_fabrigray_erp_first(self):
+		"""No special-cased mechanism needed for Administrator -- it holds
+		every role natively, including the ones this Workspace already
+		grants, confirmed live rather than assumed."""
+		self.assertIn("System Manager", frappe.get_roles("Administrator"))
+		frappe.set_user("Administrator")
+		self.assertEqual(self._first_workspace_name(), "Fabrigray ERP")
+
+	def test_visibility_matrix_per_role(self):
+		"""The actual brief: Vendedora -> Ventas/Cotizaciones only, Bodega
+		-> Bodega only, Jefe de Bodega -> only what she's really granted,
+		Facturación -> Facturación only, System Manager -> every module
+		this app has built. Derived entirely from is_item_allowed(), never
+		a parallel table."""
+		from fabergray_erp.tests import fixtures as fx
+
+		expected_routes = {
+			"Vendedora": {"/app/ventas", "/app/cotizaciones"},
+			"Bodega": {"/app/bodega"},
+			"Jefe de Bodega": {"/app/jefe-de-bodega"},
+			"Facturación": {"/app/facturacion"},
+			"System Manager": {
+				"/app/ventas",
+				"/app/cotizaciones",
+				"/app/bodega",
+				"/app/jefe-de-bodega",
+				"/app/facturacion",
+			},
+		}
+		for role, user in self.users.items():
+			with self.subTest(role=role), fx.as_user(user):
+				self.assertEqual(self._visible_shortcut_routes(), expected_routes[role])
+
+	def test_administrator_sees_all_five_shortcuts(self):
+		frappe.set_user("Administrator")
+		self.assertEqual(
+			self._visible_shortcut_routes(),
+			{"/app/ventas", "/app/cotizaciones", "/app/bodega", "/app/jefe-de-bodega", "/app/facturacion"},
+		)
+
+	def test_jefe_de_bodega_only_sees_bodega_shortcut_if_actually_granted_that_role(self):
+		"""Brief's own example: Jefe de Bodega sees Bodega's shortcut too,
+		but only when her real roles actually include "Bodega" -- never
+		implied by "Jefe de Bodega" alone (proven above) and never a
+		hierarchy this Workspace invents on its own."""
+		from fabergray_erp.tests import fixtures as fx
+
+		user = self.world.user("fg22w-jefebodega-dual@example.com", ["Jefe de Bodega", "Bodega"])
+		with fx.as_user(user):
+			self.assertEqual(self._visible_shortcut_routes(), {"/app/jefe-de-bodega", "/app/bodega"})
+
+	def test_user_without_any_fabrigray_role_does_not_get_this_workspace(self):
+		"""Same real is_permitted() check every Workspace uses -- a session
+		with none of the 5 granted roles must not see "Fabrigray ERP" in
+		its own get_workspaces() list at all, and must not land on it as
+		its first workspace either."""
+		from fabergray_erp.tests import fixtures as fx
+		from frappe.desk.desktop import get_workspaces
+
+		with fx.as_user(self.no_role_user):
+			names = {p["name"] for p in get_workspaces()["pages"]}
+			self.assertNotIn("Fabrigray ERP", names)
+
+	# -- Nothing standard was touched --------------------------------------
+
+	def test_no_standard_workspace_gained_a_fabrigray_role(self):
+		count = frappe.db.count(
+			"Has Role",
+			{
+				"parenttype": "Workspace",
+				"parent": ["!=", "Fabrigray ERP"],
+				"role": ["in", ["Vendedora", "Bodega", "Jefe de Bodega", "Facturación"]],
+			},
+		)
+		self.assertEqual(count, 0)
+
+	def test_known_standard_workspaces_still_exist_untouched(self):
+		"""Spot check, not exhaustive -- confirms this commit never deleted
+		or hid any native ERPNext/Frappe Workspace, per the explicit "no
+		modificar Workspaces estándar" instruction."""
+		for name in ("Home", "Selling", "Buying", "Stock", "Assets", "Manufacturing"):
+			with self.subTest(workspace=name):
+				doc = frappe.get_doc("Workspace", name)
+				self.assertEqual(doc.public, 1)
+				self.assertEqual(len(doc.roles), 0, f"{name} must still have no role restriction")
+
+	def test_the_five_pages_still_resolve_and_are_permitted_for_their_own_role(self):
+		"""The 5 Pages this Workspace links to were never touched by this
+		commit (bodega.json's role fix aside) -- each must still exist and
+		still be openable by its own operational role."""
+		from fabergray_erp.tests import fixtures as fx
+
+		page_to_role = {
+			"ventas": "Vendedora",
+			"cotizaciones": "Vendedora",
+			"bodega": "Bodega",
+			"jefe-de-bodega": "Jefe de Bodega",
+			"facturacion": "Facturación",
+		}
+		for page_name, role in page_to_role.items():
+			with self.subTest(page=page_name), fx.as_user(self.users[role]):
+				page = frappe.get_doc("Page", page_name)
+				self.assertTrue(page.is_permitted())

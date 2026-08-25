@@ -64,6 +64,24 @@ app_include_css = "/assets/fabergray_erp/css/fg_shell.css"
 # home_page = "login"
 
 # website user home page (by Role)
+#
+# NOT used for the Fabrigray home launcher -- confirmed live (see
+# frappe/www/login.py) that this hook is only ever consulted for
+# user_type == "Website User"; every real user in this app (Vendedora,
+# Bodega, Jefe de Bodega, Facturación, System Manager, Administrator) is a
+# System User, whose post-login redirect never reaches this code path at
+# all. The real mechanism is two pieces working together:
+# 1) the Workspace "Fabrigray ERP" itself (fabrigray_erp/workspace/
+#    fabrigray_erp/fabrigray_erp.json), sequence_id=0, which wins
+#    frappe/public/js/frappe/views/workspace/workspace.js's own
+#    get_page_to_show() fallback (first workspace in frappe.boot.workspaces,
+#    already role/module-filtered server-side);
+# 2) the "Fabrigray Operativo" Module Profile (below, applied automatically
+#    by fabergray_erp/user_hooks.py) blocks every standard module for
+#    operational users, so "Fabrigray ERP" isn't just first -- it's the
+#    only Workspace left for them to see at all. Administrator/System
+#    Manager never get that profile, so they keep the full standard Desk
+#    (Fabrigray ERP still shows first there too, via sequence_id=0 alone).
 # role_home_page = {
 # 	"Role": "home_page"
 # }
@@ -156,6 +174,12 @@ doc_events = {
 	"Purchase Receipt": {
 		"on_submit": "fabergray_erp.fulfillment.purchase_receipt_hooks.on_submit",
 	},
+	# Home Fabrigray -- Desk-navigation profile only (never a Doctype
+	# permission). See fabergray_erp/user_hooks.py's own module docstring
+	# for why this is safe against a save -> hook -> save loop.
+	"User": {
+		"validate": "fabergray_erp.user_hooks.apply_default_module_profile",
+	},
 }
 
 # Scheduled Tasks
@@ -207,7 +231,29 @@ fixtures = [
 		"dt": "Property Setter",
 		"filters": [["doc_type", "in", ["Sales Order", "Quotation"]], ["field_name", "=", "naming_series"]],
 	},
+	{
+		# Home Fabrigray -- Desk-navigation profile applied automatically to
+		# every operational-role User (fabergray_erp/user_hooks.py). Blocks
+		# only standard Workspace/Dashboard navigation (frappe/desk/
+		# desktop.py::get_workspaces(), frappe/utils/modules.py) -- never a
+		# Doctype permission. Filtered by exact name so no foreign Module
+		# Profile is ever exported.
+		"dt": "Module Profile",
+		"filters": [["name", "=", "Fabrigray Operativo"]],
+	},
 ]
+
+# Migration
+# ---------
+#
+# Home Fabrigray -- backfill "Fabrigray Operativo" onto every existing
+# operational-role User. Deliberately NOT a [post_model_sync] patch --
+# confirmed live by reading frappe/migrate.py: those run BEFORE
+# sync_fixtures(), i.e. before the Module Profile fixture above even
+# exists yet. after_migrate runs last, and the function itself is
+# idempotent (see fabergray_erp/user_hooks.py's own docstring) -- safe to
+# run on every migrate, not just once.
+after_migrate = "fabergray_erp.user_hooks.backfill_module_profile_for_operational_users"
 
 # Testing
 # -------

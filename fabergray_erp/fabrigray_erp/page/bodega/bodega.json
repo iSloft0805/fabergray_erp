@@ -4,7 +4,7 @@
  "docstatus": 0,
  "doctype": "Page",
  "idx": 0,
- "modified": "2026-08-18 15:55:21.502902",
+ "modified": "2026-08-26 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Fabrigray ERP",
  "name": "bodega",
@@ -13,6 +13,9 @@
  "roles": [
   {
    "role": "Bodega"
+  },
+  {
+   "role": "System Manager"
   }
  ],
  "script": null,

@@ -1,0 +1,65 @@
+[
+ {
+  "block_modules": [
+   {
+    "module": "Accounts"
+   },
+   {
+    "module": "Assets"
+   },
+   {
+    "module": "Buying"
+   },
+   {
+    "module": "CRM"
+   },
+   {
+    "module": "Core"
+   },
+   {
+    "module": "Email"
+   },
+   {
+    "module": "Integrations"
+   },
+   {
+    "module": "Manufacturing"
+   },
+   {
+    "module": "Setup"
+   },
+   {
+    "module": "Printing"
+   },
+   {
+    "module": "Projects"
+   },
+   {
+    "module": "Quality Management"
+   },
+   {
+    "module": "Selling"
+   },
+   {
+    "module": "Stock"
+   },
+   {
+    "module": "Subcontracting"
+   },
+   {
+    "module": "Support"
+   },
+   {
+    "module": "Website"
+   },
+   {
+    "module": "Automation"
+   }
+  ],
+  "docstatus": 0,
+  "doctype": "Module Profile",
+  "modified": "2026-08-26 02:25:03.000746",
+  "module_profile_name": "Fabrigray Operativo",
+  "name": "Fabrigray Operativo"
+ }
+]

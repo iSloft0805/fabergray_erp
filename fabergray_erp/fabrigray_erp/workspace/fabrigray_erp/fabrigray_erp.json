@@ -1,0 +1,86 @@
+{
+ "app": "fabergray_erp",
+ "charts": [],
+ "content": "[{\"id\": \"fg-header-operaciones\", \"type\": \"header\", \"data\": {\"text\": \"<span class=\\\"h4\\\"><b>Operaciones</b></span>\", \"col\": 12}}, {\"id\": \"fg-shortcut-ventas\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Ventas\", \"col\": 4}}, {\"id\": \"fg-shortcut-cotizaciones\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Cotizaciones\", \"col\": 4}}, {\"id\": \"fg-shortcut-bodega\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Bodega\", \"col\": 4}}, {\"id\": \"fg-shortcut-jefe-de-bodega\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Jefe de Bodega\", \"col\": 4}}, {\"id\": \"fg-shortcut-facturacion\", \"type\": \"shortcut\", \"data\": {\"shortcut_name\": \"Facturaci\\u00f3n\", \"col\": 4}}]",
+ "creation": "2026-08-26 02:06:18.788082",
+ "custom_blocks": [],
+ "docstatus": 0,
+ "doctype": "Workspace",
+ "hide_custom": 0,
+ "icon": "layout-dashboard",
+ "idx": 0,
+ "indicator_color": "blue",
+ "is_hidden": 0,
+ "label": "Fabrigray ERP",
+ "link_type": "DocType",
+ "links": [],
+ "modified": "2026-08-26 02:11:57.237185",
+ "modified_by": "Administrator",
+ "name": "Fabrigray ERP",
+ "number_cards": [],
+ "owner": "Administrator",
+ "public": 1,
+ "quick_lists": [],
+ "roles": [
+  {
+   "role": "Vendedora"
+  },
+  {
+   "role": "Bodega"
+  },
+  {
+   "role": "Jefe de Bodega"
+  },
+  {
+   "role": "Facturaci\u00f3n"
+  },
+  {
+   "role": "System Manager"
+  }
+ ],
+ "sequence_id": 0.0,
+ "shortcuts": [
+  {
+   "color": "#2b7be4",
+   "doc_view": "",
+   "icon": "shopping-cart",
+   "label": "Ventas",
+   "link_to": "ventas",
+   "type": "Page"
+  },
+  {
+   "color": "#2b7be4",
+   "doc_view": "",
+   "icon": "tags",
+   "label": "Cotizaciones",
+   "link_to": "cotizaciones",
+   "type": "Page"
+  },
+  {
+   "color": "#2b7be4",
+   "doc_view": "",
+   "icon": "boxes",
+   "label": "Bodega",
+   "link_to": "bodega",
+   "type": "Page"
+  },
+  {
+   "color": "#2b7be4",
+   "doc_view": "",
+   "icon": "warehouse",
+   "label": "Jefe de Bodega",
+   "link_to": "jefe-de-bodega",
+   "type": "Page"
+  },
+  {
+   "color": "#2b7be4",
+   "doc_view": "",
+   "icon": "receipt",
+   "label": "Facturaci\u00f3n",
+   "link_to": "facturacion",
+   "type": "Page"
+  }
+ ],
+ "title": "Fabrigray ERP",
+ "type": "Workspace"
+}
