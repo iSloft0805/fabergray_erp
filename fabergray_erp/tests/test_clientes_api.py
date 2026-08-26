@@ -236,14 +236,27 @@ class TestClientesApi(IntegrationTestCase):
 
     # -- Guardrails estructurales -------------------------------------------------
 
-    def test_module_exposes_exactly_the_three_read_only_endpoints(self):
+    def test_module_exposes_exactly_the_read_and_write_endpoints(self):
+        """Updated by Commit 22.2: api/clientes.py is no longer read-only
+        -- create_customer()/update_customer()/set_customer_disabled()
+        were added there (their own AST guardrail lives in
+        test_clientes_write_api.py). This guardrail now only proves the
+        module's public surface is exactly these six, nothing more."""
         own_functions = {
             name
             for name, fn in inspect.getmembers(clientes_api, inspect.isfunction)
             if fn.__module__ == clientes_api.__name__ and not name.startswith("_")
         }
         self.assertEqual(
-            own_functions, {"get_dashboard_summary", "search_customers", "get_customer_detail"}
+            own_functions,
+            {
+                "get_dashboard_summary",
+                "search_customers",
+                "get_customer_detail",
+                "create_customer",
+                "update_customer",
+                "set_customer_disabled",
+            },
         )
         for name in own_functions:
             self.assertIn(
