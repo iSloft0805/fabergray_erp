@@ -1,0 +1,443 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Commit 22.5 -- Page Inventario. Everything generic (header, KPI card
+ * shell, badge shell, buttons, skeleton loaders, design tokens) comes
+ * from the shared fg_shell.css (loaded globally via app_include_css,
+ * same file Ventas/Bodega/Jefe de Bodega/Cotizaciones/Facturación/
+ * Clientes already use) -- this file only styles what is genuinely new
+ * here: Inventario-specific KPI colors, the search/tabs toolbar, product
+ * cards, and the detail view (stock por almacén + movimientos
+ * recientes). Reproduced (not imported) from page/clientes/clientes.css,
+ * same reasoning as Commit 6. Scoped under .fg-inventario so nothing
+ * leaks outside this Page; no other page's CSS is touched or depended on.
+ */
+
+.fg-inventario .fg-body {
+	display: flex;
+	flex-direction: column;
+}
+
+/* ------------------------------------------------------------------ */
+/* KPI colors specific to Inventario                                    */
+/* ------------------------------------------------------------------ */
+.fg-inventario .fg-kpi--inv-referencias {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-inventario .fg-kpi--inv-stock-total {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+.fg-inventario .fg-kpi--inv-agotados {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+.fg-inventario .fg-kpi--inv-stock-bajo {
+	--fg-kpi-color: var(--fg-text-faint);
+	--fg-kpi-tint: var(--fg-bg);
+}
+
+.fg-inventario.fg-shell .fg-kpis--inventario {
+	grid-template-columns: repeat(4, 1fr);
+}
+
+/* Stock bajo, sin reorder levels configurados todavía (Commit 22.6) --
+   texto explícito, nunca un número inventado. */
+.fg-inventario .fg-kpi-number--pending {
+	font-size: 1rem;
+	font-weight: 700;
+	color: var(--fg-text-faint);
+	line-height: 1.3;
+}
+
+/* ------------------------------------------------------------------ */
+/* Section head                                                        */
+/* ------------------------------------------------------------------ */
+.fg-inventario .fg-section-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* Toolbar: buscador                                                    */
+/* ------------------------------------------------------------------ */
+.fg-inventario .fg-inv-toolbar {
+	margin: 14px 0 10px;
+}
+
+.fg-inventario .fg-inv-search-wrap {
+	position: relative;
+	max-width: 420px;
+}
+
+.fg-inventario .fg-inv-search-icon {
+	position: absolute;
+	left: 12px;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 16px;
+	height: 16px;
+	color: var(--fg-text-faint);
+	pointer-events: none;
+}
+
+.fg-inventario .fg-inv-search-input {
+	width: 100%;
+	min-height: 44px;
+	padding: 0 12px 0 36px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	font-size: 0.88rem;
+	background: var(--fg-card);
+	color: var(--fg-text);
+}
+
+.fg-inventario .fg-inv-search-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+/* ------------------------------------------------------------------ */
+/* Tabs (Todos / Activos / Inactivos / Con stock / Agotados)            */
+/* ------------------------------------------------------------------ */
+.fg-inventario .fg-inv-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 16px;
+}
+
+.fg-inventario .fg-inv-tab {
+	appearance: none;
+	min-height: 44px;
+	padding: 0 16px;
+	border-radius: var(--fg-radius-pill);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text-muted);
+	font-size: 0.82rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition), color var(--fg-transition);
+}
+
+.fg-inventario .fg-inv-tab:hover {
+	background: var(--fg-bg);
+}
+
+.fg-inventario .fg-inv-tab.is-active {
+	background: var(--fg-primary);
+	border-color: var(--fg-primary);
+	color: #fff;
+}
+
+/* ------------------------------------------------------------------ */
+/* Product cards                                                        */
+/* ------------------------------------------------------------------ */
+.fg-inventario .fg-inv-cards {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	margin-bottom: 8px;
+}
+
+.fg-inventario .fg-inv-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.fg-inventario .fg-inv-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+
+.fg-inventario .fg-inv-card-name {
+	font-weight: 700;
+	font-size: 1rem;
+}
+
+.fg-inventario .fg-inv-card-code {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.fg-inventario .fg-inv-card-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 16px;
+	font-size: 0.84rem;
+	color: var(--fg-text);
+	margin-top: 4px;
+}
+
+.fg-inventario .fg-inv-card-meta span {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.fg-inventario .fg-inv-card-meta .fg-inv-empty {
+	color: var(--fg-text-faint);
+	font-style: italic;
+}
+
+.fg-inventario .fg-inv-card-actions {
+	display: flex;
+	justify-content: flex-end;
+	margin-top: 4px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Status badges (Item.disabled) -- reuses fg-badge shell               */
+/* ------------------------------------------------------------------ */
+.fg-inventario .fg-badge--inv-activo {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-inventario .fg-badge--inv-inactivo {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+/* ------------------------------------------------------------------ */
+/* Pagination                                                            */
+/* ------------------------------------------------------------------ */
+.fg-inventario .fg-inv-pagination {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin-top: 10px;
+	padding-top: 10px;
+	border-top: 1px solid var(--fg-border);
+}
+
+.fg-inventario .fg-inv-pagination-info {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-inventario .fg-inv-pagination-controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-inventario .fg-inv-pagination-btn {
+	appearance: none;
+	width: 44px;
+	height: 44px;
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	transition: background var(--fg-transition);
+}
+
+.fg-inventario .fg-inv-pagination-btn:hover:not(:disabled) {
+	background: var(--fg-bg);
+}
+
+.fg-inventario .fg-inv-pagination-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.fg-inventario .fg-inv-pagination-page {
+	font-weight: 700;
+	font-size: 0.86rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Detalle de producto                                                   */
+/* ------------------------------------------------------------------ */
+.fg-inventario .fg-inv-detail-skeleton {
+	height: 220px;
+	margin-bottom: 14px;
+}
+
+.fg-inventario .fg-inv-detail-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 22px 24px;
+	display: flex;
+	flex-direction: column;
+	gap: 20px;
+	margin-bottom: 20px;
+}
+
+.fg-inventario .fg-inv-detail-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+.fg-inventario .fg-inv-detail-name {
+	font-weight: 700;
+	font-size: 1.15rem;
+}
+
+.fg-inventario .fg-inv-detail-code {
+	font-size: 0.85rem;
+	color: var(--fg-text-muted);
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.fg-inventario .fg-inv-detail-grid {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 18px;
+}
+
+.fg-inventario .fg-inv-detail-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.fg-inventario .fg-inv-detail-label {
+	font-size: 0.74rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--fg-text-faint);
+}
+
+.fg-inventario .fg-inv-section {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 18px 20px;
+	margin-bottom: 16px;
+}
+
+.fg-inventario .fg-inv-section-title {
+	font-size: 0.85rem;
+	font-weight: 800;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--fg-text-muted);
+	margin-bottom: 12px;
+}
+
+.fg-inventario .fg-inv-warehouse-rows,
+.fg-inventario .fg-inv-movement-rows {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.fg-inventario .fg-inv-warehouse-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 10px 12px;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-sm);
+	font-size: 0.9rem;
+}
+
+.fg-inventario .fg-inv-warehouse-row-qty {
+	font-weight: 700;
+}
+
+.fg-inventario .fg-inv-movement-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px 14px;
+	padding: 10px 12px;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-sm);
+	font-size: 0.85rem;
+}
+
+.fg-inventario .fg-inv-movement-when {
+	color: var(--fg-text-muted);
+	font-size: 0.78rem;
+}
+
+.fg-inventario .fg-inv-movement-qty {
+	font-weight: 700;
+}
+
+.fg-inventario .fg-inv-movement-qty.is-positive {
+	color: var(--fg-success-dark);
+}
+
+.fg-inventario .fg-inv-movement-qty.is-negative {
+	color: var(--fg-danger);
+}
+
+.fg-inventario .fg-inv-movement-voucher {
+	font-size: 0.78rem;
+	color: var(--fg-text-faint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive -- desktop, luego tablet (~860px), luego móvil (~640px), */
+/* mismos breakpoints ya aprobados para el resto de la app.             */
+/* ------------------------------------------------------------------ */
+@media (max-width: 860px) {
+	.fg-inventario.fg-shell .fg-kpis--inventario {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-inventario .fg-inv-detail-grid {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+
+@media (max-width: 640px) {
+	.fg-inventario.fg-shell .fg-kpis--inventario {
+		grid-template-columns: 1fr 1fr;
+		gap: 10px;
+	}
+
+	.fg-inventario .fg-inv-detail-grid {
+		grid-template-columns: 1fr;
+	}
+
+	.fg-inventario .fg-inv-card-meta {
+		flex-direction: column;
+		gap: 4px;
+	}
+
+	.fg-inventario .fg-inv-movement-row {
+		flex-direction: column;
+		align-items: flex-start;
+	}
+
+	.fg-inventario .fg-inv-pagination {
+		flex-direction: column;
+		align-items: flex-start;
+	}
+}
