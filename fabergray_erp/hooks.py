@@ -210,10 +210,17 @@ doc_events = {
 # roles/permisos de otras apps.
 
 fixtures = [
-	{"dt": "Role", "filters": [["name", "in", ["Bodega", "Jefe de Bodega", "Vendedora", "Facturación"]]]},
+	{
+		"dt": "Role",
+		"filters": [
+			["name", "in", ["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes"]]
+		],
+	},
 	{
 		"dt": "Custom DocPerm",
-		"filters": [["role", "in", ["Bodega", "Jefe de Bodega", "Vendedora", "Facturación"]]],
+		"filters": [
+			["role", "in", ["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes"]]
+		],
 	},
 	{
 		"dt": "Custom Field",
