@@ -1,0 +1,428 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Commit 22.3 -- Page Clientes. Everything generic (header, KPI card shell,
+ * badge shell, buttons, skeleton loaders, design tokens) comes from the
+ * shared fg_shell.css (loaded globally via app_include_css, same file
+ * Ventas/Bodega/Jefe de Bodega/Cotizaciones/Facturación already use) --
+ * this file only styles what is genuinely new here: Clientes-specific KPI
+ * colors, the search/tabs toolbar, customer cards, the detail view, and
+ * the create/edit Dialog. Reproduced (not imported) from
+ * page/facturacion/facturacion.css and page/ventas/ventas.css, same
+ * reasoning as Commit 6. Scoped under .fg-clientes so nothing leaks
+ * outside this Page; ventas.css/bodega.css/cotizaciones.css/
+ * facturacion.css are not touched or depended on.
+ */
+
+.fg-clientes .fg-body {
+	display: flex;
+	flex-direction: column;
+}
+
+/* ------------------------------------------------------------------ */
+/* KPI colors specific to Clientes -- distinct modifier names from      */
+/* fg_shell.css's/other Pages' own so nothing collides.                 */
+/* ------------------------------------------------------------------ */
+.fg-clientes .fg-kpi--clientes-activos {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+.fg-clientes .fg-kpi--clientes-inactivos {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+.fg-clientes .fg-kpi--clientes-total {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-clientes .fg-kpi--clientes-incompletos {
+	--fg-kpi-color: var(--fg-warning-dark);
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-clientes.fg-shell .fg-kpis--clientes {
+	grid-template-columns: repeat(4, 1fr);
+}
+
+/* ------------------------------------------------------------------ */
+/* Section head + NUEVO CLIENTE                                        */
+/* ------------------------------------------------------------------ */
+.fg-clientes .fg-section-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* Toolbar: buscador                                                    */
+/* ------------------------------------------------------------------ */
+.fg-clientes .fg-clientes-toolbar {
+	margin: 14px 0 10px;
+}
+
+.fg-clientes .fg-clientes-search-wrap {
+	position: relative;
+	max-width: 420px;
+}
+
+.fg-clientes .fg-clientes-search-icon {
+	position: absolute;
+	left: 12px;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 16px;
+	height: 16px;
+	color: var(--fg-text-faint);
+	pointer-events: none;
+}
+
+.fg-clientes .fg-clientes-search-input {
+	width: 100%;
+	min-height: 44px;
+	padding: 0 12px 0 36px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	font-size: 0.88rem;
+	background: var(--fg-card);
+	color: var(--fg-text);
+}
+
+.fg-clientes .fg-clientes-search-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+/* ------------------------------------------------------------------ */
+/* Tabs (Todos / Activos / Inactivos / Datos incompletos)               */
+/* ------------------------------------------------------------------ */
+.fg-clientes .fg-clientes-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 16px;
+}
+
+.fg-clientes .fg-clientes-tab {
+	appearance: none;
+	min-height: 44px;
+	padding: 0 16px;
+	border-radius: var(--fg-radius-pill);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text-muted);
+	font-size: 0.82rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition), color var(--fg-transition);
+}
+
+.fg-clientes .fg-clientes-tab:hover {
+	background: var(--fg-bg);
+}
+
+.fg-clientes .fg-clientes-tab.is-active {
+	background: var(--fg-primary);
+	border-color: var(--fg-primary);
+	color: #fff;
+}
+
+/* ------------------------------------------------------------------ */
+/* Customer cards                                                       */
+/* ------------------------------------------------------------------ */
+.fg-clientes .fg-clientes-cards {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	margin-bottom: 8px;
+}
+
+.fg-clientes .fg-clientes-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.fg-clientes .fg-clientes-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+
+.fg-clientes .fg-clientes-card-name {
+	font-weight: 700;
+	font-size: 1rem;
+}
+
+.fg-clientes .fg-clientes-card-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 16px;
+	font-size: 0.84rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-clientes .fg-clientes-card-meta span {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.fg-clientes .fg-clientes-empty-field {
+	color: var(--fg-text-faint);
+	font-style: italic;
+}
+
+.fg-clientes .fg-clientes-card-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 4px;
+}
+
+.fg-clientes .fg-clientes-card-action {
+	appearance: none;
+	flex: 1 1 auto;
+	min-height: 44px;
+	padding: 0 14px;
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	font-size: 0.78rem;
+	font-weight: 700;
+	letter-spacing: 0.01em;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition);
+	white-space: nowrap;
+}
+
+.fg-clientes .fg-clientes-card-action:hover {
+	background: var(--fg-bg);
+}
+
+.fg-clientes .fg-clientes-card-view {
+	color: var(--fg-primary);
+	border-color: var(--fg-primary-tint);
+	background: var(--fg-primary-tint);
+}
+
+.fg-clientes .fg-clientes-card-view:hover {
+	background: #d9e9fc;
+}
+
+/* ------------------------------------------------------------------ */
+/* Status badges (Customer.disabled)                                    */
+/* ------------------------------------------------------------------ */
+.fg-clientes .fg-badge--clientes-activo {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-clientes .fg-badge--clientes-inactivo {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+/* ------------------------------------------------------------------ */
+/* Pagination                                                            */
+/* ------------------------------------------------------------------ */
+.fg-clientes .fg-clientes-pagination {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin-top: 10px;
+	padding-top: 10px;
+	border-top: 1px solid var(--fg-border);
+}
+
+.fg-clientes .fg-clientes-pagination-info {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-clientes .fg-clientes-pagination-controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-clientes .fg-clientes-pagination-btn {
+	appearance: none;
+	width: 44px;
+	height: 44px;
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	transition: background var(--fg-transition);
+}
+
+.fg-clientes .fg-clientes-pagination-btn:hover:not(:disabled) {
+	background: var(--fg-bg);
+}
+
+.fg-clientes .fg-clientes-pagination-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.fg-clientes .fg-clientes-pagination-page {
+	font-weight: 700;
+	font-size: 0.86rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Detalle de cliente                                                    */
+/* ------------------------------------------------------------------ */
+.fg-clientes .fg-clientes-detail-skeleton {
+	height: 220px;
+	margin-bottom: 14px;
+}
+
+.fg-clientes .fg-clientes-detail-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 22px 24px;
+	display: flex;
+	flex-direction: column;
+	gap: 20px;
+}
+
+.fg-clientes .fg-clientes-detail-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+.fg-clientes .fg-clientes-detail-name {
+	font-weight: 700;
+	font-size: 1.15rem;
+}
+
+.fg-clientes .fg-clientes-detail-grid {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 18px;
+}
+
+.fg-clientes .fg-clientes-detail-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.fg-clientes .fg-clientes-detail-label {
+	font-size: 0.74rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--fg-text-faint);
+}
+
+.fg-clientes .fg-clientes-detail-section {
+	border-top: 1px solid var(--fg-border);
+	padding-top: 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.fg-clientes .fg-clientes-detail-subrow {
+	font-size: 0.92rem;
+	color: var(--fg-text);
+}
+
+.fg-clientes .fg-clientes-detail-subrow-muted {
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-clientes .fg-clientes-detail-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+	padding-top: 4px;
+}
+
+.fg-clientes .fg-clientes-detail-actions .fg-btn {
+	flex: 1 1 200px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Formulario Nuevo/Editar Cliente (frappe.ui.Dialog re-skin) -- se       */
+/* renderiza fuera de .fg-clientes (appended a <body>), por eso estas    */
+/* reglas van sin ese prefijo, igual que .fg-shortage-dialog en          */
+/* page/bodega/bodega.css y .fg-fact-confirm-dialog en                   */
+/* page/facturacion/facturacion.css.                                     */
+/* ------------------------------------------------------------------ */
+.fg-clientes-form-dialog .modal-dialog {
+	max-width: 480px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive -- desktop, luego tablet (~860px), luego móvil (~640px), */
+/* mismos breakpoints ya aprobados para el resto de la app.             */
+/* ------------------------------------------------------------------ */
+@media (max-width: 860px) {
+	.fg-clientes.fg-shell .fg-kpis--clientes {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-clientes .fg-clientes-detail-grid {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+
+@media (max-width: 640px) {
+	.fg-clientes.fg-shell .fg-kpis--clientes {
+		grid-template-columns: 1fr 1fr;
+		gap: 10px;
+	}
+
+	.fg-clientes .fg-clientes-detail-grid {
+		grid-template-columns: 1fr;
+	}
+
+	.fg-clientes .fg-clientes-card-actions {
+		flex-direction: column;
+	}
+
+	.fg-clientes .fg-clientes-card-action {
+		flex: 1 1 auto;
+		width: 100%;
+	}
+
+	.fg-clientes .fg-clientes-detail-actions .fg-btn {
+		flex: 1 1 100%;
+	}
+
+	.fg-clientes .fg-clientes-pagination {
+		flex-direction: column;
+		align-items: flex-start;
+	}
+}
