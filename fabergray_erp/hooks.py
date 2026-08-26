@@ -218,7 +218,23 @@ fixtures = [
 	{
 		"dt": "Custom Field",
 		"filters": [
-			["fieldname", "in", ["fg_started_by", "fg_started_on", "fg_observations", "fg_created_by_fulfillment_engine"]]
+			[
+				"fieldname",
+				"in",
+				[
+					"fg_started_by",
+					"fg_started_on",
+					"fg_observations",
+					"fg_created_by_fulfillment_engine",
+					# Migración de datos legados Access -> Customer/Item (identidad
+					# estable de sincronización, no una etiqueta cosmética). Ver
+					# fabergray_erp/migration_piloto/README.md para el importador
+					# que las usa como clave de idempotencia.
+					"access_id_cliente",
+					"access_nombre_comercial",
+					"access_id_producto",
+				],
+			]
 		],
 	},
 	{
