@@ -218,8 +218,61 @@ fixtures = [
 	},
 	{
 		"dt": "Custom DocPerm",
+		"filters": [["role", "in", ["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes"]]],
+	},
+	{
+		# Commit 22.4 -- "System Manager" is a standard Frappe role (never
+		# exported via the "Role" fixture above, which is only for this
+		# app's own custom roles), but its Item/Bin/Item Price/Stock
+		# Ledger Entry read grants for api/inventario.py ARE this app's
+		# own Custom DocPerm rows and must be versioned too -- confirmed
+		# via a real has_permission() audit that native ERPNext grants
+		# System Manager nothing on any of these doctypes (item.json/
+		# customer.json's own shipped permissions never list it), the
+		# same latent gap every other Page.roles "+ System Manager" entry
+		# in this app already has, just made explicit here instead of
+		# silently relying on Administrator's own blanket bypass.
+		#
+		# Deliberately a SEPARATE fixture entry (own filename via
+		# `prefix`, not folded into the block above): filtering the main
+		# Custom DocPerm export by role="System Manager" alone also
+		# matched unrelated, pre-existing Custom DocPerm rows granted to
+		# System Manager by other ERPNext localizations (UAE VAT/South
+		# Africa VAT) that have nothing to do with this app -- scoping by
+		# `parent` too keeps this export to exactly the 4 doctypes this
+		# commit actually grants.
+		"dt": "Custom DocPerm",
+		"prefix": "system_manager",
 		"filters": [
-			["role", "in", ["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes"]]
+			["role", "=", "System Manager"],
+			["parent", "in", ["Item", "Bin", "Item Price", "Stock Ledger Entry"]],
+		],
+	},
+	{
+		# Commit 22.4, part 2 -- Item Price and Stock Ledger Entry had ZERO
+		# Custom DocPerm rows before this commit. Confirmed live: the
+		# moment ANY Custom DocPerm row exists for a doctype, Frappe
+		# ignores ALL of that doctype's own native DocPerm rows for EVERY
+		# role (frappe.permissions.get_valid_perms()/
+		# get_doctypes_with_custom_docperms() -- the exact mechanism that
+		# already caused the Reporte de Faltante incident, see
+		# test_facturacion_permissions.py). Real users on this site hold
+		# Item Price's native roles (Sales Master Manager, Purchase
+		# Master Manager) and Stock Ledger Entry's (Stock User, Accounts
+		# Manager) -- granting Bodega/Jefe de Bodega/System Manager
+		# access via Custom DocPerm would have silently masked all four.
+		# Unlike Reporte de Faltante (an app-owned doctype, fixed by
+		# adding a native DocPerm row to its own json), these are core
+		# ERPNext doctypes this app does not own and must never edit --
+		# so the fix is to replicate their exact native permission rows
+		# (field for field, from item_price.json/stock_ledger_entry.json)
+		# as Custom DocPerm rows of their own, restoring the exact same
+		# effective access instead of leaving it lost.
+		"dt": "Custom DocPerm",
+		"prefix": "native_restore",
+		"filters": [
+			["role", "in", ["Sales Master Manager", "Purchase Master Manager", "Stock User", "Accounts Manager"]],
+			["parent", "in", ["Item Price", "Stock Ledger Entry"]],
 		],
 	},
 	{

@@ -87,8 +87,16 @@ class TestCotizacionesApi(IntegrationTestCase):
 		self.assertNotIn("qty_disponible", info)  # inventory is out of scope entirely for Cotizaciones
 
 	def test_get_item_info_denies_unreadable_item(self):
-		jefe_user = self.world.user("fg20-2-jefe@example.com", ["Jefe de Bodega"])
-		with fx.as_user(jefe_user):  # confirmed zero Item permission (only Vendedora/Bodega have it)
+		"""Disposable, purpose-built role with zero Item grants -- not
+		"Jefe de Bodega" (Commit 22.4 gave that role its own, unrelated
+		Item read=1 for api/inventario.py, so it can no longer serve as a
+		"definitely no Item permission" example)."""
+		role = frappe.get_doc({"doctype": "Role", "role_name": "FG20 No Item Permission Test Role", "desk_access": 1})
+		role.insert()
+		self.world.track_existing("Role", role.name)
+
+		no_item_user = self.world.user("fg20-2-noitem@example.com", [role.name])
+		with fx.as_user(no_item_user):
 			with self.assertRaises(frappe.PermissionError):
 				cotizaciones.get_item_info(self.item.name)
 

@@ -7,10 +7,12 @@ fabergray_erp/fixtures/custom_docperm.json).
 Confirms: Bodega only sees Bin rows for warehouses it has a User
 Permission on (same mechanism already covered for Pick List/Reporte de
 Faltante), the endpoint is genuinely read-only (no write permission is
-ever granted or used), and a user with no Item permission at all -- the
-situation every other role except Vendedora and now Bodega is still in --
-is correctly blocked, proving the grant is what makes this endpoint work,
-not an accidental permission bypass.
+ever granted or used), and a user with no Item permission at all is
+correctly blocked, proving the grant is what makes this endpoint work,
+not an accidental permission bypass. That last check uses a disposable,
+purpose-built role rather than a real one (Commit 22.4 gave "Jefe de
+Bodega" its own, unrelated Item read=1 for api/inventario.py, so it can
+no longer serve as a "definitely no Item permission" example).
 """
 
 import frappe
@@ -60,12 +62,22 @@ class TestBodegaInventory(IntegrationTestCase):
 		self.assertEqual(row["available_qty"], row["actual_qty"] - row["reserved_qty"])
 
 	def test_role_without_item_permission_is_rejected(self):
-		"""Every other Bodega-adjacent role (Jefe de Bodega, Vendedora
-		without the Item grant this endpoint specifically needed) must
-		still be blocked -- proves get_inventory() is actually enforcing
-		frappe.has_permission("Item", ...), not silently bypassing it."""
-		jefe = self.world.user("fg8-jefe-inventory@example.com", ["Jefe de Bodega"])
-		self.world.warehouse_user_permission(jefe, self.wh_a.name)
-		with fx.as_user(jefe):
+		"""A role with zero grants on Item at all must still be blocked --
+		proves get_inventory() is actually enforcing
+		frappe.has_permission("Item", ...), not silently bypassing it.
+
+		Uses a disposable, purpose-built role (not "Jefe de Bodega" --
+		Commit 22.4 gave that role its own, legitimate Item read=1 for
+		api/inventario.py, so it stopped being a valid "no Item
+		permission" example) so this test's premise can never again be
+		invalidated by an unrelated, correctly-approved permission grant
+		to one of this app's real business roles."""
+		role = frappe.get_doc({"doctype": "Role", "role_name": "FG8 No Item Permission Test Role", "desk_access": 1})
+		role.insert()
+		self.world.track_existing("Role", role.name)
+
+		no_item_user = self.world.user("fg8-noitem-inventory@example.com", [role.name])
+		self.world.warehouse_user_permission(no_item_user, self.wh_a.name)
+		with fx.as_user(no_item_user):
 			with self.assertRaises(frappe.PermissionError):
 				bodega.get_inventory()
