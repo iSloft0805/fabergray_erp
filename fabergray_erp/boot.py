@@ -58,8 +58,56 @@ frappe.get_installed_apps() order (frappe, erpnext, fabergray_erp on this
 site); this does not replace or skip erpnext.startup.boot.boot_session,
 confirmed by test_boot_home_page.py::
 TestBootSessionHookComposition.
+
+Landing fix (production incident, post-7c9c1e7) -- "Workspaces" above only
+selects the *renderer*, never *which* Workspace it shows on a bare route
+(login, the app logo, a bare /app): that decision is
+Workspace.get_page_to_show()'s job (workspace.js), and it prefers a
+per-browser localStorage.current_page cached from ANY earlier visit over
+workspaces[0] -- confirmed live via /app/fabrigray-erp working while a
+bare landing kept showing the standard ERPNext desktop in the same
+browser. public/js/fg_home_landing.js (app_include_js, hooks.py) closes
+that gap client-side by pre-seeding localStorage.current_page itself, but
+only for users who actually belong to the operational Fabrigray
+environment -- it needs that eligibility computed somewhere, and
+`fg_home` below is where. Mirrors fabergray_erp/user_hooks.py's own
+OPERATIONAL_ROLES/System-Manager/Administrator rule exactly (imported,
+not re-typed) so the two can never drift apart: the same rule that grants
+"Fabrigray Operativo" is the one that decides who gets this landing fix,
+computed once per boot_session call (already running for every session
+regardless), no extra request needed client-side.
 """
+
+import frappe
+
+from fabergray_erp.user_hooks import OPERATIONAL_ROLES
+
+#: The one Workspace this app ships (fabergray_erp/fabrigray_erp/workspace/
+#: fabrigray_erp/fabrigray_erp.json) -- see that file's own `name`.
+FG_HOME_WORKSPACE = "Fabrigray ERP"
+
 
 def set_home_page(bootinfo):
 	"""boot_session hook -- see module docstring for the full mechanism."""
 	bootinfo["home_page"] = "Workspaces"
+	bootinfo["fg_home"] = {
+		"is_operational": _is_operational_session(),
+		"workspace": FG_HOME_WORKSPACE,
+	}
+
+
+def _is_operational_session() -> bool:
+	"""True only for the exact same sessions user_hooks.py's
+	_qualifies_for_default_module_profile() would grant "Fabrigray
+	Operativo" to: never Administrator/Guest, never a System Manager (even
+	alongside an operational role), only an actual OPERATIONAL_ROLES
+	holder. Uses frappe.get_roles() (session-cached already) instead of
+	loading a User doc -- boot_session has no doc to reuse, and this only
+	ever needs the current session's own roles."""
+	user = frappe.session.user
+	if user in ("Administrator", "Guest"):
+		return False
+	roles = set(frappe.get_roles(user))
+	if "System Manager" in roles:
+		return False
+	return bool(roles & OPERATIONAL_ROLES)

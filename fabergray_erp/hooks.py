@@ -30,7 +30,10 @@ app_license = "mit"
 # Bodega Page can reuse it without depending on bodega.css. Scoped entirely
 # under .fg-shell -- see public/css/fg_shell.css.
 app_include_css = "/assets/fabergray_erp/css/fg_shell.css"
-# app_include_js = "/assets/fabergray_erp/js/fabergray_erp.js"
+# Home Fabrigray -- landing fix for operational users (production
+# incident, post-7c9c1e7). See fabergray_erp/public/js/fg_home_landing.js
+# and fabergray_erp/boot.py's own docstrings for the full mechanism.
+app_include_js = "/assets/fabergray_erp/js/fg_home_landing.js"
 
 # include js, css files in header of web template
 # web_include_css = "/assets/fabergray_erp/css/fabergray_erp.css"
