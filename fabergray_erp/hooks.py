@@ -70,13 +70,21 @@ app_include_css = "/assets/fabergray_erp/css/fg_shell.css"
 # user_type == "Website User"; every real user in this app (Vendedora,
 # Bodega, Jefe de Bodega, Facturación, System Manager, Administrator) is a
 # System User, whose post-login redirect never reaches this code path at
-# all. The real mechanism is two pieces working together:
-# 1) the Workspace "Fabrigray ERP" itself (fabrigray_erp/workspace/
+# all. The real mechanism is three pieces working together:
+# 1) boot_session (below) forces every session's Desk landing into the
+#    modern Workspaces renderer (frappe.standard_pages["Workspaces"]) --
+#    confirmed live that without this, add_home_page() (frappe/boot.py)
+#    always falls back to the legacy "Desktop" page instead (no Page
+#    doctype record named "workspace"/a Workspace's own name exists, on
+#    this site or in stock Frappe), whose module grid is permission-
+#    checked by a mechanism that never respects blocked_modules -- see
+#    fabergray_erp/boot.py's own docstring for the full chain;
+# 2) the Workspace "Fabrigray ERP" itself (fabrigray_erp/workspace/
 #    fabrigray_erp/fabrigray_erp.json), sequence_id=0, which wins
 #    frappe/public/js/frappe/views/workspace/workspace.js's own
 #    get_page_to_show() fallback (first workspace in frappe.boot.workspaces,
 #    already role/module-filtered server-side);
-# 2) the "Fabrigray Operativo" Module Profile (below, applied automatically
+# 3) the "Fabrigray Operativo" Module Profile (below, applied automatically
 #    by fabergray_erp/user_hooks.py) blocks every standard module for
 #    operational users, so "Fabrigray ERP" isn't just first -- it's the
 #    only Workspace left for them to see at all. Administrator/System
@@ -85,6 +93,17 @@ app_include_css = "/assets/fabergray_erp/css/fg_shell.css"
 # role_home_page = {
 # 	"Role": "home_page"
 # }
+
+# Forces the Desk landing into the modern Workspaces renderer for every
+# System User on every login -- additive to erpnext's own boot_session
+# (erpnext.startup.boot.boot_session): Frappe merges every installed app's
+# boot_session hook into one list and runs all of them (frappe.
+# append_hook(), frappe/__init__.py), it does not replace/override.
+# See fabergray_erp/boot.py's own docstring for the full mechanism and why
+# this is the only fix point available (desktop:home_page itself cannot
+# hold a Workspace name -- confirmed live, add_home_page() only ever
+# resolves it as a Page doctype name).
+boot_session = "fabergray_erp.boot.set_home_page"
 
 # Generators
 # ----------
@@ -316,6 +335,24 @@ fixtures = [
 		# Profile is ever exported.
 		"dt": "Module Profile",
 		"filters": [["name", "=", "Fabrigray Operativo"]],
+	},
+	{
+		# Home visual -- Custom HTML Block rendered inside the Workspace
+		# "Fabrigray ERP" (fabrigray_erp/workspace/fabrigray_erp/
+		# fabrigray_erp.json), replacing the five native Shortcut blocks
+		# as the landing launcher. Deliberately unfiltered by role
+		# (roles=[] on the record itself, confirmed live via
+		# is_custom_block_permitted() -- frappe/desk/desktop.py): every
+		# System User sees the same five cards regardless of role; the
+		# real access control is unchanged and lives entirely in
+		# Page.is_permitted() on the destination route when a card is
+		# clicked, exactly like before this block existed. Custom HTML
+		# Block has no app/module/standard field of its own (unlike Page/
+		# Workspace), so it cannot export-to-file the way those do --
+		# this fixture, filtered by exact name, is the only versioning
+		# mechanism available for it.
+		"dt": "Custom HTML Block",
+		"filters": [["name", "=", "Fabrigray Home"]],
 	},
 ]
 
