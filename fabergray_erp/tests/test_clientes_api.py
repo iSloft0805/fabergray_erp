@@ -162,16 +162,47 @@ class TestClientesApi(IntegrationTestCase):
         self.assertIsNone(detail["address"])
 
     def test_customer_detail_omits_contact_when_caller_lacks_contact_permission(self):
-        """"Gestión de Clientes" (this commit's role) has Customer
-        permission only -- a primary contact set on the Customer must not
-        turn into a PermissionError just because get_customer_detail()
-        tried to resolve it; it must come back null instead."""
+        """A caller with Customer read permission but none on Contact must
+        not get a PermissionError just because get_customer_detail() tried
+        to resolve a primary contact -- it must come back null instead.
+
+        Commit 22.7 gave "Gestión de Clientes" its own Contact/Address
+        Custom DocPerm (read/write/create, so the Page's "Editar cliente"
+        modal actually works for that role -- see fixtures/
+        custom_docperm.json), so that role itself no longer demonstrates
+        "Customer read without Contact read". This ad hoc role (Customer
+        read only, no Custom DocPerm row of its own on Contact) is
+        constructed fresh here to keep testing the same guarantee: Contact
+        and Address already have at least one Custom DocPerm row
+        (Vendedora's), which masks every native DocPerm for every OTHER
+        role (frappe.permissions.get_valid_perms() -- same mechanism this
+        app's own Commit 22.4 documents for Item Price/Stock Ledger
+        Entry), so a role with no explicit row of its own gets exactly
+        zero Contact permission, same as before this commit."""
+        role = frappe.get_doc({"doctype": "Role", "role_name": "FG221 Cliente Sin Contacto", "desk_access": 1})
+        role.insert()
+        self.world.track_existing("Role", role.name)
+        docperm = frappe.get_doc(
+            {
+                "doctype": "Custom DocPerm",
+                "parent": "Customer",
+                "parenttype": "DocType",
+                "parentfield": "permissions",
+                "role": role.name,
+                "read": 1,
+            }
+        )
+        docperm.insert()
+        self.world.track_existing("Custom DocPerm", docperm.name)
+        no_contact_user = self.world.user("fg221-sin-contacto@example.com", [role.name])
+
         c = self.world.customer("FG221 Detail NoContactPerm")
         contact = self._contact_for(c.name, "Marta")
         c.customer_primary_contact = contact.name
         c.save()
 
-        with fx.as_user(self.gestion_user):
+        with fx.as_user(no_contact_user):
+            self.assertFalse(frappe.has_permission("Contact", "read"))
             detail = clientes_api.get_customer_detail(c.name)  # must not raise
 
         self.assertIsNone(detail["contact"])

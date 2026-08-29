@@ -38,11 +38,25 @@ Address/Contact list or CRUD here, deferred as approved."""
 
 import frappe
 from frappe import _
+from frappe.contacts.doctype.address.address import get_default_address
+from frappe.contacts.doctype.contact.contact import get_default_contact
 from frappe.utils import cint
+
+from erpnext.selling.doctype.customer.customer import parse_full_name
 
 from fabergray_erp.api.bodega import _require_login
 
 _ALLOWED_CUSTOMER_FIELDS = {"customer_name", "access_nombre_comercial", "tax_id", "customer_type"}
+
+# Commit 22.7 -- Contact/Address, mismo boundary que _ALLOWED_CUSTOMER_FIELDS:
+# exactamente estas claves, cualquier otra se rechaza (nunca se ignora en
+# silencio). address_type/country/is_primary_*/links nunca son
+# client-writable -- se derivan server-side (ver _apply_address_payload()).
+_ALLOWED_CONTACT_FIELDS = {"mobile_no", "phone"}
+_ALLOWED_ADDRESS_FIELDS = {"address_line1", "city", "state"}
+
+_DEFAULT_ADDRESS_TYPE = "Billing"  # mismo default que el quick-entry nativo de ERPNext
+_DEFAULT_ADDRESS_COUNTRY = "Colombia"  # única operación de este negocio
 
 _STATUS_FILTERS = {
     "all": {},
@@ -129,43 +143,69 @@ def search_customers(txt="", status="all", start=0, page_length=20):
     return {"customers": customers, "total": len(total)}
 
 
+def _primary_contact_name(doc):
+    """The one Contact this Customer's data should be read from/written
+    to when several may be linked -- reuses ERPNext's own resolution
+    exactly: Customer.customer_primary_contact when set (the native field
+    that exists for this specific purpose), falling back to
+    frappe.contacts.doctype.contact.contact.get_default_contact() (native
+    helper: prefers Contact.is_primary_contact=1 among every Contact
+    linked via Dynamic Link, else the first one) only when it isn't.
+    Never an arbitrary pick of our own."""
+    return doc.customer_primary_contact or get_default_contact("Customer", doc.name)
+
+
+def _primary_address_name(doc):
+    """Same reasoning as _primary_contact_name(), for Address --
+    Customer.customer_primary_address first, else ERPNext's own
+    get_default_address() (prefers Address.is_primary_address=1)."""
+    return doc.customer_primary_address or get_default_address("Customer", doc.name)
+
+
 @frappe.whitelist()
 def get_customer_detail(name):
     """Full read-only detail for one Customer, via frappe.get_doc() +
     check_permission("read") -- real record-level permission, not a
     hand-picked field list bypassing it. Address/Contact are resolved only
-    as far as the primary links Customer already stores, and only if the
+    as far as the primary Contact/Address (_primary_contact_name()/
+    _primary_address_name() -- Commit 22.7, reusing ERPNext's own
+    customer_primary_contact/customer_primary_address +
+    get_default_contact()/get_default_address() fallback), and only if the
     caller actually has Address/Contact read permission (explicit
-    frappe.has_permission() check before querying -- frappe.get_list()
-    raises PermissionError outright for a doctype the caller has zero
-    permission on, it does not just filter rows, so this guard is
-    required, not optional): a caller with Customer-only permission (this
-    commit's "Gestión de Clientes" role, scoped to Customer alone) simply
-    sees null there, never a PermissionError from an incidental lookup."""
+    frappe.has_permission() check before resolving/querying anything --
+    frappe.get_list() raises PermissionError outright for a doctype the
+    caller has zero permission on, it does not just filter rows, so this
+    guard is required, not optional): a caller with Customer-only
+    permission simply sees null there, never a PermissionError from an
+    incidental lookup."""
     _require_login()
 
     doc = frappe.get_doc("Customer", name)
     doc.check_permission("read")
 
     contact = None
-    if doc.customer_primary_contact and frappe.has_permission("Contact", "read"):
-        rows = frappe.get_list(
-            "Contact",
-            filters={"name": doc.customer_primary_contact},
-            fields=["name", "first_name", "last_name", "email_id", "mobile_no", "phone"],
-            limit_page_length=1,
-        )
-        contact = rows[0] if rows else None
+    if frappe.has_permission("Contact", "read"):
+        contact_name = _primary_contact_name(doc)
+        if contact_name:
+            rows = frappe.get_list(
+                "Contact",
+                filters={"name": contact_name},
+                fields=["name", "first_name", "last_name", "email_id", "mobile_no", "phone"],
+                limit_page_length=1,
+            )
+            contact = rows[0] if rows else None
 
     address = None
-    if doc.customer_primary_address and frappe.has_permission("Address", "read"):
-        rows = frappe.get_list(
-            "Address",
-            filters={"name": doc.customer_primary_address},
-            fields=["name", "address_line1", "city", "country"],
-            limit_page_length=1,
-        )
-        address = rows[0] if rows else None
+    if frappe.has_permission("Address", "read"):
+        address_name = _primary_address_name(doc)
+        if address_name:
+            rows = frappe.get_list(
+                "Address",
+                filters={"name": address_name},
+                fields=["name", "address_line1", "city", "state", "country"],
+                limit_page_length=1,
+            )
+            address = rows[0] if rows else None
 
     return {
         "name": doc.name,
@@ -271,8 +311,137 @@ def create_customer(customer):
     return {"name": doc.name}
 
 
+def _parse_scoped_payload(payload, allowed_fields, label):
+    """Same shape/contract as _parse_customer_payload() -- a JSON-or-dict
+    payload filtered through its own allowlist, any key outside it
+    rejected outright (never silently dropped). `payload=None` (the
+    contact/address argument omitted entirely) is treated as an empty
+    payload, not an error -- update_customer() callers that only want to
+    touch Customer fields must keep working exactly as before this
+    commit."""
+    if payload is None:
+        return {}
+    payload = frappe.parse_json(payload) if isinstance(payload, str) else payload
+    if not isinstance(payload, dict):
+        frappe.throw(_("Formato de datos de {0} inválido.").format(label))
+
+    disallowed = set(payload.keys()) - allowed_fields
+    if disallowed:
+        frappe.throw(_("Campos no permitidos en {0}: {1}").format(label, ", ".join(sorted(disallowed))))
+
+    return payload
+
+
+def _set_primary_phone_row(contact, phone_value, flag_field):
+    """Finds the existing phone_nos row currently flagged
+    is_primary_phone/is_primary_mobile_no and updates it in place;
+    appends a new row only when none is flagged yet. Never appends a
+    second row for the same flag -- Contact.validate()'s own set_primary()
+    (frappe/contacts/doctype/contact/contact.py) throws if more than one
+    row ever carries the same primary flag, and this is also exactly what
+    keeps a repeated save() idempotent (Commit 22.7 test: guardar dos
+    veces los mismos datos nunca duplica el Contact ni su teléfono)."""
+    for row in contact.phone_nos:
+        if row.get(flag_field):
+            row.phone = phone_value
+            return
+    contact.append("phone_nos", {"phone": phone_value, flag_field: 1})
+
+
+def _apply_contact_payload(doc, payload):
+    """doc: Customer, already loaded, not yet saved. payload: parsed dict,
+    already filtered through _ALLOWED_CONTACT_FIELDS. Idempotent
+    create-or-update against the Customer's own primary Contact
+    (_primary_contact_name() -- never an arbitrary one when several are
+    linked): updates it in place if one already exists, creates exactly
+    one new Contact (same native shape as erpnext.selling.doctype.
+    customer.customer.make_contact() -- Dynamic Link to this Customer,
+    is_primary_contact=1, first_name/last_name (Individual, via that same
+    module's parse_full_name()) or company_name (Company/Partnership) so
+    Contact.autoname() has something real to build a name from) only if
+    the caller actually supplied a phone and none exists yet. Real
+    permission checked explicitly (frappe.has_permission(doc=...,
+    throw=True)) before either path -- server-side, never inferred from
+    the caller having Customer permission alone."""
+    mobile_no = (payload.get("mobile_no") or "").strip()
+    phone = (payload.get("phone") or "").strip()
+    if not mobile_no and not phone:
+        return  # both empty: no Contact touched, none created
+
+    contact_name = _primary_contact_name(doc)
+
+    if contact_name:
+        frappe.has_permission("Contact", "write", doc=contact_name, throw=True)
+        contact = frappe.get_doc("Contact", contact_name)
+    else:
+        frappe.has_permission("Contact", "create", throw=True)
+        contact = frappe.new_doc("Contact")
+        contact.append("links", {"link_doctype": "Customer", "link_name": doc.name})
+        contact.is_primary_contact = 1
+        if doc.customer_type == "Individual":
+            first, middle, last = parse_full_name(doc.customer_name)
+            contact.first_name = first
+            contact.middle_name = middle
+            contact.last_name = last
+        else:
+            contact.company_name = doc.customer_name
+
+    if mobile_no:
+        _set_primary_phone_row(contact, mobile_no, "is_primary_mobile_no")
+    if phone:
+        _set_primary_phone_row(contact, phone, "is_primary_phone")
+
+    contact.save()  # real permission, no ignore_permissions
+
+    if not doc.customer_primary_contact:
+        doc.customer_primary_contact = contact.name
+
+
+def _apply_address_payload(doc, payload):
+    """Same reasoning as _apply_contact_payload(), for Address. New
+    Address gets address_type="Billing" (ERPNext's own quick-entry
+    default -- not exposed in this form, mandatory on the native doctype)
+    and country="Colombia" (this business's only country of operation,
+    per Commit 22.7's brief -- never client-writable; an existing
+    Address's own country is left untouched, only new ones get it)."""
+    address_line1 = (payload.get("address_line1") or "").strip()
+    city = (payload.get("city") or "").strip()
+    state = (payload.get("state") or "").strip()
+    if not address_line1 and not city and not state:
+        return  # all empty: no Address touched, none created
+
+    address_name = _primary_address_name(doc)
+
+    if address_name:
+        frappe.has_permission("Address", "write", doc=address_name, throw=True)
+        address = frappe.get_doc("Address", address_name)
+    else:
+        if not address_line1 or not city:
+            frappe.throw(_("Dirección y ciudad son obligatorias para crear una dirección."))
+        frappe.has_permission("Address", "create", throw=True)
+        address = frappe.new_doc("Address")
+        address.append("links", {"link_doctype": "Customer", "link_name": doc.name})
+        address.address_title = doc.customer_name
+        address.address_type = _DEFAULT_ADDRESS_TYPE
+        address.country = _DEFAULT_ADDRESS_COUNTRY
+        address.is_primary_address = 1
+        address.is_shipping_address = 1
+
+    if address_line1:
+        address.address_line1 = address_line1
+    if city:
+        address.city = city
+    if state:
+        address.state = state
+
+    address.save()  # real permission, no ignore_permissions
+
+    if not doc.customer_primary_address:
+        doc.customer_primary_address = address.name
+
+
 @frappe.whitelist()
-def update_customer(name, customer):
+def update_customer(name, customer=None, contact=None, address=None):
     """customer: dict (or JSON string) with any subset of
     _ALLOWED_CUSTOMER_FIELDS -- only the keys actually present are
     changed, everything else on the Customer (including
@@ -280,13 +449,29 @@ def update_customer(name, customer):
     exactly as it was. Never frappe.get_doc(...).update(payload)/
     .update(dict) -- each allowed field is assigned individually so the
     allowlist enforced by _parse_customer_payload() is the only thing
-    that ever reaches the document, not implicit dict-merge behaviour."""
+    that ever reaches the document, not implicit dict-merge behaviour.
+
+    contact/address (Commit 22.7): optional dicts (or JSON strings),
+    filtered through their own allowlists (_ALLOWED_CONTACT_FIELDS/
+    _ALLOWED_ADDRESS_FIELDS) by _parse_scoped_payload() -- same boundary
+    pattern as `customer`, never merged into it. Applied via
+    _apply_contact_payload()/_apply_address_payload() BEFORE doc.save():
+    if either raises (bad payload, missing permission, native validation),
+    the exception propagates out of this whitelisted method before
+    doc.save() is ever reached, so the Customer's own field changes above
+    are never persisted either -- one request, one DB transaction, no
+    frappe.db.commit() anywhere in this module (Frappe's own request
+    lifecycle commits only after this method returns without raising, and
+    rolls back everything -- including an already-saved Contact/Address in
+    the same request -- the moment it doesn't)."""
     _require_login()
 
     doc = frappe.get_doc("Customer", name)
     doc.check_permission("write")
 
-    payload = _parse_customer_payload(customer)
+    payload = _parse_customer_payload(customer if customer is not None else {})
+    contact_payload = _parse_scoped_payload(contact, _ALLOWED_CONTACT_FIELDS, "contacto")
+    address_payload = _parse_scoped_payload(address, _ALLOWED_ADDRESS_FIELDS, "dirección")
 
     if "customer_name" in payload:
         if not payload["customer_name"]:
@@ -298,6 +483,24 @@ def update_customer(name, customer):
         doc.tax_id = payload["tax_id"]
     if "customer_type" in payload:
         doc.customer_type = payload["customer_type"]  # already validated above
+
+    _apply_contact_payload(doc, contact_payload)
+    _apply_address_payload(doc, address_payload)
+
+    # Editing an Address that is already this Customer's
+    # customer_primary_address triggers ERPNext's own native
+    # ERPNextAddress.on_update() mixin (erpnext.accounts.custom.address),
+    # which does frappe.db.set_value("Customer", ..., "primary_address",
+    # ...) as a side effect -- bumping this same Customer's `modified`
+    # timestamp in the DB out from under the in-memory `doc` this
+    # function loaded at the top. Re-syncing doc.modified from the DB
+    # right before save() (not doc.reload(), which would discard every
+    # field this function just assigned) is what tells Frappe's own
+    # optimistic-locking check (Document.check_if_latest()) this is that
+    # same known, expected side effect -- not a real concurrent edit --
+    # so a normal "Editar Address existente" call doesn't spuriously
+    # raise TimestampMismatchError.
+    doc.modified = frappe.db.get_value("Customer", doc.name, "modified")
 
     doc.save()  # real permission, no ignore_permissions
 

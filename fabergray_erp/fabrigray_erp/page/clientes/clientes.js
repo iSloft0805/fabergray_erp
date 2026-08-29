@@ -573,52 +573,113 @@ fabergray_erp.Clientes = class Clientes {
 	// mecanismo que ya usa page/bodega/bodega.js para "Motivo" en su
 	// diálogo de faltante) -- no un endpoint nuevo, no una copia
 	// hardcodeada que pudiera desalinearse silenciosamente.
+	//
+	// Commit 22.7 -- "INFORMACIÓN DE CONTACTO" (teléfono principal/
+	// secundario, dirección, ciudad, departamento) solo aparece editando
+	// un cliente existente (is_edit), nunca en "Nuevo cliente": Contact/
+	// Address se vinculan a un Customer ya guardado (Dynamic Link,
+	// link_name=customer.name), que no existe todavía en el flujo de
+	// creación -- create_customer() deliberadamente no cambia, sigue
+	// aceptando exactamente los mismos 4 campos que antes. Los valores
+	// iniciales salen de existing.contact/existing.address, ya resueltos
+	// por get_customer_detail() (Commit 22.7: primary Contact/Address
+	// reales, nunca uno arbitrario) -- este formulario no decide cuál
+	// Contact/Address es el principal, solo muestra y edita el que el
+	// servidor ya identificó como tal.
 	// =====================================================================
 	open_customer_form(existing) {
 		const is_edit = !!existing;
+		const contact = (is_edit && existing.contact) || {};
+		const address = (is_edit && existing.address) || {};
 
 		frappe.model.with_doctype("Customer", () => {
 			const field = frappe.get_meta("Customer").fields.find((f) => f.fieldname === "customer_type");
 			const options = field && field.options ? field.options.split("\n").map((o) => o.trim()).filter(Boolean) : DEFAULT_CUSTOMER_TYPES;
 
+			const fields = [
+				{
+					fieldtype: "Data",
+					fieldname: "customer_name",
+					label: __("Nombre / Razón social"),
+					reqd: 1,
+					default: is_edit ? existing.customer_name : "",
+				},
+				{
+					fieldtype: "Data",
+					fieldname: "access_nombre_comercial",
+					label: __("Nombre comercial"),
+					default: is_edit ? existing.access_nombre_comercial || "" : "",
+				},
+				{
+					fieldtype: "Data",
+					fieldname: "tax_id",
+					label: __("Documento / NIT"),
+					default: is_edit ? existing.tax_id || "" : "",
+				},
+				{
+					fieldtype: "Select",
+					fieldname: "customer_type",
+					label: __("Tipo de cliente"),
+					options: options,
+					reqd: 1,
+					default: is_edit ? existing.customer_type || options[0] : "Company",
+				},
+			];
+
+			if (is_edit) {
+				fields.push(
+					{ fieldtype: "Section Break", fieldname: "fg_contact_section", label: __("INFORMACIÓN DE CONTACTO") },
+					{
+						fieldtype: "Data",
+						fieldname: "contact_mobile_no",
+						label: __("Teléfono principal"),
+						options: "Phone",
+						default: contact.mobile_no || "",
+					},
+					{
+						fieldtype: "Data",
+						fieldname: "contact_phone",
+						label: __("Teléfono secundario"),
+						options: "Phone",
+						default: contact.phone || "",
+					},
+					{ fieldtype: "Column Break" },
+					{
+						fieldtype: "Data",
+						fieldname: "address_line1",
+						label: __("Dirección"),
+						default: address.address_line1 || "",
+					},
+					{
+						fieldtype: "Data",
+						fieldname: "address_city",
+						label: __("Ciudad"),
+						default: address.city || "",
+					},
+					{
+						fieldtype: "Data",
+						fieldname: "address_state",
+						label: __("Departamento / Estado"),
+						default: address.state || "",
+					}
+				);
+			}
+
 			const dialog = new frappe.ui.Dialog({
 				title: is_edit ? __("Editar cliente") : __("Nuevo cliente"),
-				fields: [
-					{
-						fieldtype: "Data",
-						fieldname: "customer_name",
-						label: __("Nombre / Razón social"),
-						reqd: 1,
-						default: is_edit ? existing.customer_name : "",
-					},
-					{
-						fieldtype: "Data",
-						fieldname: "access_nombre_comercial",
-						label: __("Nombre comercial"),
-						default: is_edit ? existing.access_nombre_comercial || "" : "",
-					},
-					{
-						fieldtype: "Data",
-						fieldname: "tax_id",
-						label: __("Documento / NIT"),
-						default: is_edit ? existing.tax_id || "" : "",
-					},
-					{
-						fieldtype: "Select",
-						fieldname: "customer_type",
-						label: __("Tipo de cliente"),
-						options: options,
-						reqd: 1,
-						default: is_edit ? existing.customer_type || options[0] : "Company",
-					},
-				],
+				fields: fields,
 				primary_action_label: is_edit ? __("GUARDAR CAMBIOS") : __("CREAR CLIENTE"),
 				primary_action: (values) => {
 					dialog.disable_primary_action();
 					const payload = this._build_customer_payload(values);
 
 					const request = is_edit
-						? this.call("update_customer", { name: existing.name, customer: payload })
+						? this.call("update_customer", {
+								name: existing.name,
+								customer: payload,
+								contact: this._build_contact_payload(values),
+								address: this._build_address_payload(values),
+						  })
 						: this.call("create_customer", { customer: payload });
 
 					request
@@ -658,6 +719,30 @@ fabergray_erp.Clientes = class Clientes {
 			access_nombre_comercial: (values.access_nombre_comercial || "").trim() || null,
 			tax_id: (values.tax_id || "").trim() || null,
 			customer_type: values.customer_type,
+		};
+	}
+
+	// Commit 22.7 -- exactamente las claves que update_customer() acepta
+	// del lado de Contact (_ALLOWED_CONTACT_FIELDS en api/clientes.py):
+	// mobile_no/phone. Vacíos incluidos a propósito (nunca omitidos): el
+	// servidor decide qué hacer con un campo vacío (no crea/no toca nada),
+	// esta función solo traduce los fieldnames del Dialog a los del API.
+	_build_contact_payload(values) {
+		return {
+			mobile_no: (values.contact_mobile_no || "").trim(),
+			phone: (values.contact_phone || "").trim(),
+		};
+	}
+
+	// Mismo criterio que _build_contact_payload(), para Address
+	// (_ALLOWED_ADDRESS_FIELDS). country nunca se envía desde aquí --
+	// _apply_address_payload() en el servidor lo fija a "Colombia" cuando
+	// crea una Address nueva, este formulario no tiene ese campo.
+	_build_address_payload(values) {
+		return {
+			address_line1: (values.address_line1 || "").trim(),
+			city: (values.address_city || "").trim(),
+			state: (values.address_state || "").trim(),
 		};
 	}
 };
