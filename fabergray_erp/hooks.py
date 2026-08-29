@@ -267,7 +267,11 @@ fixtures = [
 		"prefix": "system_manager",
 		"filters": [
 			["role", "=", "System Manager"],
-			["parent", "in", ["Item", "Bin", "Item Price", "Stock Ledger Entry"]],
+			[
+				"parent",
+				"in",
+				["Item", "Bin", "Item Price", "Stock Ledger Entry", "Stock Reconciliation", "Warehouse"],
+			],
 		],
 	},
 	{
@@ -290,11 +294,22 @@ fixtures = [
 		# (field for field, from item_price.json/stock_ledger_entry.json)
 		# as Custom DocPerm rows of their own, restoring the exact same
 		# effective access instead of leaving it lost.
+		#
+		# Commit 22.6 -- same incident, same fix, for Stock Reconciliation:
+		# it had ZERO Custom DocPerm rows before this commit (confirmed
+		# live), so granting Jefe de Bodega/System Manager a Custom DocPerm
+		# there would have silently masked "Stock Manager"'s native full
+		# access (39 real users on this site). Replicated field-for-field
+		# from stock_reconciliation.json's own "Stock Manager" row.
 		"dt": "Custom DocPerm",
 		"prefix": "native_restore",
 		"filters": [
-			["role", "in", ["Sales Master Manager", "Purchase Master Manager", "Stock User", "Accounts Manager"]],
-			["parent", "in", ["Item Price", "Stock Ledger Entry"]],
+			[
+				"role",
+				"in",
+				["Sales Master Manager", "Purchase Master Manager", "Stock User", "Accounts Manager", "Stock Manager"],
+			],
+			["parent", "in", ["Item Price", "Stock Ledger Entry", "Stock Reconciliation"]],
 		],
 	},
 	{
@@ -315,6 +330,10 @@ fixtures = [
 					"access_id_cliente",
 					"access_nombre_comercial",
 					"access_id_producto",
+					# Commit 22.6 -- Stock Reconciliation adjustment reason,
+					# free text captured on the doc that carries the actual
+					# stock movement (native mechanism, no custom doctype).
+					"fg_adjustment_reason",
 				],
 			]
 		],

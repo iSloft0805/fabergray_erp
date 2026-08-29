@@ -368,6 +368,20 @@
 	font-weight: 700;
 }
 
+/* ------------------------------------------------------------------ */
+/* Edición (Commit 22.6) -- botones de acción en el detalle             */
+/* ------------------------------------------------------------------ */
+.fg-inventario .fg-inv-detail-actions {
+	display: flex;
+	justify-content: flex-end;
+	margin-top: 4px;
+}
+
+.fg-inventario .fg-inv-warehouse-row {
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
 .fg-inventario .fg-inv-movement-row {
 	display: flex;
 	flex-wrap: wrap;

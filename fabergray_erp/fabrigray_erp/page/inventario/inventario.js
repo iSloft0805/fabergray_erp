@@ -12,18 +12,25 @@ frappe.pages["inventario"].on_page_load = function (wrapper) {
 	new fabergray_erp.Inventario(page);
 };
 
-// Commit 22.5 -- Page Inventario: dashboard + lista + detalle, exclusivamente
-// sobre los 3 endpoints de solo lectura ya cerrados en api/inventario.py
-// (Commit 22.4). Esta Page es UI solamente -- no reimplementa ninguna regla
-// de autorización: el acceso a la ruta entera lo decide inventario.json's
-// roles (Bodega, Jefe de Bodega, System Manager), y cada lectura sigue
-// pasando por el mismo frappe.has_permission()/check_permission() real del
-// servidor.
+// Commit 22.5 -- Page Inventario: dashboard + lista + detalle, sobre los 3
+// endpoints de solo lectura de api/inventario.py (Commit 22.4). Esta Page es
+// UI solamente -- no reimplementa ninguna regla de autorización: el acceso a
+// la ruta entera lo decide inventario.json's roles (Bodega, Jefe de Bodega,
+// System Manager), y cada lectura/escritura sigue pasando por el mismo
+// frappe.has_permission()/check_permission() real del servidor.
 //
-// Sin ninguna acción de escritura: no hay ajustar stock, entrada, salida,
-// Stock Reconciliation, Stock Entry, editar Item, cambiar UOM ni cambiar
-// grupo -- ni un solo botón de este archivo llama a nada que no sea
-// get_inventory_summary()/get_inventory_items()/get_inventory_item_detail().
+// Commit 22.6 -- inventario editable. Los botones de edición se OCULTAN para
+// Bodega vía can_edit_inventory() (chequeo de frappe.user_roles), pero esto
+// es puramente cosmético -- si Bodega invocara los endpoints directamente
+// (consola del navegador, curl, etc.) el servidor la rechaza igual
+// (frappe.has_permission() real en cada endpoint de api/inventario.py). Cada
+// botón de escritura llama exactamente a uno de los 3 endpoints de escritura
+// (record_opening_count/adjust_item_quantity/update_item_master) -- ninguno
+// de ellos toca Bin/Stock Ledger Entry/GL Entry directamente, todo pasa por
+// un Stock Reconciliation nativo o por Item/Item Price. El estado "primer
+// conteo" vs "ajuste" nunca se decide aquí por actual_qty==0 -- viene siempre
+// del propio servidor (get_inventory_item_detail(item_code, warehouse) ->
+// has_opening_stock), la misma señal histórica que usa el backend.
 fabergray_erp.Inventario = class Inventario {
 	constructor(page) {
 		this.page = page;
@@ -44,6 +51,11 @@ fabergray_erp.Inventario = class Inventario {
 		// Detalle (view: "detail").
 		this.detail = null;
 		this.detail_code = null;
+
+		// Edición de cantidad (Commit 22.6) -- estado de la ficha
+		// Item+Warehouse que se está abriendo/ajustando ahora mismo.
+		this.qty_edit = null; // {warehouse, has_opening_stock, current_qty}
+		this._warehouse_options = null; // cache de Warehouse.get_list(), una vez por sesión de la Page
 
 		this.state = { view: "dashboard" };
 
@@ -439,6 +451,7 @@ fabergray_erp.Inventario = class Inventario {
 			d.selling_rate != null
 				? frappe.format(d.selling_rate, { fieldtype: "Currency" })
 				: `<span class="fg-inv-empty">${__("Sin precio")}</span>`;
+		const can_edit = can_edit_inventory();
 
 		this.$body.html(`
 			<div class="fg-np-header">
@@ -473,10 +486,31 @@ fabergray_erp.Inventario = class Inventario {
 						<div><strong>${format_qty(d.total_stock)} ${frappe.utils.escape_html(d.stock_uom || "")}</strong></div>
 					</div>
 				</div>
+
+				${
+					can_edit
+						? `<div class="fg-inv-detail-actions">
+							<button type="button" class="fg-btn fg-btn--ghost fg-inv-edit-master-btn">${icon(
+								"pencil",
+								"fg-icon-sm"
+							)} ${__("EDITAR GRUPO Y PRECIOS")}</button>
+						</div>`
+						: ""
+				}
 			</div>
 
 			<div class="fg-inv-section">
-				<div class="fg-inv-section-title">${__("Stock por almacén")}</div>
+				<div class="fg-section-head">
+					<div class="fg-inv-section-title">${__("Stock por almacén")}</div>
+					${
+						can_edit
+							? `<button type="button" class="fg-btn fg-btn--ghost fg-inv-new-warehouse-btn">${icon(
+									"plus",
+									"fg-icon-sm"
+							  )} ${__("Registrar en otro almacén")}</button>`
+							: ""
+					}
+				</div>
 				${this.render_warehouse_rows(d.stock_by_warehouse)}
 			</div>
 
@@ -487,9 +521,18 @@ fabergray_erp.Inventario = class Inventario {
 		`);
 
 		this.$body.find(".fg-np-back").on("click", () => this.back_to_dashboard());
+
+		if (can_edit) {
+			this.$body.find(".fg-inv-edit-master-btn").on("click", () => this.open_master_editor());
+			this.$body.find(".fg-inv-new-warehouse-btn").on("click", () => this.open_new_warehouse_picker());
+			this.$body.find(".fg-inv-warehouse-row-edit").on("click", (e) => {
+				this.open_qty_editor($(e.currentTarget).data("warehouse"));
+			});
+		}
 	}
 
 	render_warehouse_rows(rows) {
+		const can_edit = can_edit_inventory();
 		if (!rows || !rows.length) {
 			return `<div class="fg-inv-empty">${__("Sin stock registrado en ningún almacén.")}</div>`;
 		}
@@ -501,12 +544,242 @@ fabergray_erp.Inventario = class Inventario {
 					<div class="fg-inv-warehouse-row">
 						<span>${frappe.utils.escape_html(r.warehouse)}</span>
 						<span class="fg-inv-warehouse-row-qty">${format_qty(r.actual_qty)}</span>
+						${
+							can_edit
+								? `<button type="button" class="fg-btn fg-btn--ghost fg-inv-warehouse-row-edit" data-warehouse="${frappe.utils.escape_html(
+										r.warehouse
+								  )}">${icon("pencil", "fg-icon-sm")} ${__("AJUSTAR")}</button>`
+								: ""
+						}
 					</div>
 				`
 					)
 					.join("")}
 			</div>
 		`;
+	}
+
+	// =====================================================================
+	// Commit 22.6 -- edición: grupo/precios (sin confirmación) y cantidad
+	// (con confirmación explícita antes de enviar). Ambas rutas llaman
+	// exclusivamente a fabergray_erp.api.inventario.update_item_master()/
+	// record_opening_count()/adjust_item_quantity() -- las mismas 3 funciones
+	// ya auditadas server-side, nunca una escritura directa desde aquí.
+	// =====================================================================
+
+	open_master_editor() {
+		const d = this.detail;
+		const dialog = new frappe.ui.Dialog({
+			title: __("Editar grupo y precios"),
+			fields: [
+				{
+					fieldtype: "Link",
+					fieldname: "item_group",
+					label: __("Grupo de producto"),
+					options: "Item Group",
+					default: d.item_group,
+				},
+				{ fieldtype: "Currency", fieldname: "purchase_rate", label: __("Valor de compra") },
+				{ fieldtype: "Currency", fieldname: "selling_rate", label: __("Precio de venta"), default: d.selling_rate },
+				{ fieldtype: "Column Break" },
+				{
+					fieldtype: "HTML",
+					fieldname: "note",
+					options: `<p class="fg-inv-empty">${__(
+						"Estos cambios nunca afectan la existencia ni la valuación del inventario."
+					)}</p>`,
+				},
+			],
+			primary_action_label: __("Guardar"),
+			primary_action: (values) => on_save(values),
+		});
+		const on_save = (values) => {
+			const payload = { item_code: d.item_code };
+			if (values.item_group && values.item_group !== d.item_group) payload.item_group = values.item_group;
+			if (values.purchase_rate) payload.purchase_rate = values.purchase_rate;
+			if (values.selling_rate != null && values.selling_rate !== d.selling_rate)
+				payload.selling_rate = values.selling_rate;
+
+			if (Object.keys(payload).length <= 1) {
+				dialog.hide();
+				return;
+			}
+
+			dialog.set_primary_action(__("Guardando..."), null);
+			this.call("update_item_master", payload)
+				.then(() => {
+					dialog.hide();
+					this.open_detail(d.item_code);
+				})
+				.catch(() => dialog.set_primary_action(__("Guardar"), on_save));
+		};
+		dialog.show();
+	}
+
+	// Lista de almacenes vía el método nativo frappe.client.get_list -- no
+	// se agrega un cuarto endpoint propio solo para listar Warehouse; Jefe de
+	// Bodega/System Manager ya tienen permiso de lectura real sobre Warehouse
+	// (Commit 6), así que esta llamada respeta ese mismo permiso nativo.
+	load_warehouse_options() {
+		if (this._warehouse_options) return Promise.resolve(this._warehouse_options);
+		return new Promise((resolve, reject) => {
+			frappe.call({
+				method: "frappe.client.get_list",
+				args: {
+					doctype: "Warehouse",
+					filters: { is_group: 0, disabled: 0 },
+					fields: ["name"],
+					limit_page_length: 0,
+					order_by: "name asc",
+				},
+				callback: (r) => {
+					this._warehouse_options = ((r.message) || []).map((w) => w.name);
+					resolve(this._warehouse_options);
+				},
+				error: (r) => reject(r),
+			});
+		});
+	}
+
+	open_new_warehouse_picker() {
+		this.load_warehouse_options().then((options) => {
+			const dialog = new frappe.ui.Dialog({
+				title: __("Registrar en otro almacén"),
+				fields: [
+					{
+						fieldtype: "Select",
+						fieldname: "warehouse",
+						label: __("Almacén"),
+						options: options.join("\n"),
+						reqd: 1,
+					},
+				],
+				primary_action_label: __("Continuar"),
+				primary_action: (values) => {
+					dialog.hide();
+					// has_opening_stock lo decide siempre open_qty_editor() vía el
+					// servidor -- no se asume nada aquí sobre si es "nuevo" o no.
+					this.open_qty_editor(values.warehouse);
+				},
+			});
+			dialog.show();
+		});
+	}
+
+	// Un solo diálogo por estado (apertura vs ajuste), decidido siempre por
+	// has_opening_stock del servidor (get_inventory_item_detail con
+	// warehouse) -- nunca por si warehouse_current_qty es 0. Antes de
+	// guardar una cantidad, muestra un frappe.confirm() explícito con
+	// existencia actual / nueva / diferencia.
+	open_qty_editor(warehouse) {
+		const item_code = this.detail.item_code;
+		this.set_busy(true);
+		this.call("get_inventory_item_detail", { item_code, warehouse })
+			.then((detail) => {
+				this.set_busy(false);
+				if (detail.has_opening_stock) {
+					this.render_adjust_dialog(item_code, warehouse, detail.warehouse_current_qty);
+				} else {
+					this.render_opening_dialog(item_code, warehouse, detail.warehouse_current_qty);
+				}
+			})
+			.catch(() => this.set_busy(false));
+	}
+
+	render_opening_dialog(item_code, warehouse, current_qty) {
+		const dialog = new frappe.ui.Dialog({
+			title: __("Registrar inventario inicial — {0}", [warehouse]),
+			fields: [
+				{
+					fieldtype: "Currency",
+					fieldname: "current_qty_display",
+					label: __("Existencia ERPNext actual"),
+					default: current_qty,
+					read_only: 1,
+				},
+				{ fieldtype: "Column Break" },
+				{ fieldtype: "Float", fieldname: "qty", label: __("Cantidad física"), reqd: 1 },
+				{ fieldtype: "Currency", fieldname: "purchase_rate", label: __("Valor de compra") },
+				{ fieldtype: "Small Text", fieldname: "reason", label: __("Motivo"), reqd: 1 },
+			],
+			primary_action_label: __("Registrar inventario inicial"),
+			primary_action: (values) => on_click(values),
+		});
+		const on_click = (values) => {
+			const difference = flt(values.qty) - flt(current_qty);
+			frappe.confirm(
+				__("Existencia actual: {0}<br>Nueva existencia: {1}<br>Diferencia: {2}{3}", [
+					format_qty(current_qty),
+					format_qty(values.qty),
+					difference >= 0 ? "+" : "",
+					format_qty(difference),
+				]),
+				() => {
+					dialog.set_primary_action(__("Guardando..."), null);
+					this.call("record_opening_count", {
+						item_code,
+						warehouse,
+						qty: values.qty,
+						reason: values.reason,
+						expected_current_qty: current_qty,
+						purchase_rate: values.purchase_rate || null,
+					})
+						.then(() => {
+							dialog.hide();
+							this.open_detail(item_code);
+						})
+						.catch(() => dialog.set_primary_action(__("Registrar inventario inicial"), on_click));
+				}
+			);
+		};
+		dialog.show();
+	}
+
+	render_adjust_dialog(item_code, warehouse, current_qty) {
+		const dialog = new frappe.ui.Dialog({
+			title: __("Ajustar inventario — {0}", [warehouse]),
+			fields: [
+				{
+					fieldtype: "Currency",
+					fieldname: "current_qty_display",
+					label: __("Existencia actual"),
+					default: current_qty,
+					read_only: 1,
+				},
+				{ fieldtype: "Column Break" },
+				{ fieldtype: "Float", fieldname: "qty", label: __("Nueva existencia"), reqd: 1, default: current_qty },
+				{ fieldtype: "Small Text", fieldname: "reason", label: __("Motivo"), reqd: 1 },
+			],
+			primary_action_label: __("Guardar ajuste"),
+			primary_action: (values) => on_click(values),
+		});
+		const on_click = (values) => {
+			const difference = flt(values.qty) - flt(current_qty);
+			frappe.confirm(
+				__("Existencia actual: {0}<br>Nueva existencia: {1}<br>Diferencia: {2}{3}", [
+					format_qty(current_qty),
+					format_qty(values.qty),
+					difference >= 0 ? "+" : "",
+					format_qty(difference),
+				]),
+				() => {
+					dialog.set_primary_action(__("Guardando..."), null);
+					this.call("adjust_item_quantity", {
+						item_code,
+						warehouse,
+						qty: values.qty,
+						reason: values.reason,
+						expected_current_qty: current_qty,
+					})
+						.then(() => {
+							dialog.hide();
+							this.open_detail(item_code);
+						})
+						.catch(() => dialog.set_primary_action(__("Guardar ajuste"), on_click));
+				}
+			);
+		};
+		dialog.show();
 	}
 
 	render_movement_rows(rows) {
@@ -548,6 +821,15 @@ fabergray_erp.Inventario = class Inventario {
 // bodega.js/cotizaciones.js/facturacion.js, same reasoning as Commit 6.
 // -------------------------------------------------------------------------
 const PAGE_SIZE = 10;
+
+// Commit 22.6 -- puramente cosmético: decide si se muestran los botones de
+// edición. La autorización real vive exclusivamente en el servidor
+// (frappe.has_permission() dentro de cada endpoint de escritura) -- Bodega
+// invocando estos mismos métodos directamente sigue siendo rechazada igual.
+function can_edit_inventory() {
+	const roles = frappe.user_roles || [];
+	return roles.includes("Jefe de Bodega") || roles.includes("System Manager");
+}
 const WITH_STOCK_FETCH_CAP = 6000; // margen amplio sobre el total real de productos (~2785) -- ver comentario en load_list()
 
 function paginate(items, page, page_size) {

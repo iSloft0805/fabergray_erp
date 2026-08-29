@@ -228,6 +228,41 @@ class TestWorld:
 		doc.submit()
 		return self._track(doc)
 
+	def temporary_opening_account(self, account_name=None):
+		"""A throwaway Account (account_type="Temporary", root_type="Equity",
+		is_group=0) under the same Equity parent ("3 - Patrimonio - FG")
+		production already uses for its real "Apertura Temporal - FG" account
+		(Commit 22.6) -- confirmed live that THIS site's own chart of
+		accounts has no Temporary-type account at all (unlike production),
+		so tests exercising record_opening_count()'s
+		get_difference_account("Opening Stock", ...) need their own. Tracked
+		like every other TestWorld fixture -- cleanup() purges any GL Entry
+		posted against it (same reasoning as
+		_purge_stock_ledger_for_warehouse()) before deleting it, so a real,
+		submitted Stock Reconciliation built against it during a test never
+		blocks its own teardown.
+
+		account_name defaults to a fresh, unique name per call (frappe.generate_hash)
+		-- multiple test methods in the same TestCase class share one
+		TestWorld/cleanup() at CLASS teardown (not per-test), so calling
+		this more than once per class with a fixed name would otherwise
+		collide on Account's own name-from-account_name autoname."""
+		if not account_name:
+			account_name = f"FG8 Test Apertura Temporal {frappe.generate_hash(length=6)}"
+		doc = frappe.get_doc(
+			{
+				"doctype": "Account",
+				"account_name": account_name,
+				"parent_account": "3 - Patrimonio - FG",
+				"company": COMPANY,
+				"account_type": "Temporary",
+				"root_type": "Equity",
+				"is_group": 0,
+			}
+		)
+		doc.insert()
+		return self._track(doc)
+
 	# -- Manufacturing (Commit 12) -------------------------------------------
 
 	def bom_for(self, item_code, raw_material_item_code, qty=1, rate=10):
@@ -371,6 +406,15 @@ class TestWorld:
 				doc.cancel()
 			if doctype == "Warehouse":
 				self._purge_stock_ledger_for_warehouse(name)
+			if doctype == "Account":
+				# Commit 22.6: a temporary_opening_account() used by a real,
+				# submitted Stock Reconciliation posts real GL Entry rows
+				# against it -- ERPNext keeps those as an audit trail even
+				# after the voucher is cancelled, which would otherwise
+				# block deleting this throwaway Account forever (same class
+				# of issue _purge_stock_ledger_for_warehouse() already
+				# handles for Warehouse/Stock Ledger Entry).
+				frappe.db.delete("GL Entry", {"account": name})
 			frappe.delete_doc(doctype, name, ignore_permissions=True, force=True)
 		frappe.db.commit()
 
