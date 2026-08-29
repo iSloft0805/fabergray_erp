@@ -12,11 +12,25 @@ frappe.pages["jefe-de-bodega"].on_page_load = function (wrapper) {
 	new fabergray_erp.JefeDeBodega(page);
 };
 
-// Read-only supervision screen. All server communication goes through the
-// three fabergray_erp.api.jefe_bodega.* endpoints (Commit 6) -- nothing here
-// queries Pick List/Reporte de Faltante directly, computes bucketing, or
-// writes anything. "VER FALTANTE"/"VER PICK LIST"/quick access all navigate
-// to frappe's own standard Form/List/Tree views -- no duplicated screens.
+// Read-only supervision screen (Commit 6) -- all server communication goes
+// through fabergray_erp.api.jefe_bodega.* endpoints; nothing here queries
+// Pick List/Reporte de Faltante directly or computes bucketing.
+// "VER PICK LIST"/quick access still navigate to frappe's own standard
+// Form/List/Tree views -- no duplicated screens for those.
+//
+// Commit 22.8 -- "VER FALTANTE" now opens this Page's own operational modal
+// (open_shortage_detail()) instead of routing straight to the native
+// Reporte de Faltante form: shows the same read-only detail plus a
+// "COMPRA / MERCANCÍA RECIBIDA" section wired to receive_shortage_purchase().
+// The native form is still one click away (open_shortage_detail()'s own
+// secondary action) -- this Page never stops being able to fall back to it,
+// it just isn't the first thing "VER FALTANTE" does anymore. Every
+// server-side rule (permissions, qty/rate validation, the accounting-account
+// safety check) lives entirely in api/jefe_bodega.py -- this file only
+// renders what the server already decided and disables its own submit
+// button while a request is in flight, exactly like page/clientes/
+// clientes.js's own dialogs already do; it is never the real security
+// boundary.
 fabergray_erp.JefeDeBodega = class JefeDeBodega {
 	constructor(page) {
 		this.page = page;
@@ -28,8 +42,8 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 		this.load_all();
 	}
 
-	call(method) {
-		return frappe.call({ method: this.method_prefix + method }).then((r) => r.message);
+	call(method, args) {
+		return frappe.call({ method: this.method_prefix + method, args: args || {} }).then((r) => r.message);
 	}
 
 	load_all() {
@@ -299,7 +313,7 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 
 		this.$body.find(".fg-shortage-card-btn").on("click", (e) => {
 			const name = $(e.currentTarget).closest(".fg-shortage-card").data("name");
-			frappe.set_route("Form", "Reporte de Faltante", name);
+			this.open_shortage_detail(name);
 		});
 
 		this.$body.find(".fg-active-row-btn").on("click", (e) => {
@@ -313,6 +327,196 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 			.on("click", () => frappe.set_route("List", "Reporte de Faltante"));
 		this.$body.find('[data-quick="inventory"]').on("click", () => frappe.set_route("List", "Bin"));
 		this.$body.find('[data-quick="warehouses"]').on("click", () => frappe.set_route("Tree", "Warehouse"));
+	}
+
+	// =====================================================================
+	// Commit 22.8 -- "VER FALTANTE": detalle + "COMPRA / MERCANCÍA RECIBIDA".
+	// Un solo Dialog operativo propio, con la Reporte de Faltante nativa
+	// siempre a un clic de distancia (secondary_action). Toda regla de
+	// negocio (permisos, validaciones, la cuenta contable) vive en
+	// api/jefe_bodega.py -- este Dialog solo refleja lo que el servidor ya
+	// decidió y deshabilita su propio botón mientras la request está en
+	// vuelo, igual que page/clientes/clientes.js.
+	// =====================================================================
+	open_shortage_detail(name) {
+		this.set_busy(true);
+		return this.call("get_shortage_purchase_status", { shortage_report: name })
+			.then((status) => this.render_shortage_receive_dialog(status))
+			.catch(() => {
+				// frappe.call() ya mostró su propio diálogo de error real.
+			})
+			.finally(() => this.set_busy(false));
+	}
+
+	render_shortage_receive_dialog(status) {
+		const total_html = (qty, rate) => `
+			<div class="fg-shortage-receive-total">
+				${format_qty(qty)} × ${frappe.format(rate, { fieldtype: "Currency" })}
+				= <strong>${frappe.format(qty * rate, { fieldtype: "Currency" })}</strong>
+			</div>
+		`;
+
+		const dialog = new frappe.ui.Dialog({
+			title: `${__("Faltante")} ${status.shortage_report}`,
+			fields: [
+				{ fieldtype: "HTML", fieldname: "info_html", options: this.render_shortage_info_html(status) },
+				{ fieldtype: "Section Break", label: __("COMPRA / MERCANCÍA RECIBIDA") },
+				{
+					fieldtype: "Float",
+					fieldname: "qty",
+					label: __("Cantidad recibida"),
+					reqd: 1,
+					onchange: () => refresh_total(),
+				},
+				{
+					fieldtype: "Currency",
+					fieldname: "purchase_rate",
+					label: __("Valor de compra unitario"),
+					reqd: 1,
+					onchange: () => refresh_total(),
+				},
+				{ fieldtype: "Column Break" },
+				{
+					// Commit 22.8, revisado: este flujo resuelve UN faltante
+					// específico -- el almacén nunca es editable aquí (evita
+					// recibir por accidente en un almacén distinto, p.ej.
+					// Devoluciones, mientras se cree estar resolviendo un
+					// faltante de Producto Terminado). Solo lectura, no se
+					// envía al servidor -- api/jefe_bodega.py siempre usa el
+					// warehouse del propio Reporte de Faltante y rechaza
+					// cualquier otro.
+					fieldtype: "Link",
+					fieldname: "warehouse",
+					label: __("Almacén destino"),
+					options: "Warehouse",
+					default: status.warehouse,
+					read_only: 1,
+				},
+				{ fieldtype: "Data", fieldname: "purchase_reference", label: __("Referencia de compra") },
+				{ fieldtype: "Small Text", fieldname: "note", label: __("Observación") },
+				{ fieldtype: "Section Break" },
+				{ fieldtype: "HTML", fieldname: "total_html", options: total_html(0, 0) },
+			],
+			primary_action_label: __("REGISTRAR EN INVENTARIO"),
+			primary_action: (values) => {
+				if (flt(values.qty) <= 0) {
+					frappe.msgprint(__("La cantidad recibida debe ser mayor que cero."));
+					return;
+				}
+				if (flt(values.purchase_rate) <= 0) {
+					frappe.msgprint(__("El valor de compra unitario debe ser mayor que cero."));
+					return;
+				}
+				if (flt(values.qty) > flt(status.remaining_qty)) {
+					frappe.msgprint(
+						__("La cantidad recibida supera el faltante pendiente ({0}).", [
+							format_qty(status.remaining_qty),
+						])
+					);
+					return;
+				}
+				dialog.disable_primary_action();
+				this.call("receive_shortage_purchase", {
+					shortage_report: status.shortage_report,
+					qty: values.qty,
+					purchase_rate: values.purchase_rate,
+					// warehouse deliberadamente NO se envía -- ver el
+					// comentario del campo "warehouse" arriba.
+					purchase_reference: values.purchase_reference || null,
+					note: values.note || null,
+				})
+					.then((result) => {
+						dialog.hide();
+						this.load_all(); // refresca KPIs/tarjetas en segundo plano
+						this.show_receipt_confirmation(result);
+					})
+					.catch(() => dialog.enable_primary_action());
+			},
+			secondary_action_label: __("VER FALTANTE (NATIVO)"),
+			secondary_action: () => {
+				dialog.hide();
+				frappe.set_route("Form", "Reporte de Faltante", status.shortage_report);
+			},
+		});
+
+		const refresh_total = () => {
+			const values = dialog.get_values(true) || {};
+			dialog.fields_dict.total_html.set_value(total_html(flt(values.qty), flt(values.purchase_rate)));
+		};
+
+		dialog.$wrapper.addClass("fg-shortage-receive-dialog");
+		dialog.show();
+	}
+
+	render_shortage_info_html(status) {
+		const pedido = status.sales_order
+			? `${__("Pedido")} #${frappe.utils.escape_html(status.sales_order)}`
+			: __("Sin pedido asociado");
+		const alistamiento = status.pick_list ? frappe.utils.escape_html(status.pick_list) : "—";
+		const progreso =
+			status.received_qty > 0
+				? `
+					<div class="fg-shortage-receive-progress">
+						<span>${__("Solicitado")}: ${format_qty(status.qty_faltante)}</span>
+						<span>${__("Recibido para este faltante")}: ${format_qty(status.received_qty)}</span>
+						<span>${__("Pendiente")}: ${format_qty(status.remaining_qty)}</span>
+					</div>
+				`
+				: "";
+
+		return `
+			<div class="fg-shortage-receive-info">
+				${this._info_row(__("Producto"), status.item_name)}
+				${this._info_row(__("Item Code"), status.item_code)}
+				${this._info_row(__("Pedido"), pedido, true)}
+				${this._info_row(__("Lista de Alistamiento"), alistamiento, true)}
+				${this._info_row(__("Almacén"), status.warehouse)}
+				${this._info_row(__("Cantidad solicitada"), format_qty(status.qty_solicitada), true)}
+				${this._info_row(__("Cantidad disponible"), format_qty(status.qty_disponible), true)}
+				${this._info_row(__("Cantidad faltante"), format_qty(status.qty_faltante), true)}
+				${this._info_row(__("Motivo"), status.shortage_reason || "—")}
+				${progreso}
+			</div>
+		`;
+	}
+
+	show_receipt_confirmation(result) {
+		const dialog = new frappe.ui.Dialog({
+			title: __("Compra registrada correctamente"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "confirm_html",
+					options: `
+						<div class="fg-shortage-receive-info">
+							${this._info_row(__("Producto"), result.item_name)}
+							${this._info_row(__("Item Code"), result.item_code)}
+							${this._info_row(__("Cantidad recibida"), format_qty(result.qty))}
+							${this._info_row(__("Precio unitario"), frappe.format(result.purchase_rate, { fieldtype: "Currency" }))}
+							${this._info_row(__("Total"), frappe.format(result.amount, { fieldtype: "Currency" }))}
+							${this._info_row(__("Movimiento"), result.stock_entry)}
+							${this._info_row(__("Stock actual"), format_qty(result.current_stock))}
+							${this._info_row(__("Faltante pendiente"), format_qty(result.remaining_qty))}
+							${this._info_row(__("Estado"), result.status)}
+						</div>
+					`,
+				},
+			],
+			primary_action_label: __("VER MOVIMIENTO"),
+			primary_action: () => {
+				dialog.hide();
+				frappe.set_route("Form", "Stock Entry", result.stock_entry);
+			},
+			secondary_action_label: __("VOLVER AL DASHBOARD"),
+			secondary_action: () => dialog.hide(),
+		});
+		dialog.$wrapper.addClass("fg-shortage-receive-dialog");
+		dialog.show();
+	}
+
+	_info_row(label, value, already_safe) {
+		const safe_value = already_safe ? value : frappe.utils.escape_html(value == null ? "—" : value);
+		return `<div class="fg-shortage-receive-info-row"><span>${label}</span><strong>${safe_value}</strong></div>`;
 	}
 };
 

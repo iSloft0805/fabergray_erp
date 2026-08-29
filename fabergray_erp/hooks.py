@@ -261,8 +261,11 @@ fixtures = [
 		# matched unrelated, pre-existing Custom DocPerm rows granted to
 		# System Manager by other ERPNext localizations (UAE VAT/South
 		# Africa VAT) that have nothing to do with this app -- scoping by
-		# `parent` too keeps this export to exactly the 4 doctypes this
-		# commit actually grants.
+		# `parent` too keeps this export to exactly the doctypes this
+		# app actually grants System Manager on.
+		#
+		# Commit 22.8 -- "Stock Entry" added: same reasoning, for the
+		# Material Receipt flow behind receive_shortage_purchase().
 		"dt": "Custom DocPerm",
 		"prefix": "system_manager",
 		"filters": [
@@ -270,7 +273,15 @@ fixtures = [
 			[
 				"parent",
 				"in",
-				["Item", "Bin", "Item Price", "Stock Ledger Entry", "Stock Reconciliation", "Warehouse"],
+				[
+					"Item",
+					"Bin",
+					"Item Price",
+					"Stock Ledger Entry",
+					"Stock Reconciliation",
+					"Warehouse",
+					"Stock Entry",
+				],
 			],
 		],
 	},
@@ -301,15 +312,32 @@ fixtures = [
 		# there would have silently masked "Stock Manager"'s native full
 		# access (39 real users on this site). Replicated field-for-field
 		# from stock_reconciliation.json's own "Stock Manager" row.
+		#
+		# Commit 22.8 -- same incident, same fix, for Stock Entry (the
+		# Material Receipt flow behind receive_shortage_purchase()): zero
+		# Custom DocPerm rows before this commit, real native access for
+		# Stock User/Manufacturing User/Manufacturing Manager/Stock
+		# Manager (stock_entry.json's own shipped permissions), replicated
+		# field-for-field the same way. "Manufacturing User"/"Manufacturing
+		# Manager" added to the role list here (not needed by the three
+		# doctypes above, which have no native grant for either).
 		"dt": "Custom DocPerm",
 		"prefix": "native_restore",
 		"filters": [
 			[
 				"role",
 				"in",
-				["Sales Master Manager", "Purchase Master Manager", "Stock User", "Accounts Manager", "Stock Manager"],
+				[
+					"Sales Master Manager",
+					"Purchase Master Manager",
+					"Stock User",
+					"Accounts Manager",
+					"Stock Manager",
+					"Manufacturing User",
+					"Manufacturing Manager",
+				],
 			],
-			["parent", "in", ["Item Price", "Stock Ledger Entry", "Stock Reconciliation"]],
+			["parent", "in", ["Item Price", "Stock Ledger Entry", "Stock Reconciliation", "Stock Entry"]],
 		],
 	},
 	{
@@ -334,6 +362,11 @@ fixtures = [
 					# free text captured on the doc that carries the actual
 					# stock movement (native mechanism, no custom doctype).
 					"fg_adjustment_reason",
+					# Commit 22.8 -- Stock Entry (Material Receipt) <->
+					# Reporte de Faltante traceability. See
+					# api/jefe_bodega.py's receive_shortage_purchase().
+					"fg_shortage_report",
+					"fg_purchase_reference",
 				],
 			]
 		],

@@ -263,6 +263,43 @@ class TestWorld:
 		doc.insert()
 		return self._track(doc)
 
+	def stock_difference_account(self, account_name=None):
+		"""A throwaway Account (account_type="Stock Adjustment", root_type=
+		"Expense", is_group=0) under this company's real "5 - Gastos - FG"
+		group -- Commit 22.8's own audit found this site's real chart of
+		accounts has no Item Default/Item Group Default/Company.
+		stock_adjustment_account resolving to anything for Stock Entry's own
+		Difference Account requirement (validate_difference_account(),
+		stock_entry.py), so a test exercising a successful
+		receive_shortage_purchase() needs one of its own -- exactly the same
+		gap temporary_opening_account() above already documents for Stock
+		Reconciliation's Opening Stock case, just Stock Entry's own account
+		type this time. Deliberately account_type="Stock Adjustment", not
+		"Stock" or "Temporary": Stock Entry's own validate_difference_account()
+		explicitly REJECTS an account_type="Stock" Difference Account
+		(confirmed live -- "the Difference Account must not be a Stock type
+		account"), and fixtures.STOCK_ADJUSTMENT_ACCOUNT above (account_type=
+		"Stock", used successfully for Stock Reconciliation, which has no such
+		restriction) fails here for exactly that reason.
+
+		account_name defaults to a fresh, unique name per call (same
+		frappe.generate_hash reasoning as temporary_opening_account() above)."""
+		if not account_name:
+			account_name = f"FG8 Test Stock Adjustment {frappe.generate_hash(length=6)}"
+		doc = frappe.get_doc(
+			{
+				"doctype": "Account",
+				"account_name": account_name,
+				"parent_account": "5 - Gastos - FG",
+				"company": COMPANY,
+				"account_type": "Stock Adjustment",
+				"root_type": "Expense",
+				"is_group": 0,
+			}
+		)
+		doc.insert()
+		return self._track(doc)
+
 	# -- Manufacturing (Commit 12) -------------------------------------------
 
 	def bom_for(self, item_code, raw_material_item_code, qty=1, rate=10):

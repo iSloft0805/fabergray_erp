@@ -165,6 +165,62 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Commit 22.8 -- "VER FALTANTE" / "COMPRA RECIBIDA" Dialogs (frappe.ui.  */
+/* Dialog re-skin) -- se renderizan fuera de .fg-jefe-bodega (appended a */
+/* <body>), por eso estas reglas van sin ese prefijo, igual que          */
+/* .fg-clientes-form-dialog en page/clientes/clientes.css.               */
+/* ------------------------------------------------------------------ */
+.fg-shortage-receive-dialog .modal-dialog {
+	max-width: 560px;
+}
+
+.fg-shortage-receive-info {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.fg-shortage-receive-info-row {
+	display: flex;
+	align-items: baseline;
+	justify-content: space-between;
+	gap: 12px;
+	font-size: 0.86rem;
+	border-bottom: 1px solid var(--fg-border);
+	padding-bottom: 6px;
+}
+
+.fg-shortage-receive-info-row span {
+	color: var(--fg-text-muted);
+}
+
+.fg-shortage-receive-info-row strong {
+	color: var(--fg-text);
+	text-align: right;
+}
+
+.fg-shortage-receive-progress {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 14px;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-md);
+	padding: 10px 14px;
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+	margin-top: 4px;
+}
+
+.fg-shortage-receive-total {
+	background: var(--fg-primary-tint);
+	border-radius: var(--fg-radius-md);
+	padding: 12px 14px;
+	font-size: 0.94rem;
+	color: var(--fg-text);
+	text-align: center;
+}
+
+/* ------------------------------------------------------------------ */
 /* Responsive -- desktop first, then tablet (~860px), then mobile (~640px),  */
 /* matching the same breakpoints already approved for /app/bodega.     */
 /* ------------------------------------------------------------------ */

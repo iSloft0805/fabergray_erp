@@ -154,5 +154,31 @@
   "share": 0,
   "submit": 0,
   "write": 0
+ },
+ {
+  "amend": 0,
+  "cancel": 0,
+  "create": 1,
+  "delete": 0,
+  "docstatus": 0,
+  "doctype": "Custom DocPerm",
+  "email": 0,
+  "export": 1,
+  "if_owner": 0,
+  "impersonate": 0,
+  "import": 0,
+  "mask": 0,
+  "modified": "2026-08-30 02:09:21.954917",
+  "name": "8m3ktm3kmp",
+  "parent": "Stock Entry",
+  "permlevel": 0,
+  "print": 0,
+  "read": 1,
+  "report": 0,
+  "role": "System Manager",
+  "select": 0,
+  "share": 0,
+  "submit": 1,
+  "write": 1
  }
 ]
