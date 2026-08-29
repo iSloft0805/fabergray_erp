@@ -110,6 +110,37 @@
 	letter-spacing: 0.04em;
 }
 
+/* Commit 22.9 -- "<- Jefe de Bodega" / "<- <módulo>" breadcrumb button, in
+   the header brand bar of every Page that navigates from/back to Jefe de
+   Bodega's quick-access modules (jefe-pick-lists, centro-faltantes,
+   almacenes) and now also Inventario's own "VOLVER A JEFE DE BODEGA". One
+   shared rule (not duplicated per Page) since the button itself, unlike
+   the rest of each header, is genuinely identical everywhere it appears. */
+.fg-shell .fg-back-btn {
+	appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	min-height: 36px;
+	padding: 0 12px;
+	margin-right: 4px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-pill);
+	background: var(--fg-card);
+	color: var(--fg-text-muted);
+	font-size: 0.8rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition), color var(--fg-transition);
+	white-space: nowrap;
+}
+
+.fg-shell .fg-back-btn:hover {
+	background: var(--fg-bg);
+	border-color: var(--fg-primary);
+	color: var(--fg-primary);
+}
+
 .fg-shell .fg-header-user {
 	display: flex;
 	align-items: center;

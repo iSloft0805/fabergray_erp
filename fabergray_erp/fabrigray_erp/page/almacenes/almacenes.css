@@ -1,0 +1,297 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Commit 22.9 -- Page Almacenes. Generic shell/KPI/pagination primitives
+ * from fg_shell.css -- this file only styles what's new: KPI colors, the
+ * Warehouse cards, and the per-Warehouse item breakdown list. Scoped under
+ * .fg-almacenes.
+ */
+
+.fg-almacenes .fg-body {
+	display: flex;
+	flex-direction: column;
+}
+
+.fg-almacenes.fg-shell .fg-kpis--wh {
+	grid-template-columns: repeat(4, 1fr);
+}
+
+.fg-almacenes .fg-kpi--wh-activos {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-almacenes .fg-kpi--wh-productos {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+.fg-almacenes .fg-kpi--wh-unidades {
+	--fg-kpi-color: var(--fg-warning-dark);
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-almacenes .fg-kpi--wh-valor {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Tarjetas de Warehouse                                                 */
+/* ------------------------------------------------------------------ */
+.fg-almacenes .fg-wh-cards {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 16px;
+}
+
+.fg-almacenes .fg-wh-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 18px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.fg-almacenes .fg-wh-card-title {
+	font-weight: 800;
+	font-size: 0.98rem;
+	letter-spacing: 0.02em;
+	color: var(--fg-text);
+}
+
+.fg-almacenes .fg-wh-card-name {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	margin-bottom: 6px;
+}
+
+.fg-almacenes .fg-wh-card-stats {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	background: var(--fg-bg);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 10px 14px;
+	margin-bottom: 8px;
+}
+
+.fg-almacenes .fg-wh-card-stat {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	font-size: 0.84rem;
+}
+
+.fg-almacenes .fg-wh-card-stat-label {
+	color: var(--fg-text-muted);
+}
+
+.fg-almacenes .fg-wh-card-stat-value {
+	font-weight: 700;
+	color: var(--fg-text);
+}
+
+/* ------------------------------------------------------------------ */
+/* Detalle de un Warehouse                                               */
+/* ------------------------------------------------------------------ */
+.fg-almacenes .fg-wh-detail-summary {
+	display: flex;
+	gap: 16px;
+	margin-bottom: 16px;
+}
+
+.fg-almacenes .fg-wh-detail-stat {
+	flex: 1 1 auto;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 14px 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.fg-almacenes .fg-wh-detail-stat span {
+	font-size: 0.7rem;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	color: var(--fg-text-muted);
+}
+
+.fg-almacenes .fg-wh-detail-stat strong {
+	font-size: 1.15rem;
+	color: var(--fg-text);
+}
+
+.fg-almacenes .fg-wh-search-wrap {
+	position: relative;
+	max-width: 420px;
+	margin-bottom: 16px;
+}
+
+.fg-almacenes .fg-wh-search-icon {
+	position: absolute;
+	left: 12px;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 16px;
+	height: 16px;
+	color: var(--fg-text-faint);
+	pointer-events: none;
+}
+
+.fg-almacenes .fg-wh-search-input {
+	width: 100%;
+	min-height: 44px;
+	padding: 0 12px 0 36px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	font-size: 0.88rem;
+	background: var(--fg-card);
+	color: var(--fg-text);
+}
+
+.fg-almacenes .fg-wh-item-rows {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 12px;
+}
+
+.fg-almacenes .fg-wh-item-row {
+	display: grid;
+	grid-template-columns: 110px 1fr 140px 120px;
+	align-items: center;
+	gap: 14px;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 12px 16px;
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition);
+}
+
+.fg-almacenes .fg-wh-item-row:hover {
+	background: var(--fg-bg);
+	border-color: var(--fg-primary);
+}
+
+.fg-almacenes .fg-wh-item-code {
+	font-weight: 700;
+	font-size: 0.84rem;
+	color: var(--fg-primary);
+}
+
+.fg-almacenes .fg-wh-item-name {
+	font-size: 0.86rem;
+	color: var(--fg-text);
+}
+
+.fg-almacenes .fg-wh-item-group {
+	font-size: 0.74rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-almacenes .fg-wh-item-qty {
+	font-weight: 700;
+	font-size: 0.88rem;
+	color: var(--fg-text);
+	text-align: right;
+}
+
+.fg-almacenes .fg-wh-item-rate {
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+	text-align: right;
+}
+
+.fg-almacenes .fg-wh-item-pagination {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 10px;
+	padding-top: 10px;
+	border-top: 1px solid var(--fg-border);
+}
+
+.fg-almacenes .fg-wh-pagination-info {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-almacenes .fg-wh-pagination-controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-almacenes .fg-wh-pagination-btn {
+	appearance: none;
+	width: 40px;
+	height: 40px;
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+.fg-almacenes .fg-wh-pagination-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.fg-almacenes .fg-wh-pagination-page {
+	font-weight: 700;
+	font-size: 0.86rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive                                                            */
+/* ------------------------------------------------------------------ */
+@media (max-width: 860px) {
+	.fg-almacenes.fg-shell .fg-kpis--wh {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-almacenes .fg-wh-cards {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-almacenes .fg-wh-item-row {
+		grid-template-columns: 90px 1fr 100px;
+	}
+
+	.fg-almacenes .fg-wh-item-rate {
+		display: none;
+	}
+}
+
+@media (max-width: 640px) {
+	.fg-almacenes.fg-shell .fg-kpis--wh {
+		grid-template-columns: 1fr 1fr;
+	}
+
+	.fg-almacenes .fg-wh-cards {
+		grid-template-columns: 1fr;
+	}
+
+	.fg-almacenes .fg-wh-detail-summary {
+		flex-direction: column;
+	}
+
+	.fg-almacenes .fg-wh-item-row {
+		grid-template-columns: 1fr;
+		gap: 4px;
+	}
+}

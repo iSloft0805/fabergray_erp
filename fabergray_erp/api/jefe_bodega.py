@@ -57,18 +57,94 @@ outcome (report.status, received_qty) once it proceeds.
 
 import frappe
 from frappe import _
-from frappe.utils import flt
+from frappe.utils import cint, flt, nowdate
 
+from erpnext import get_default_company
 from erpnext.setup.doctype.item_group.item_group import get_item_group_defaults
 
-from fabergray_erp.api.bodega import OPEN_SHORTAGE_STATUSES, _require_login, get_queue
-from fabergray_erp.api.inventario import PRICE_LIST_BUYING, _upsert_item_price
+from fabergray_erp.api.bodega import (
+	OPEN_SHORTAGE_STATUSES,
+	_open_shortage_pick_lists,
+	_pick_list_bucket,
+	_require_login,
+	get_queue,
+)
+from fabergray_erp.api.inventario import PRICE_LIST_BUYING, _selling_rates, _upsert_item_price
+from fabergray_erp.sales_order_naming import root_commercial_name
 
 RESOLVED_STATUS = "Resuelto"
 IN_PROGRESS_STATUS = "En Proceso"
+OPEN_STATUS = "Abierto"
 MATERIAL_RECEIPT_PURPOSE = "Material Receipt"
 
 DEFAULT_RESOLUTION_NOTE = _("Faltante completado mediante recepción de compra.")
+
+#: Commit 22.9 -- Page Jefe de Bodega's 4 quick-access modules
+#: (jefe-pick-lists / centro-faltantes / almacenes). Bounded fetch for the
+#: Python-side status filter in get_pick_list_history() (status is not a
+#: plain column -- see _pick_list_bucket()), same reasoning as api.clientes'
+#: own INCOMPLETE_FETCH_CAP for its "incomplete" tab.
+PICK_LIST_HISTORY_FETCH_CAP = 1000
+PICK_LIST_HISTORY_STATES = ("listos", "con_faltantes", "en_alistamiento", "pendientes")
+
+#: Commit 22.9 -- server-side page_length ceilings, independent of
+#: whatever a caller asks for: a request for 1000000 rows is silently
+#: clamped, never honored literally. Warehouse items gets a wider ceiling
+#: than the other two (a single Warehouse's own catalog, the same
+#: reasoning PICK_LIST_HISTORY_FETCH_CAP above already documents for a
+#: different bounded-fetch case).
+MAX_PAGE_LENGTH = 100
+MAX_PAGE_LENGTH_WAREHOUSE_ITEMS = 200
+
+
+def _clamp_pagination(start, page_length, ceiling):
+	"""start/page_length, sanitized the same way for every paginated
+	endpoint in this module: never negative, never above `ceiling`
+	regardless of what the caller asked for."""
+	start = max(cint(start), 0)
+	page_length = cint(page_length) or ceiling
+	page_length = min(max(page_length, 1), ceiling)
+	return start, page_length
+
+
+def _validate_date_param(value, label):
+	"""Server-side date validation for date_from/date_to -- a malformed
+	value must produce a clear functional error here, never an
+	unparameterized string reaching the query builder to fail as a raw
+	DB error later. frappe.utils.getdate() already raises for anything
+	that isn't a real date; normalized back to "YYYY-MM-DD" so every
+	caller (a datetime.date, "2026-01-01", or frappe's own datepicker
+	string) produces the exact same filter value."""
+	if not value:
+		return None
+	try:
+		return frappe.utils.getdate(value).isoformat()
+	except Exception:
+		frappe.throw(_("Fecha inválida para {0}: {1}").format(label, value))
+
+
+def _validate_own_company_warehouse(warehouse, company):
+	"""Server-side Warehouse validation shared by get_pick_list_history()
+	and get_warehouse_items(): a Warehouse belonging to another Company
+	(this site's own other, demo companies -- see get_warehouse_summary()'s
+	own docstring) is rejected outright, the same way an invalid name is --
+	never silently ignored, never trusted just because the caller passed
+	something that exists."""
+	if warehouse and not frappe.db.exists("Warehouse", {"name": warehouse, "company": company}):
+		frappe.throw(_("Almacén inválido: {0}").format(warehouse))
+PICK_LIST_HISTORY_FIELDS = [
+	"name",
+	"docstatus",
+	"status",
+	"purpose",
+	"parent_warehouse",
+	"customer",
+	"fg_started_by",
+	"fg_started_on",
+	"modified",
+	"modified_by",
+	"creation",
+]
 
 
 # -- Commit 22.8: named exceptions, same convention api/inventario.py's own
@@ -592,4 +668,582 @@ def receive_shortage_purchase(
 		"remaining_qty": remaining_qty,
 		"status": report.status,
 		"receipts": receipts,
+	}
+
+
+# ---------------------------------------------------------------------------
+# Commit 22.9 -- Módulos visuales de Jefe de Bodega: Pick Lists (resumen
+# operativo/historial), Reportes de Faltante (centro de faltantes/compras),
+# Almacenes. Inventario reuses /app/inventario as-is (api/inventario.py),
+# no new endpoint for it. Every list here is real, DB-level paginated
+# (limit_start/limit_page_length) except where the filter itself isn't a
+# plain column (get_pick_list_history()'s own `status` -- see its
+# docstring) -- and every per-row derived field (shortage flags, line
+# counts/qty sums, received_qty, selling rates) is resolved with ONE
+# batched query for the whole page, never one per row -- same "bulk read,
+# never N+1" rule get_queue()/api.inventario.py's own docstrings already
+# state as a standing rule for this app.
+# ---------------------------------------------------------------------------
+
+
+@frappe.whitelist()
+def get_pick_list_history_summary():
+	"""KPI row for the Pick Lists view: Total hoy / Listos / Con faltantes /
+	En alistamiento / Completados -- always TODAY, independent of
+	get_pick_list_history()'s own filters (a separate, always-current-day
+	snapshot, the same relationship api.clientes' get_dashboard_summary()
+	has to its own search_customers()). Uses the exact same
+	_pick_list_bucket() rule get_pick_list_history() uses below -- never a
+	parallel definition of "con faltantes"/"en alistamiento".
+
+	Completados: of today's "listos" (docstatus==1), the ones whose native
+	`status` is "Completed" -- Pick List's own field (pick_list.py's
+	get_transfer_status()/update_status()), never a status this module
+	invents. For a purpose="Delivery" Pick List (this app's only kind),
+	ERPNext derives it from the linked Sales Order's own delivery
+	tracking -- if this app's flow doesn't yet reach that (no Delivery
+	Note wired up), this count is honestly 0, not fabricated."""
+	_require_login()
+	frappe.has_permission("Pick List", "read", throw=True)
+
+	today = nowdate()
+	rows = frappe.get_list(
+		"Pick List",
+		filters=[
+			["docstatus", "in", [0, 1]],
+			["company", "=", get_default_company()],
+			["creation", ">=", f"{today} 00:00:00"],
+			["creation", "<=", f"{today} 23:59:59"],
+		],
+		fields=["name", "docstatus", "status", "fg_started_by"],
+		limit_page_length=0,
+	)
+
+	shortage_pick_lists = _open_shortage_pick_lists([r.name for r in rows])
+
+	counts = {"listos": 0, "con_faltantes": 0, "en_alistamiento": 0, "pendientes": 0}
+	completados = 0
+	for pl in rows:
+		bucket = _pick_list_bucket(pl, shortage_pick_lists)
+		counts[bucket] += 1
+		if bucket == "listos" and pl.status == "Completed":
+			completados += 1
+
+	return {
+		"total_hoy": len(rows),
+		"listos": counts["listos"],
+		"con_faltantes": counts["con_faltantes"],
+		"en_alistamiento": counts["en_alistamiento"],
+		"completados": completados,
+	}
+
+
+def _pick_lists_matching_sales_order(txt):
+	"""Pick List names whose own Pick List Item rows reference a Sales
+	Order matching `txt` -- lets "buscar por Pedido" work even though
+	`sales_order` lives only on the child table, not on Pick List itself.
+	frappe.get_all (child table, no permission model of its own -- exactly
+	get_queue()'s own documented reasoning): this only narrows a filter,
+	the actual Pick List fetch afterwards is still a permission-checked
+	frappe.get_list()."""
+	if not txt:
+		return []
+	return frappe.get_all(
+		"Pick List Item", filters={"sales_order": ["like", f"%{txt}%"]}, pluck="parent", distinct=True
+	)
+
+
+@frappe.whitelist()
+def get_pick_list_history(status=None, date_from=None, date_to=None, warehouse=None, txt=None, start=0, page_length=20):
+	"""Paginated Pick List history for Jefe de Bodega's "resumen operativo"
+	-- draft AND submitted Pick Lists (never only the currently-open queue
+	get_queue() shows), filtered by creation date range/Warehouse/free
+	text, bucketed with the exact same _pick_list_bucket() rule get_queue()
+	itself uses (imported from api.bodega, never re-derived).
+
+	status: one of PICK_LIST_HISTORY_STATES, or falsy/unrecognized for
+	"todos" (same convention as api.clientes.search_customers()'s own
+	status handling). Since bucket membership depends on a linked Reporte
+	de Faltante (not a plain Pick List column), filtering by it can't be
+	pushed to the database the way date/warehouse/txt are: this fetches up
+	to PICK_LIST_HISTORY_FETCH_CAP date/warehouse/txt-matching rows,
+	buckets them, filters by status and paginates the result in Python --
+	the exact same bounded-fetch-then-filter pattern api.clientes'
+	"incomplete" tab already uses for an equivalent problem (a status with
+	no native column). Without a status filter, pagination is a plain,
+	efficient DB-level limit_start/limit_page_length query instead.
+
+	Per-row item_count/qty_requerida/qty_alistada/shortage_count/
+	commercial_name are resolved with ONE batched Pick List Item query and
+	ONE batched Reporte de Faltante count query, scoped to only the
+	page actually being returned -- never one query per Pick List."""
+	_require_login()
+	frappe.has_permission("Pick List", "read", throw=True)
+
+	start, page_length = _clamp_pagination(start, page_length, MAX_PAGE_LENGTH)
+	txt = (txt or "").strip()
+	status = (status or "").strip()
+	if status not in PICK_LIST_HISTORY_STATES:
+		status = None
+
+	company = get_default_company()
+	_validate_own_company_warehouse(warehouse, company)
+	date_from = _validate_date_param(date_from, _("fecha desde"))
+	date_to = _validate_date_param(date_to, _("fecha hasta"))
+
+	filters = [["docstatus", "in", [0, 1]], ["company", "=", company]]
+	if date_from:
+		filters.append(["creation", ">=", f"{date_from} 00:00:00"])
+	if date_to:
+		filters.append(["creation", "<=", f"{date_to} 23:59:59"])
+	if warehouse:
+		filters.append(["parent_warehouse", "=", warehouse])
+
+	or_filters = None
+	if txt:
+		or_filters = [["name", "like", f"%{txt}%"], ["customer", "like", f"%{txt}%"]]
+		matching_by_so = _pick_lists_matching_sales_order(txt)
+		if matching_by_so:
+			or_filters.append(["name", "in", matching_by_so])
+
+	if status:
+		wide = frappe.get_list(
+			"Pick List",
+			filters=filters,
+			or_filters=or_filters,
+			fields=PICK_LIST_HISTORY_FIELDS,
+			order_by="creation desc",
+			limit_page_length=PICK_LIST_HISTORY_FETCH_CAP,
+		)
+		shortage_pick_lists = _open_shortage_pick_lists([r.name for r in wide])
+		matching = [r for r in wide if _pick_list_bucket(r, shortage_pick_lists) == status]
+		total = len(matching)
+		page_rows = matching[start : start + page_length]
+	else:
+		page_rows = frappe.get_list(
+			"Pick List",
+			filters=filters,
+			or_filters=or_filters,
+			fields=PICK_LIST_HISTORY_FIELDS,
+			order_by="creation desc",
+			limit_start=start,
+			limit_page_length=page_length,
+		)
+		total = len(
+			frappe.get_list("Pick List", filters=filters, or_filters=or_filters, pluck="name")
+		)
+		shortage_pick_lists = _open_shortage_pick_lists([r.name for r in page_rows])
+
+	names = [r.name for r in page_rows]
+
+	line_counts, qty_requerida, qty_alistada, sales_order_by_pick_list = {}, {}, {}, {}
+	if names:
+		for row in frappe.get_all(
+			"Pick List Item",
+			filters={"parent": ["in", names]},
+			fields=["parent", "sales_order", "stock_qty", "picked_qty"],
+		):
+			line_counts[row.parent] = line_counts.get(row.parent, 0) + 1
+			qty_requerida[row.parent] = qty_requerida.get(row.parent, 0) + flt(row.stock_qty)
+			qty_alistada[row.parent] = qty_alistada.get(row.parent, 0) + flt(row.picked_qty)
+			if row.sales_order and row.parent not in sales_order_by_pick_list:
+				sales_order_by_pick_list[row.parent] = row.sales_order
+
+	shortage_counts = {}
+	if names:
+		for row in frappe.get_list(
+			"Reporte de Faltante",
+			filters={"pick_list": ["in", names]},
+			fields=["pick_list", {"COUNT": "name", "as": "cnt"}],
+			group_by="pick_list",
+		):
+			shortage_counts[row.pick_list] = row.cnt
+
+	commercial_name_cache = {}
+
+	def _commercial_name(sales_order):
+		if not sales_order:
+			return None
+		if sales_order not in commercial_name_cache:
+			commercial_name_cache[sales_order] = root_commercial_name(sales_order)
+		return commercial_name_cache[sales_order]
+
+	results = []
+	for pl in page_rows:
+		sales_order = sales_order_by_pick_list.get(pl.name)
+		bucket = _pick_list_bucket(pl, shortage_pick_lists)
+		results.append(
+			{
+				"name": pl.name,
+				"docstatus": pl.docstatus,
+				"state": bucket,
+				"is_completed": bucket == "listos" and pl.status == "Completed",
+				"purpose": pl.purpose,
+				"parent_warehouse": pl.parent_warehouse,
+				"customer": pl.customer,
+				"sales_order": sales_order,
+				"commercial_name": _commercial_name(sales_order),
+				"item_count": line_counts.get(pl.name, 0),
+				"qty_requerida": qty_requerida.get(pl.name, 0.0),
+				"qty_alistada": qty_alistada.get(pl.name, 0.0),
+				"shortage_count": shortage_counts.get(pl.name, 0),
+				"fg_started_by": pl.fg_started_by,
+				"fg_started_on": pl.fg_started_on,
+				"modified": pl.modified,
+				"modified_by": pl.modified_by,
+			}
+		)
+
+	return {"pick_lists": results, "total": total}
+
+
+SHORTAGE_CENTER_STATUSES = (OPEN_STATUS, IN_PROGRESS_STATUS, RESOLVED_STATUS)
+
+
+@frappe.whitelist()
+def get_shortage_center_summary():
+	"""KPI row for the Centro de Faltantes: Faltantes abiertos / En
+	proceso / Compras recibidas hoy / Resueltos hoy. "Compras recibidas
+	hoy" counts submitted Material Receipt Stock Entries linked via
+	fg_shortage_report (Commit 22.8) with posting_date today -- the same
+	native relation get_shortage_center()/_bulk_received_qty() below use,
+	never a parallel count. "Resueltos hoy" uses `modified` as the closest
+	native proxy for "when it became Resuelto" (Reporte de Faltante has no
+	dedicated resolved_on field, and this app's own convention -- see
+	receive_shortage_purchase()'s docstring -- is to reuse a native field
+	rather than invent one for this)."""
+	_require_login()
+	frappe.has_permission("Reporte de Faltante", "read", throw=True)
+
+	abiertos = len(frappe.get_list("Reporte de Faltante", filters={"status": OPEN_STATUS}, pluck="name"))
+	en_proceso = len(
+		frappe.get_list("Reporte de Faltante", filters={"status": IN_PROGRESS_STATUS}, pluck="name")
+	)
+
+	today = nowdate()
+	resueltos_hoy = len(
+		frappe.get_list(
+			"Reporte de Faltante",
+			filters=[
+				["status", "=", RESOLVED_STATUS],
+				["modified", ">=", f"{today} 00:00:00"],
+				["modified", "<=", f"{today} 23:59:59"],
+			],
+			pluck="name",
+		)
+	)
+
+	compras_recibidas_hoy = 0
+	if frappe.has_permission("Stock Entry", "read"):
+		compras_recibidas_hoy = len(
+			frappe.get_list(
+				"Stock Entry",
+				filters=[
+					["purpose", "=", MATERIAL_RECEIPT_PURPOSE],
+					["docstatus", "=", 1],
+					["fg_shortage_report", "is", "set"],
+					["posting_date", "=", today],
+				],
+				pluck="name",
+			)
+		)
+
+	return {
+		"abiertos": abiertos,
+		"en_proceso": en_proceso,
+		"compras_recibidas_hoy": compras_recibidas_hoy,
+		"resueltos_hoy": resueltos_hoy,
+	}
+
+
+def _bulk_received_qty(report_names):
+	"""received_qty for many Reporte de Faltante at once -- one query to
+	Stock Entry (fg_shortage_report IN [...], docstatus=1) plus one to
+	Stock Entry Detail (child table, same "parent already permission-
+	filtered above" reasoning _shortage_receipts() and get_queue() both
+	already document), never one frappe.get_doc() per report the way
+	_shortage_receipts() does for a single report's own detail view (that
+	function stays as-is, unchanged, for get_shortage_purchase_status()
+	-- this is a separate, list-oriented aggregate, not a replacement)."""
+	if not report_names:
+		return {}
+	entries = frappe.get_list(
+		"Stock Entry",
+		filters={
+			"fg_shortage_report": ["in", report_names],
+			"purpose": MATERIAL_RECEIPT_PURPOSE,
+			"docstatus": 1,
+		},
+		fields=["name", "fg_shortage_report"],
+	)
+	if not entries:
+		return {}
+	entry_to_report = {e.name: e.fg_shortage_report for e in entries}
+	detail_rows = frappe.get_all(
+		"Stock Entry Detail", filters={"parent": ["in", list(entry_to_report)]}, fields=["parent", "qty"]
+	)
+	totals = {}
+	for row in detail_rows:
+		report_name = entry_to_report.get(row.parent)
+		if report_name:
+			totals[report_name] = totals.get(report_name, 0.0) + flt(row.qty)
+	return totals
+
+
+@frappe.whitelist()
+def get_shortage_center(status=None, txt=None, start=0, page_length=20):
+	"""Paginated Reporte de Faltante list for the Centro de Faltantes,
+	with received_qty/remaining_qty per row (Commit 22.8's own relation,
+	via _bulk_received_qty() -- never recomputed differently here).
+
+	status: "Abierto" | "En Proceso" | "Resuelto", or falsy/unrecognized
+	for "TODOS" -- a plain native column, so this is a real DB-level
+	filter+pagination, no bounded-fetch-then-filter needed (unlike Pick
+	List's own computed state)."""
+	_require_login()
+	frappe.has_permission("Reporte de Faltante", "read", throw=True)
+
+	start, page_length = _clamp_pagination(start, page_length, MAX_PAGE_LENGTH)
+	txt = (txt or "").strip()
+	status = status if status in SHORTAGE_CENTER_STATUSES else None
+
+	filters = {"status": status} if status else {}
+	or_filters = None
+	if txt:
+		or_filters = [
+			["name", "like", f"%{txt}%"],
+			["item_code", "like", f"%{txt}%"],
+			["sales_order", "like", f"%{txt}%"],
+		]
+
+	rows = frappe.get_list(
+		"Reporte de Faltante",
+		filters=filters,
+		or_filters=or_filters,
+		fields=[
+			"name",
+			"item_code",
+			"warehouse",
+			"sales_order",
+			"pick_list",
+			"pick_list_item",
+			"qty_solicitada",
+			"qty_disponible",
+			"qty_faltante",
+			"shortage_reason",
+			"status",
+			"reported_on",
+		],
+		order_by="reported_on desc",
+		limit_start=start,
+		limit_page_length=page_length,
+	)
+	total = len(frappe.get_list("Reporte de Faltante", filters=filters, or_filters=or_filters, pluck="name"))
+
+	names = [r.name for r in rows]
+	received_by_report = _bulk_received_qty(names) if frappe.has_permission("Stock Entry", "read") else {}
+
+	pick_list_cache = {}
+	results = []
+	for r in rows:
+		received_qty = received_by_report.get(r.name, 0.0)
+		remaining_qty = max(flt(r.qty_faltante) - received_qty, 0.0)
+		results.append(
+			{
+				"name": r.name,
+				"item_code": r.item_code,
+				"item_name": _resolve_item_name(r.pick_list, r.pick_list_item, r.item_code, pick_list_cache),
+				"warehouse": r.warehouse,
+				"sales_order": r.sales_order,
+				"qty_solicitada": r.qty_solicitada,
+				"qty_disponible": r.qty_disponible,
+				"qty_faltante": r.qty_faltante,
+				"shortage_reason": r.shortage_reason,
+				"status": r.status,
+				"received_qty": received_qty,
+				"remaining_qty": remaining_qty,
+			}
+		)
+
+	return {"reports": results, "total": total}
+
+
+@frappe.whitelist()
+def get_warehouse_summary():
+	"""Almacenes view: top metrics + one card per real, operational
+	Warehouse. Only non-group, non-disabled Warehouses -- a Warehouse
+	Group organizes the tree natively but is never itself an inventory
+	leaf (ERPNext never posts a Bin row against one). Scoped to this
+	site's own default Company (erpnext.get_default_company(), never a
+	hardcoded name) -- this site's database also carries other companies'
+	demo Warehouses (ERPNext's own stock demo fixtures, e.g. "Finished
+	Goods - _TC"), which are not real for Fabrigray and must never appear
+	here. Read-only: never writes Bin, one grouped query for the
+	per-Warehouse stats (never one per Warehouse), one grouped query for
+	the global distinct-item count (never summed from the per-Warehouse
+	rows, which would double-count an Item stocked in more than one
+	Warehouse)."""
+	_require_login()
+	frappe.has_permission("Warehouse", "read", throw=True)
+	frappe.has_permission("Bin", "read", throw=True)
+
+	company = get_default_company()
+
+	warehouses = frappe.get_list(
+		"Warehouse",
+		filters={"is_group": 0, "disabled": 0, "company": company},
+		fields=["name", "warehouse_name"],
+		order_by="warehouse_name asc",
+		limit_page_length=0,
+	)
+
+	bin_stats = frappe.get_list(
+		"Bin",
+		filters={"actual_qty": [">", 0], "company": company},
+		fields=[
+			"warehouse",
+			{"COUNT": "name", "as": "items_with_stock"},
+			{"SUM": "actual_qty", "as": "total_qty"},
+			{"SUM": "stock_value", "as": "total_value"},
+		],
+		group_by="warehouse",
+		limit_page_length=0,
+	)
+	stats_by_warehouse = {r.warehouse: r for r in bin_stats}
+
+	distinct_items_with_stock = len(
+		frappe.get_list(
+			"Bin",
+			filters={"actual_qty": [">", 0], "company": company},
+			fields=["item_code"],
+			group_by="item_code",
+			limit_page_length=0,
+		)
+	)
+
+	rows = []
+	total_units = 0.0
+	total_value = 0.0
+	for wh in warehouses:
+		stats = stats_by_warehouse.get(wh.name)
+		items_with_stock = cint(stats.items_with_stock) if stats else 0
+		total_qty = flt(stats.total_qty) if stats else 0.0
+		wh_value = flt(stats.total_value) if stats else 0.0
+		total_units += total_qty
+		total_value += wh_value
+		rows.append(
+			{
+				"name": wh.name,
+				"warehouse_name": wh.warehouse_name,
+				"items_with_stock": items_with_stock,
+				"total_qty": total_qty,
+			}
+		)
+
+	return {
+		"warehouses": rows,
+		"active_warehouses": len(warehouses),
+		"items_with_stock": distinct_items_with_stock,
+		"total_units": total_units,
+		# "Stock total distribuido" -- native Bin.stock_value (ERPNext's own
+		# qty * valuation_rate, never recomputed here), distinct from
+		# total_units (a quantity): the monetary value of inventory spread
+		# across every real Warehouse.
+		"total_stock_value": total_value,
+	}
+
+
+@frappe.whitelist()
+def get_warehouse_items(warehouse, txt=None, start=0, page_length=50):
+	"""Read-only per-Warehouse item breakdown for the Almacenes drill-down
+	-- api.inventario's own get_inventory_items() sums actual_qty across
+	every Warehouse (a different, already-answered question); this is the
+	one-Warehouse view it doesn't provide. Bin.actual_qty is read exactly
+	as ERPNext already computed it -- never recalculated, never written.
+	Items with actual_qty<=0 in this Warehouse are excluded by default
+	(qty=0 "no aparece", per this commit's own brief) -- there is no way
+	to ask for them through this endpoint, on purpose (a different,
+	broader question than "what does this Warehouse actually hold").
+
+	One Bin query (bounded by how many distinct Items this one Warehouse
+	actually holds, not the whole company's catalog) + one paginated Item
+	query + one bulk Item Price lookup for exactly the page being
+	returned -- never one query per Item.
+
+	Scoped to this site's own default Company exactly like
+	get_warehouse_summary() above (never just on that first screen): a
+	Warehouse belonging to another company (this site's other, demo
+	companies) is rejected outright, the same InvalidReceiptWarehouseError-
+	style guard -- get_warehouse_summary()'s own list only ever offers
+	real, own-Company Warehouses, but this endpoint is independently
+	callable with an arbitrary Warehouse name and must not trust that the
+	caller only ever passes what that list showed."""
+	_require_login()
+	company = get_default_company()
+	_validate_own_company_warehouse(warehouse, company)
+	if not warehouse:
+		frappe.throw(_("Almacén requerido."))
+
+	doc = frappe.get_doc("Warehouse", warehouse)
+	doc.check_permission("read")
+	frappe.has_permission("Bin", "read", throw=True)
+	frappe.has_permission("Item", "read", throw=True)
+
+	start, page_length = _clamp_pagination(start, page_length, MAX_PAGE_LENGTH_WAREHOUSE_ITEMS)
+	txt = (txt or "").strip()
+
+	bin_rows = frappe.get_list(
+		"Bin",
+		filters={"warehouse": warehouse, "actual_qty": [">", 0], "company": company},
+		fields=["item_code", "actual_qty"],
+		limit_page_length=0,
+	)
+	qty_by_item = {r.item_code: flt(r.actual_qty) for r in bin_rows}
+	item_codes = list(qty_by_item.keys())
+
+	if not item_codes:
+		return {
+			"warehouse": warehouse,
+			"warehouse_name": doc.warehouse_name,
+			"items": [],
+			"total": 0,
+			"total_products": 0,
+			"total_qty": 0.0,
+		}
+
+	filters = [["name", "in", item_codes]]
+	or_filters = [["item_code", "like", f"%{txt}%"], ["item_name", "like", f"%{txt}%"]] if txt else None
+
+	page_items = frappe.get_list(
+		"Item",
+		filters=filters,
+		or_filters=or_filters,
+		fields=["name as item_code", "item_name", "item_group", "stock_uom"],
+		order_by="item_code asc",
+		limit_start=start,
+		limit_page_length=page_length,
+	)
+	total = len(frappe.get_list("Item", filters=filters, or_filters=or_filters, pluck="name"))
+
+	rates = _selling_rates([r.item_code for r in page_items])
+
+	items = [
+		{
+			"item_code": r.item_code,
+			"item_name": r.item_name,
+			"item_group": r.item_group,
+			"stock_uom": r.stock_uom,
+			"actual_qty": qty_by_item.get(r.item_code, 0.0),
+			"selling_rate": rates.get(r.item_code),
+		}
+		for r in page_items
+	]
+
+	return {
+		"warehouse": warehouse,
+		"warehouse_name": doc.warehouse_name,
+		"items": items,
+		"total": total,
+		"total_products": len(item_codes),
+		"total_qty": sum(qty_by_item.values()),
 	}

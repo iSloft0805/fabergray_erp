@@ -273,7 +273,10 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 	}
 
 	// -------------------------------------------------------------------
-	// Accesos rápidos -- all standard Frappe/ERPNext views, nothing custom.
+	// Accesos rápidos. Commit 22.9 -- Pick Lists/Reportes de Faltante/
+	// Almacenes now open their own visual modules (see bind_events() below)
+	// instead of a native List/Tree view; Inventario opens the existing
+	// Page as-is (Commit 22.4/22.6), never a second inventory module.
 	// -------------------------------------------------------------------
 	render_quick_actions() {
 		return `
@@ -321,12 +324,14 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 			frappe.set_route("Form", "Pick List", name);
 		});
 
-		this.$body.find('[data-quick="pick_lists"]').on("click", () => frappe.set_route("List", "Pick List"));
-		this.$body
-			.find('[data-quick="shortage_reports"]')
-			.on("click", () => frappe.set_route("List", "Reporte de Faltante"));
-		this.$body.find('[data-quick="inventory"]').on("click", () => frappe.set_route("List", "Bin"));
-		this.$body.find('[data-quick="warehouses"]').on("click", () => frappe.set_route("Tree", "Warehouse"));
+		// Commit 22.9 -- los 4 accesos rápidos ahora abren sus propios módulos
+		// visuales (jefe-pick-lists/centro-faltantes/almacenes) en vez de las
+		// vistas nativas de lista/árbol; Inventario abre la Page ya existente
+		// (Commit 22.4/22.6), nunca un segundo módulo de inventario.
+		this.$body.find('[data-quick="pick_lists"]').on("click", () => frappe.set_route("jefe-pick-lists"));
+		this.$body.find('[data-quick="shortage_reports"]').on("click", () => frappe.set_route("centro-faltantes"));
+		this.$body.find('[data-quick="inventory"]').on("click", () => frappe.set_route("inventario"));
+		this.$body.find('[data-quick="warehouses"]').on("click", () => frappe.set_route("almacenes"));
 	}
 
 	// =====================================================================

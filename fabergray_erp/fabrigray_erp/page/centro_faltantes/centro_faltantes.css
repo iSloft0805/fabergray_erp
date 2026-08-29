@@ -1,0 +1,355 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Commit 22.9 -- Page Centro de Faltantes. Generic shell/KPI/card/
+ * pagination primitives from fg_shell.css -- this file only styles what's
+ * new: KPI colors, tabs, the Faltante cards and the Registrar Compra /
+ * Historial Dialogs. Scoped under .fg-centro-faltantes.
+ */
+
+.fg-centro-faltantes .fg-body {
+	display: flex;
+	flex-direction: column;
+}
+
+.fg-centro-faltantes.fg-shell .fg-kpis--cf {
+	grid-template-columns: repeat(4, 1fr);
+}
+
+.fg-centro-faltantes .fg-kpi--cf-abiertos {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+.fg-centro-faltantes .fg-kpi--cf-proceso {
+	--fg-kpi-color: var(--fg-warning-dark);
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-centro-faltantes .fg-kpi--cf-compras {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-centro-faltantes .fg-kpi--cf-resueltos {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Toolbar: tabs + buscador                                              */
+/* ------------------------------------------------------------------ */
+.fg-centro-faltantes .fg-cf-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-bottom: 18px;
+}
+
+.fg-centro-faltantes .fg-cf-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.fg-centro-faltantes .fg-cf-tab {
+	appearance: none;
+	min-height: 40px;
+	padding: 0 16px;
+	border-radius: var(--fg-radius-pill);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text-muted);
+	font-size: 0.8rem;
+	font-weight: 700;
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition), color var(--fg-transition);
+}
+
+.fg-centro-faltantes .fg-cf-tab.is-active {
+	background: var(--fg-primary);
+	border-color: var(--fg-primary);
+	color: #fff;
+}
+
+.fg-centro-faltantes .fg-cf-search-wrap {
+	position: relative;
+	flex: 1 1 280px;
+	min-width: 220px;
+	max-width: 420px;
+}
+
+.fg-centro-faltantes .fg-cf-search-icon {
+	position: absolute;
+	left: 12px;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 16px;
+	height: 16px;
+	color: var(--fg-text-faint);
+	pointer-events: none;
+}
+
+.fg-centro-faltantes .fg-cf-search-input {
+	width: 100%;
+	min-height: 42px;
+	padding: 0 12px 0 36px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	font-size: 0.86rem;
+	background: var(--fg-card);
+	color: var(--fg-text);
+}
+
+/* ------------------------------------------------------------------ */
+/* Tarjetas de faltante                                                  */
+/* ------------------------------------------------------------------ */
+.fg-centro-faltantes .fg-cf-cards {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 16px;
+	margin-bottom: 12px;
+}
+
+.fg-centro-faltantes .fg-cf-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-left: 4px solid var(--fg-danger);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.fg-centro-faltantes .fg-cf-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.fg-centro-faltantes .fg-cf-card-name {
+	font-size: 0.78rem;
+	font-weight: 700;
+	color: var(--fg-text-muted);
+}
+
+.fg-centro-faltantes .fg-cf-card-title {
+	font-weight: 700;
+	font-size: 0.98rem;
+	color: var(--fg-text);
+}
+
+.fg-centro-faltantes .fg-cf-card-meta {
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-centro-faltantes .fg-cf-card-qty {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 8px;
+	background: var(--fg-bg);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 10px 12px;
+	margin: 4px 0;
+}
+
+.fg-centro-faltantes .fg-cf-card-qty-label {
+	font-size: 0.66rem;
+	color: var(--fg-text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+}
+
+.fg-centro-faltantes .fg-cf-card-qty-value {
+	font-size: 1rem;
+	font-weight: 700;
+	color: var(--fg-text);
+}
+
+.fg-centro-faltantes .fg-cf-card-qty-value--success {
+	color: var(--fg-success-dark);
+}
+
+.fg-centro-faltantes .fg-cf-card-qty-value--danger {
+	color: var(--fg-danger);
+}
+
+.fg-centro-faltantes .fg-cf-card-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-top: 6px;
+}
+
+.fg-centro-faltantes .fg-cf-card-actions .fg-btn {
+	flex: 1 1 auto;
+}
+
+.fg-centro-faltantes .fg-status-pill--cf-abierto {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+.fg-centro-faltantes .fg-status-pill--cf-proceso {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-centro-faltantes .fg-status-pill--cf-resuelto {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+/* ------------------------------------------------------------------ */
+/* Paginación                                                            */
+/* ------------------------------------------------------------------ */
+.fg-centro-faltantes .fg-cf-pagination {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin-top: 6px;
+	padding-top: 10px;
+	border-top: 1px solid var(--fg-border);
+}
+
+.fg-centro-faltantes .fg-cf-pagination-info {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-centro-faltantes .fg-cf-pagination-controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-centro-faltantes .fg-cf-pagination-btn {
+	appearance: none;
+	width: 40px;
+	height: 40px;
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+.fg-centro-faltantes .fg-cf-pagination-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.fg-centro-faltantes .fg-cf-pagination-page {
+	font-weight: 700;
+	font-size: 0.86rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dialogs (Registrar Compra / Historial) -- fuera de .fg-centro-faltantes  */
+/* ------------------------------------------------------------------ */
+.fg-cf-dialog .modal-dialog {
+	max-width: 540px;
+}
+
+.fg-cf-dialog-info {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-bottom: 10px;
+}
+
+.fg-cf-dialog-row {
+	display: flex;
+	justify-content: space-between;
+	gap: 12px;
+	font-size: 0.86rem;
+	border-bottom: 1px solid var(--fg-border);
+	padding-bottom: 6px;
+}
+
+.fg-cf-dialog-row span {
+	color: var(--fg-text-muted);
+}
+
+.fg-cf-total {
+	background: var(--fg-primary-tint);
+	border-radius: var(--fg-radius-md);
+	padding: 12px 14px;
+	font-size: 0.94rem;
+	color: var(--fg-text);
+	text-align: center;
+}
+
+.fg-cf-history-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin-bottom: 12px;
+}
+
+.fg-cf-history-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	font-size: 0.86rem;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-sm);
+	padding: 8px 12px;
+}
+
+.fg-cf-history-entry {
+	font-weight: 700;
+	color: var(--fg-primary);
+}
+
+.fg-cf-history-date {
+	color: var(--fg-text-muted);
+	font-size: 0.8rem;
+}
+
+.fg-cf-history-total {
+	font-size: 0.9rem;
+	text-align: right;
+	border-top: 1px solid var(--fg-border);
+	padding-top: 8px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive                                                            */
+/* ------------------------------------------------------------------ */
+@media (max-width: 860px) {
+	.fg-centro-faltantes.fg-shell .fg-kpis--cf {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-centro-faltantes .fg-cf-cards {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+
+@media (max-width: 640px) {
+	.fg-centro-faltantes.fg-shell .fg-kpis--cf {
+		grid-template-columns: 1fr 1fr;
+	}
+
+	.fg-centro-faltantes .fg-cf-cards {
+		grid-template-columns: 1fr;
+	}
+
+	.fg-centro-faltantes .fg-cf-card-actions {
+		flex-direction: column;
+	}
+}

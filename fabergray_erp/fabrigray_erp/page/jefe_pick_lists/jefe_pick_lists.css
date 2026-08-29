@@ -1,0 +1,381 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Commit 22.9 -- Page Pick Lists (resumen operativo de Bodega). Generic
+ * shell/KPI/card/pagination primitives come from fg_shell.css -- this file
+ * only styles what's genuinely new: KPI colors, date presets, status tabs,
+ * the Pick List cards and the detail Dialog. Scoped under
+ * .fg-jefe-pick-lists.
+ */
+
+.fg-jefe-pick-lists .fg-body {
+	display: flex;
+	flex-direction: column;
+}
+
+.fg-jefe-pick-lists.fg-shell .fg-kpis--pl {
+	grid-template-columns: repeat(5, 1fr);
+}
+
+.fg-jefe-pick-lists .fg-kpi--pl-total {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-jefe-pick-lists .fg-kpi--pl-listos {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+.fg-jefe-pick-lists .fg-kpi--pl-faltantes {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+.fg-jefe-pick-lists .fg-kpi--pl-alistamiento {
+	--fg-kpi-color: var(--fg-warning-dark);
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-jefe-pick-lists .fg-kpi--pl-completados {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Filtros: presets de fecha, rango personalizado, tabs de estado,       */
+/* almacén, buscador.                                                    */
+/* ------------------------------------------------------------------ */
+.fg-jefe-pick-lists .fg-pl-filters {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 18px;
+	margin-bottom: 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.fg-jefe-pick-lists .fg-pl-presets,
+.fg-jefe-pick-lists .fg-pl-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.fg-jefe-pick-lists .fg-pl-preset,
+.fg-jefe-pick-lists .fg-pl-tab {
+	appearance: none;
+	min-height: 38px;
+	padding: 0 14px;
+	border-radius: var(--fg-radius-pill);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text-muted);
+	font-size: 0.8rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition), color var(--fg-transition);
+}
+
+.fg-jefe-pick-lists .fg-pl-preset:hover,
+.fg-jefe-pick-lists .fg-pl-tab:hover {
+	background: var(--fg-bg);
+}
+
+.fg-jefe-pick-lists .fg-pl-preset.is-active,
+.fg-jefe-pick-lists .fg-pl-tab.is-active {
+	background: var(--fg-primary);
+	border-color: var(--fg-primary);
+	color: #fff;
+}
+
+.fg-jefe-pick-lists .fg-pl-custom-range {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-jefe-pick-lists .fg-pl-custom-range input[type="date"] {
+	min-height: 38px;
+	padding: 0 10px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	color: var(--fg-text);
+}
+
+.fg-jefe-pick-lists .fg-pl-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.fg-jefe-pick-lists .fg-pl-warehouse-select {
+	min-height: 42px;
+	padding: 0 12px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	font-size: 0.84rem;
+}
+
+.fg-jefe-pick-lists .fg-pl-search-wrap {
+	position: relative;
+	flex: 1 1 260px;
+	min-width: 220px;
+}
+
+.fg-jefe-pick-lists .fg-pl-search-icon {
+	position: absolute;
+	left: 12px;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 16px;
+	height: 16px;
+	color: var(--fg-text-faint);
+	pointer-events: none;
+}
+
+.fg-jefe-pick-lists .fg-pl-search-input {
+	width: 100%;
+	min-height: 42px;
+	padding: 0 12px 0 36px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	font-size: 0.86rem;
+	background: var(--fg-card);
+	color: var(--fg-text);
+}
+
+/* ------------------------------------------------------------------ */
+/* Tarjetas de Pick List                                                 */
+/* ------------------------------------------------------------------ */
+.fg-jefe-pick-lists .fg-pl-cards {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 16px;
+	margin-bottom: 12px;
+}
+
+.fg-jefe-pick-lists .fg-pl-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.fg-jefe-pick-lists .fg-pl-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	margin-bottom: 4px;
+}
+
+.fg-jefe-pick-lists .fg-pl-card-name {
+	font-weight: 700;
+	font-size: 0.86rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-jefe-pick-lists .fg-pl-card-meta {
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-jefe-pick-lists .fg-pl-card-meta--muted {
+	color: var(--fg-text-faint);
+	font-style: italic;
+}
+
+.fg-jefe-pick-lists .fg-pl-card-qty {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 8px;
+	background: var(--fg-bg);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 10px 12px;
+	margin: 4px 0;
+}
+
+.fg-jefe-pick-lists .fg-pl-card-qty-label {
+	font-size: 0.66rem;
+	color: var(--fg-text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+}
+
+.fg-jefe-pick-lists .fg-pl-card-qty-value {
+	font-size: 1rem;
+	font-weight: 700;
+	color: var(--fg-text);
+}
+
+.fg-jefe-pick-lists .fg-pl-card-qty-value--danger {
+	color: var(--fg-danger);
+}
+
+.fg-jefe-pick-lists .fg-pl-card-btn {
+	margin-top: 6px;
+}
+
+/* Status pills -- verde/rojo/amarillo/gris, mismo lenguaje visual del resto */
+.fg-jefe-pick-lists .fg-status-pill--pl-listo {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-jefe-pick-lists .fg-status-pill--pl-faltante {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+.fg-jefe-pick-lists .fg-status-pill--pl-alistamiento {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-jefe-pick-lists .fg-status-pill--pl-pendiente {
+	background: var(--fg-bg);
+	color: var(--fg-text-muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* Paginación                                                            */
+/* ------------------------------------------------------------------ */
+.fg-jefe-pick-lists .fg-pl-pagination {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin-top: 6px;
+	padding-top: 10px;
+	border-top: 1px solid var(--fg-border);
+}
+
+.fg-jefe-pick-lists .fg-pl-pagination-info {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-jefe-pick-lists .fg-pl-pagination-controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-jefe-pick-lists .fg-pl-pagination-btn {
+	appearance: none;
+	width: 40px;
+	height: 40px;
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+.fg-jefe-pick-lists .fg-pl-pagination-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.fg-jefe-pick-lists .fg-pl-pagination-page {
+	font-weight: 700;
+	font-size: 0.86rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dialog de detalle (frappe.ui.Dialog re-skin) -- fuera de                */
+/* .fg-jefe-pick-lists, mismo criterio que .fg-clientes-form-dialog.        */
+/* ------------------------------------------------------------------ */
+.fg-pl-detail-dialog .modal-dialog {
+	max-width: 640px;
+}
+
+.fg-pl-detail-info {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-bottom: 14px;
+}
+
+.fg-pl-detail-row {
+	display: flex;
+	justify-content: space-between;
+	gap: 12px;
+	font-size: 0.84rem;
+	border-bottom: 1px solid var(--fg-border);
+	padding-bottom: 4px;
+}
+
+.fg-pl-detail-row span {
+	color: var(--fg-text-muted);
+}
+
+.fg-pl-detail-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.82rem;
+}
+
+.fg-pl-detail-table th {
+	text-align: left;
+	font-size: 0.7rem;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	color: var(--fg-text-muted);
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--fg-border);
+}
+
+.fg-pl-detail-table td {
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--fg-border);
+}
+
+.fg-pl-detail-row--shortage td {
+	background: var(--fg-danger-tint);
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive                                                            */
+/* ------------------------------------------------------------------ */
+@media (max-width: 860px) {
+	.fg-jefe-pick-lists.fg-shell .fg-kpis--pl {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-jefe-pick-lists .fg-pl-cards {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+
+@media (max-width: 640px) {
+	.fg-jefe-pick-lists.fg-shell .fg-kpis--pl {
+		grid-template-columns: 1fr 1fr;
+	}
+
+	.fg-jefe-pick-lists .fg-pl-cards {
+		grid-template-columns: 1fr;
+	}
+
+	.fg-jefe-pick-lists .fg-pl-toolbar {
+		flex-direction: column;
+	}
+}

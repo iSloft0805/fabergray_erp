@@ -225,15 +225,7 @@ def get_queue():
 	)
 
 	names = [pl.name for pl in pick_lists]
-	shortage_pick_lists = set()
-	if names:
-		shortage_pick_lists = set(
-			frappe.get_list(
-				"Reporte de Faltante",
-				filters={"pick_list": ["in", names], "status": ["in", OPEN_SHORTAGE_STATUSES]},
-				pluck="pick_list",
-			)
-		)
+	shortage_pick_lists = _open_shortage_pick_lists(names)
 
 	# Line count / sales_order per Pick List, for card display. Pick List Item is a
 	# child table with no permission model of its own -- access is governed entirely
@@ -276,16 +268,43 @@ def get_queue():
 			"sales_order": sales_order,
 			"commercial_name": _commercial_name(sales_order),
 		}
-		if pl.docstatus == 1:
-			buckets["listos"].append(entry)
-		elif pl.name in shortage_pick_lists:
-			buckets["con_faltantes"].append(entry)
-		elif pl.fg_started_by:
-			buckets["en_alistamiento"].append(entry)
-		else:
-			buckets["pendientes"].append(entry)
+		buckets[_pick_list_bucket(pl, shortage_pick_lists)].append(entry)
 
 	return buckets
+
+
+def _pick_list_bucket(pl, shortage_pick_lists):
+	"""The one place Pick List operational state is decided, for both this
+	function's own live queue and api.jefe_bodega's Pick List history view
+	(Commit 22.9 -- imported from there, never re-derived): docstatus==1
+	(submitted) -> "listos"; else an OPEN Reporte de Faltante linked (per
+	`shortage_pick_lists`, e.g. from _open_shortage_pick_lists() below) ->
+	"con_faltantes"; else fg_started_by set -> "en_alistamiento"; else ->
+	"pendientes". `pl` needs only .docstatus/.name/.fg_started_by."""
+	if pl.docstatus == 1:
+		return "listos"
+	if pl.name in shortage_pick_lists:
+		return "con_faltantes"
+	if pl.fg_started_by:
+		return "en_alistamiento"
+	return "pendientes"
+
+
+def _open_shortage_pick_lists(names):
+	"""Pick Lists (from `names`) that currently have an OPEN Reporte de
+	Faltante linked -- the exact relation get_queue() above already uses
+	inline; factored out here so api.jefe_bodega's Pick List history view
+	(Commit 22.9) can compute the same _pick_list_bucket() input without
+	re-deriving the query. One batched IN query, never one per Pick List."""
+	if not names:
+		return set()
+	return set(
+		frappe.get_list(
+			"Reporte de Faltante",
+			filters={"pick_list": ["in", names], "status": ["in", OPEN_SHORTAGE_STATUSES]},
+			pluck="pick_list",
+		)
+	)
 
 
 @frappe.whitelist()

@@ -61,7 +61,19 @@ fabergray_erp.Inventario = class Inventario {
 
 		this.$app = $('<div class="fg-shell fg-inventario">').appendTo(this.page.body);
 		this.render_shell();
-		this.load_dashboard();
+
+		// Commit 22.9 -- llegar aquí desde /app/almacenes con
+		// frappe.route_options.item_code abre directamente ese Item, en vez
+		// del dashboard. Consumido una sola vez (frappe.route_options se
+		// limpia inmediatamente) para no reabrir el mismo detalle si el
+		// usuario luego navega manualmente dentro de esta misma Page.
+		const preselected_item_code = frappe.route_options && frappe.route_options.item_code;
+		if (preselected_item_code) {
+			frappe.route_options = null;
+			this.open_detail(preselected_item_code);
+		} else {
+			this.load_dashboard();
+		}
 	}
 
 	// -------------------------------------------------------------------
@@ -91,9 +103,20 @@ fabergray_erp.Inventario = class Inventario {
 	// -------------------------------------------------------------------
 	render_shell() {
 		const fullname = frappe.session.user_fullname || frappe.session.user;
+		// Commit 22.9 -- "VOLVER A JEFE DE BODEGA": solo para quien realmente
+		// puede llegar a esa Page (mismo chequeo cosmético que
+		// can_edit_inventory() ya usa -- Page.roles del lado del servidor es
+		// la frontera real, esto es solo para no ofrecer un botón que llevaría
+		// a un 403).
+		const back_btn = can_edit_inventory()
+			? `<button type="button" class="fg-back-btn" title="${__("Jefe de Bodega")}">${icon(
+					"arrow-left"
+			  )} ${__("Jefe de Bodega")}</button>`
+			: "";
 		this.$app.html(`
 			<div class="fg-header">
 				<div class="fg-header-brand">
+					${back_btn}
 					<span class="fg-header-logo">FABRIGRAY</span>
 					<span class="fg-header-sep">|</span>
 					<span class="fg-header-title">${__("INVENTARIO")}</span>
@@ -110,6 +133,7 @@ fabergray_erp.Inventario = class Inventario {
 			<div class="fg-body"></div>
 		`);
 		this.$body = this.$app.find(".fg-body");
+		this.$app.find(".fg-back-btn").on("click", () => frappe.set_route("jefe-de-bodega"));
 		this.$app.find(".fg-refresh-btn").on("click", () => {
 			if (this.state.view === "dashboard") this.load_dashboard();
 			else if (this.state.view === "detail" && this.detail_code) this.open_detail(this.detail_code);
