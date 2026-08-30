@@ -13,9 +13,16 @@
  * cotizaciones.css/ventas.css/bodega.css/jefe_de_bodega.css are not
  * touched or depended on.
  *
- * Read-only in this commit: no checkbox, no GENERAR FACTURA styling --
- * only REVISAR (a plain solid-primary button, reusing fg_shell's own
- * .fg-btn shell) exists here.
+ * Commit 23.0 replaced the old detail/checklist/GENERAR FACTURA screen
+ * with a single dashboard where a confirmation dialog flipped a Pick List
+ * straight to Facturado. This correction (same commit) restores a real
+ * per-item review step -- REVISAR PEDIDO opens a large modal
+ * (.fg-fact-review-dialog below) listing every Pick List Item row with its
+ * own checkbox, persisted server-side; CONFIRMAR FACTURACIÓN (that same
+ * modal's own primary action, not a second dialog on top of it) is the
+ * one moment fg_invoicing_status flips. .is-facturado's soft-green card
+ * tint reuses the same --fg-success-* tokens Bodega's own completed-order
+ * cards use, for the same visual language across this app.
  */
 
 .fg-facturacion .fg-body {
@@ -27,16 +34,13 @@
 /* KPI colors specific to Facturación -- distinct modifier names from   */
 /* fg_shell.css's/other Pages' own so nothing collides with the Pages   */
 /* that share this stylesheet file. Purely informational cards (not     */
-/* buttons) in this commit -- no hover/active state needed.             */
+/* buttons) -- no hover/active state needed. Pendientes / Facturados    */
+/* hoy / Facturados (Commit 23.0), exclusively derived from Pick List's */
+/* own fg_invoicing_status -- never delivery_status/Sales Invoice.      */
 /* ------------------------------------------------------------------ */
 .fg-facturacion .fg-kpi--fact-pendientes {
 	--fg-kpi-color: var(--fg-primary);
 	--fg-kpi-tint: var(--fg-primary-tint);
-}
-
-.fg-facturacion .fg-kpi--fact-parciales {
-	--fg-kpi-color: var(--fg-warning-dark);
-	--fg-kpi-tint: var(--fg-warning-tint);
 }
 
 .fg-facturacion .fg-kpi--fact-facturados-hoy {
@@ -44,9 +48,9 @@
 	--fg-kpi-tint: var(--fg-success-tint);
 }
 
-.fg-facturacion .fg-kpi--fact-con-incidencia {
-	--fg-kpi-color: var(--fg-danger);
-	--fg-kpi-tint: var(--fg-danger-tint);
+.fg-facturacion .fg-kpi--fact-facturados {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
 }
 
 .fg-facturacion .fg-kpi-sub {
@@ -56,7 +60,7 @@
 }
 
 .fg-facturacion.fg-shell .fg-kpis--facturacion {
-	grid-template-columns: repeat(4, 1fr);
+	grid-template-columns: repeat(3, 1fr);
 }
 
 /* ------------------------------------------------------------------ */
@@ -155,12 +159,21 @@
 	display: flex;
 	flex-direction: column;
 	gap: 8px;
-	cursor: pointer;
-	transition: box-shadow var(--fg-transition), border-color var(--fg-transition);
+	transition: box-shadow var(--fg-transition), border-color var(--fg-transition),
+		background var(--fg-transition);
 }
 
 .fg-facturacion .fg-fact-queue-card:hover {
 	box-shadow: var(--fg-shadow);
+}
+
+/* Commit 23.0 -- soft green tint on a card once its Pick List is
+ * Facturado, same visual language as Bodega's own completed-order cards
+ * (--fg-success-tint background, --fg-success-dark border). Purely
+ * presentational: nothing here reads/writes anything. */
+.fg-facturacion .fg-fact-queue-card.is-facturado {
+	background: var(--fg-success-tint);
+	border-color: var(--fg-success-dark);
 }
 
 .fg-facturacion .fg-fact-queue-card-top {
@@ -174,13 +187,6 @@
 .fg-facturacion .fg-fact-queue-card-id {
 	font-weight: 700;
 	font-size: 1rem;
-}
-
-.fg-facturacion .fg-fact-queue-card-badges {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	flex-wrap: wrap;
 }
 
 .fg-facturacion .fg-fact-queue-card-customer {
@@ -212,8 +218,40 @@
 	color: var(--fg-text-faint);
 }
 
-.fg-facturacion .fg-fact-queue-card .fg-progress-block {
+/* "Facturado por" / "Fecha" footer, shown only once a card is Facturado,
+ * in place of the review progress + REVISAR PEDIDO button. */
+.fg-facturacion .fg-fact-queue-card-invoiced {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 16px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	margin-top: 4px;
+}
+
+.fg-facturacion .fg-fact-queue-card-invoiced strong {
+	color: var(--fg-success-dark);
+}
+
+/* Correction -- "X/Y revisados" progress on a Pendiente card, driven by
+ * get_invoicing_queue()'s own checked_items/total_items (never recomputed
+ * client-side). */
+.fg-facturacion .fg-fact-queue-card-progress {
+	display: flex;
+	align-items: center;
+	gap: 10px;
 	margin-top: 2px;
+}
+
+.fg-facturacion .fg-fact-queue-card-progress .fg-progress-track {
+	flex: 1;
+}
+
+.fg-facturacion .fg-fact-queue-card-progress-label {
+	font-size: 0.78rem;
+	color: var(--fg-text-muted);
+	white-space: nowrap;
+	flex-shrink: 0;
 }
 
 .fg-facturacion .fg-fact-review-btn {
@@ -228,27 +266,21 @@
 }
 
 /* ------------------------------------------------------------------ */
-/* Badges -- delivery_status + incidencia. Distinct modifier names from */
-/* fg_shell.css's own bucket badges so nothing collides.                */
+/* Badges -- Pendiente/Facturado (Commit 23.0's own operational state). */
+/* Distinct modifier names from fg_shell.css's own bucket badges so     */
+/* nothing collides.                                                    */
 /* ------------------------------------------------------------------ */
 .fg-facturacion .fg-badge--fact-pendiente {
 	background: var(--fg-primary-tint);
 	color: var(--fg-primary-dark);
 }
 
-.fg-facturacion .fg-badge--fact-parcial {
-	background: var(--fg-warning-tint);
-	color: var(--fg-warning-dark);
-}
-
 .fg-facturacion .fg-badge--fact-facturado {
 	background: var(--fg-success-tint);
 	color: var(--fg-success-dark);
-}
-
-.fg-facturacion .fg-badge--fact-incidencia {
-	background: var(--fg-danger-tint);
-	color: var(--fg-danger);
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
 }
 
 /* ------------------------------------------------------------------ */
@@ -316,386 +348,548 @@
 }
 
 /* ------------------------------------------------------------------ */
-/* Detalle ("REVISAR") -- header/back/section shell, reproduced from    */
-/* page/cotizaciones/cotizaciones.css's own Nueva Cotización screen.    */
+/* Diálogo "Revisar pedido" -- premium redesign against design_references/*/
+/* facturacion_revisar_pedido_v2.png. frappe.ui.Dialog renders into a     */
+/* modal appended to <body>, outside .fg-facturacion entirely, so these   */
+/* rules are deliberately unscoped -- same convention page/bodega/        */
+/* bodega.css already established for its own .fg-shortage-dialog/        */
+/* .fg-shortage-summary. Prefixed fg-fact- so nothing here can collide    */
+/* with that or any other Page's own dialog. This IS the confirmation     */
+/* step -- its own CONFIRMAR FACTURACIÓN primary action is what flips     */
+/* fg_invoicing_status, no separate dialog stacked on top of it. Purely   */
+/* visual: every value rendered here still comes straight from            */
+/* get_invoicing_detail()/set_invoicing_item_checked(), nothing invented. */
 /* ------------------------------------------------------------------ */
-.fg-facturacion .fg-np-header {
-	display: flex;
+:root {
+	/* Local-only tokens (this dialog's third summary-card color, "Progreso"
+	 * violet/lilac) -- fg_shell.css ships --fg-purple but no soft tint for
+	 * it; defined here rather than touching the shared file for one card. */
+	--fg-fact-purple: #7c5cfc;
+	--fg-fact-purple-tint: #f3f0fe;
+	--fg-fact-rose: #d6336c;
+	--fg-fact-rose-tint: #fdedf1;
+}
+
+.fg-fact-review-dialog .modal-dialog {
+	max-width: 1200px;
+	width: calc(100% - 32px);
+}
+
+.fg-fact-review-dialog .modal-content {
+	border-radius: 20px;
+	border: none;
+	box-shadow: 0 20px 60px rgba(16, 24, 40, 0.18), 0 4px 12px rgba(16, 24, 40, 0.08);
+	overflow: hidden;
+}
+
+/* frappe.ui.Dialog renders outside .fg-shell (appended straight to
+ * <body>), so fg_shell.css's own ".fg-shell .fg-icon" base rule (size,
+ * stroke, fill:none) never reaches anything in here -- without this,
+ * every <svg class="fg-icon"> below renders at its raw intrinsic size
+ * with a default black fill, i.e. exactly the "iconos negros gigantes"
+ * this redesign was asked to remove. Reproduced (not imported) here,
+ * same convention as the fg-spin keyframe above. */
+.fg-fact-review-dialog .fg-icon {
+	width: 18px;
+	height: 18px;
+	stroke: currentColor;
+	fill: none;
+	flex-shrink: 0;
+}
+
+.fg-fact-review-dialog .fg-icon-sm {
+	width: 13px;
+	height: 13px;
+}
+
+.fg-fact-review-dialog .modal-header {
+	padding: 22px 28px;
+	border-bottom: 1px solid var(--fg-border, #e5e9f0);
+}
+
+.fg-fact-review-dialog .modal-body {
+	padding: 26px 28px;
+}
+
+.fg-fact-review-dialog .modal-footer {
+	padding: 18px 28px;
+	border-top: 1px solid var(--fg-border, #e5e9f0);
+	background: var(--fg-bg, #f8fafc);
+}
+
+.fg-fact-review-title {
+	display: inline-flex;
 	align-items: center;
 	gap: 14px;
-	margin-bottom: 20px;
+	font-size: 1.35rem;
+	font-weight: 800;
+	color: var(--fg-text, #101828);
+}
+
+.fg-fact-review-title-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 44px;
+	height: 44px;
+	border-radius: 50%;
+	background: var(--fg-primary-tint, #eaf2fd);
+	color: var(--fg-primary, #2b7be4);
+	flex-shrink: 0;
+}
+
+.fg-fact-review-title-icon .fg-icon {
+	width: 22px;
+	height: 22px;
+}
+
+.fg-fact-review-dialog .fg-fact-review-loading {
+	text-align: center;
+	padding: 60px 0;
+	color: var(--fg-text-muted, #667085);
+}
+
+/* -- Info + summary cards row ---------------------------------------- */
+.fg-fact-review-info {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 24px;
+	flex-wrap: wrap;
+	margin-bottom: 24px;
+}
+
+.fg-fact-review-info-main {
+	display: flex;
+	align-items: flex-start;
+	gap: 16px;
+	min-width: 260px;
+}
+
+.fg-fact-review-pedido-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 56px;
+	height: 56px;
+	border-radius: 16px;
+	background: var(--fg-success-tint, #e9f9ee);
+	color: var(--fg-success-dark, #1f9c46);
+	flex-shrink: 0;
+}
+
+.fg-fact-review-pedido-icon .fg-icon {
+	width: 26px;
+	height: 26px;
+}
+
+.fg-fact-review-pedido-title {
+	font-weight: 800;
+	font-size: 1.3rem;
+	color: var(--fg-text, #101828);
+	margin-bottom: 12px;
+}
+
+.fg-fact-review-info-grid {
+	display: flex;
+	gap: 40px;
 	flex-wrap: wrap;
 }
 
-.fg-facturacion .fg-np-back {
-	appearance: none;
-	background: var(--fg-card);
-	border: 1px solid var(--fg-border);
-	border-radius: var(--fg-radius-sm);
-	height: var(--fg-touch);
-	padding: 0 16px;
+.fg-fact-review-info-label {
+	font-size: 0.76rem;
+	font-weight: 600;
+	color: var(--fg-text-muted, #667085);
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	margin-bottom: 4px;
+}
+
+.fg-fact-review-info-value {
+	font-size: 0.95rem;
+	font-weight: 700;
+	color: var(--fg-text, #101828);
+}
+
+.fg-fact-review-info-value--link {
 	display: inline-flex;
 	align-items: center;
 	gap: 8px;
-	font-weight: 600;
-	font-size: 0.85rem;
-	color: var(--fg-text);
+	color: var(--fg-primary, #2b7be4);
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.88rem;
+}
+
+.fg-fact-review-copy-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 26px;
+	height: 26px;
+	border-radius: 6px;
+	border: none;
+	background: transparent;
+	color: var(--fg-text-faint, #98a2b3);
 	cursor: pointer;
+	flex-shrink: 0;
 }
 
-.fg-facturacion .fg-np-back:hover {
-	background: var(--fg-bg);
+.fg-fact-review-copy-btn:hover {
+	background: var(--fg-bg, #f8fafc);
+	color: var(--fg-primary, #2b7be4);
 }
 
-.fg-facturacion .fg-np-title {
-	font-size: 1.3rem;
-	font-weight: 700;
+.fg-fact-review-summary-cards {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(140px, 1fr));
+	gap: 12px;
+	flex-shrink: 0;
 }
 
-.fg-facturacion .fg-np-section {
-	background: var(--fg-card);
-	border: 1px solid var(--fg-border);
-	border-radius: var(--fg-radius-lg);
-	box-shadow: var(--fg-shadow-sm);
-	padding: 20px;
-	margin-bottom: 20px;
+.fg-fact-review-summary-card {
+	border-radius: 14px;
+	padding: 14px 18px;
+	min-width: 140px;
+	transition: box-shadow 0.15s ease;
 }
 
-.fg-facturacion .fg-np-section-title {
-	font-weight: 700;
-	font-size: 1rem;
-	margin-bottom: 14px;
+.fg-fact-review-summary-card--products {
+	background: var(--fg-primary-tint, #eaf2fd);
 }
 
-.fg-facturacion .fg-product-skeleton {
-	height: 84px;
-	margin-bottom: 14px;
+.fg-fact-review-summary-card--qty {
+	background: var(--fg-success-tint, #e9f9ee);
 }
 
-.fg-facturacion .fg-empty--sm {
-	padding: 24px 0;
+.fg-fact-review-summary-card--progress {
+	background: var(--fg-fact-purple-tint);
 }
 
-/* ------------------------------------------------------------------ */
-/* Detalle -- info card (PEDIDO-N, Pick List técnico, cliente,          */
-/* bodeguero, fecha, progreso)                                          */
-/* ------------------------------------------------------------------ */
-.fg-facturacion .fg-fact-detail-card {
-	background: var(--fg-card);
-	border: 1px solid var(--fg-border);
-	border-radius: var(--fg-radius-lg);
-	box-shadow: var(--fg-shadow-sm);
-	padding: 20px;
-	margin-bottom: 20px;
-	display: flex;
-	flex-direction: column;
-	gap: 10px;
+.fg-fact-review-summary-card--progress.is-complete {
+	background: var(--fg-success-tint, #e9f9ee);
 }
 
-.fg-facturacion .fg-fact-detail-top {
+.fg-fact-review-summary-icon {
+	display: inline-flex;
+	margin-bottom: 8px;
+}
+
+.fg-fact-review-summary-card--products .fg-fact-review-summary-icon {
+	color: var(--fg-primary, #2b7be4);
+}
+
+.fg-fact-review-summary-card--qty .fg-fact-review-summary-icon {
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+.fg-fact-review-summary-card--progress .fg-fact-review-summary-icon {
+	color: var(--fg-fact-purple);
+}
+
+.fg-fact-review-summary-card--progress.is-complete .fg-fact-review-summary-icon {
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+.fg-fact-review-summary-label {
+	font-size: 0.78rem;
+	font-weight: 600;
+	color: var(--fg-text-muted, #667085);
+	margin-bottom: 2px;
+}
+
+.fg-fact-review-summary-value {
+	font-size: 1.5rem;
+	font-weight: 800;
+	line-height: 1.15;
+	color: var(--fg-text, #101828);
+}
+
+.fg-fact-review-summary-unit {
+	font-size: 0.78rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+/* -- Progress card ------------------------------------------------------ */
+.fg-fact-review-progress-card {
+	background: var(--fg-bg, #f8fafc);
+	border: 1px solid var(--fg-border, #e5e9f0);
+	border-radius: 14px;
+	padding: 18px 20px;
+	margin-bottom: 22px;
+}
+
+.fg-fact-review-progress-head {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	gap: 10px;
 	flex-wrap: wrap;
-}
-
-.fg-facturacion .fg-fact-detail-id {
+	gap: 8px;
+	font-size: 0.9rem;
 	font-weight: 700;
-	font-size: 1.15rem;
+	color: var(--fg-text, #101828);
+	margin-bottom: 12px;
 }
 
-.fg-facturacion .fg-fact-detail-picklist {
-	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+.fg-fact-review-progress-count {
+	font-weight: 600;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-review-progress-track {
+	position: relative;
+	width: 100%;
+	height: 28px;
+	border-radius: var(--fg-radius-pill, 999px);
+	background: #e3e7ee;
+	overflow: hidden;
+}
+
+.fg-fact-review-progress-fill {
+	height: 100%;
+	background: var(--fg-primary, #2b7be4);
+	border-radius: var(--fg-radius-pill, 999px);
+	transition: width 0.25s ease, background 0.25s ease;
+}
+
+.fg-fact-review-progress-card.is-complete .fg-fact-review-progress-fill {
+	background: var(--fg-success-dark, #1f9c46);
+}
+
+.fg-fact-review-progress-pct {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
 	font-size: 0.8rem;
-	color: var(--fg-text-faint);
-	display: flex;
-	align-items: center;
-	gap: 6px;
+	font-weight: 700;
+	color: var(--fg-text, #101828);
 }
 
-.fg-facturacion .fg-fact-detail-meta {
-	display: flex;
-	flex-wrap: wrap;
-	gap: 18px;
+/* -- Product table --------------------------------------------------- */
+.fg-fact-review-table {
+	border: 1px solid var(--fg-border, #e5e9f0);
+	border-radius: 14px;
+	overflow: hidden;
+	margin-bottom: 20px;
+}
+
+.fg-fact-review-table-head {
+	display: grid;
+	grid-template-columns: 44px minmax(200px, 2fr) 140px 170px 100px 130px;
+	gap: 10px;
+	align-items: center;
+	background: var(--fg-bg, #f8fafc);
+	border-bottom: 1px solid var(--fg-border, #e5e9f0);
+	padding: 12px 18px;
+	font-size: 0.76rem;
+	font-weight: 700;
+	color: var(--fg-text-muted, #667085);
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+}
+
+.fg-fact-review-table-body {
+	max-height: 340px;
+	overflow-y: auto;
+}
+
+.fg-fact-review-row {
+	display: grid;
+	grid-template-columns: 44px minmax(200px, 2fr) 140px 170px 100px 130px;
+	gap: 10px;
+	align-items: center;
+	padding: 14px 18px;
+	border-bottom: 1px solid var(--fg-border, #e5e9f0);
+	transition: background 0.15s ease;
+}
+
+.fg-fact-review-row:last-child {
+	border-bottom: none;
+}
+
+.fg-fact-review-row.is-checked {
+	background: var(--fg-success-tint, #e9f9ee);
+}
+
+.fg-fact-review-col-idx {
+	font-weight: 700;
+	color: var(--fg-text-muted, #667085);
 	font-size: 0.85rem;
-	color: var(--fg-text-muted);
 }
 
-.fg-facturacion .fg-fact-detail-meta span {
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-}
-
-/* ------------------------------------------------------------------ */
-/* Detalle -- product cards (per línea: alistada/facturada/pendiente/   */
-/* stock, precio unitario/importe). Flex-column shell, own internal     */
-/* grids for the two number rows -- collapses cleanly on mobile without */
-/* ever needing horizontal scroll.                                      */
-/* ------------------------------------------------------------------ */
-.fg-facturacion .fg-fact-detail-items {
-	display: flex;
-	flex-direction: column;
-	gap: 14px;
-}
-
-.fg-facturacion .fg-fact-item-card {
-	background: var(--fg-bg);
-	border: 1.5px solid var(--fg-border);
-	border-radius: var(--fg-radius-md);
-	padding: 14px 16px;
-	display: flex;
-	flex-direction: column;
-	gap: 12px;
-}
-
-.fg-facturacion .fg-fact-item-identity {
+.fg-fact-review-col-product {
 	display: flex;
 	align-items: center;
 	gap: 12px;
 	min-width: 0;
 }
 
-.fg-facturacion .fg-fact-item-thumb {
-	width: 44px;
-	height: 44px;
-	border-radius: var(--fg-radius-sm);
-	background: var(--fg-primary-tint);
-	color: var(--fg-primary-dark);
-	display: flex;
-	align-items: center;
-	justify-content: center;
+.fg-fact-review-checkbox-wrap {
+	display: inline-flex;
 	flex-shrink: 0;
+	cursor: pointer;
 }
 
-.fg-facturacion .fg-fact-item-thumb .fg-icon {
-	width: 20px;
-	height: 20px;
+.fg-fact-review-checkbox {
+	width: 22px;
+	height: 22px;
+	accent-color: var(--fg-success-dark, #1f9c46);
+	cursor: pointer;
 }
 
-.fg-facturacion .fg-fact-item-name {
+.fg-fact-review-checkbox:disabled {
+	cursor: not-allowed;
+}
+
+.fg-fact-review-item-name {
 	font-weight: 700;
-	font-size: 0.92rem;
-	line-height: 1.25;
+	font-size: 0.9rem;
+	color: var(--fg-text, #101828);
 	overflow-wrap: anywhere;
 }
 
-.fg-facturacion .fg-fact-item-code {
-	font-size: 0.76rem;
-	color: var(--fg-text-faint);
-	margin-top: 2px;
+.fg-fact-review-col-code {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.82rem;
+	color: var(--fg-primary, #2b7be4);
 }
 
-.fg-facturacion .fg-fact-item-qtygrid {
-	display: grid;
-	grid-template-columns: repeat(4, 1fr);
-	gap: 10px;
-	padding: 10px 0;
-	border-top: 1px solid var(--fg-border);
-	border-bottom: 1px solid var(--fg-border);
-}
-
-.fg-facturacion .fg-fact-item-price {
-	display: grid;
-	grid-template-columns: repeat(2, 1fr);
-	gap: 10px;
-}
-
-.fg-facturacion .fg-fact-qty-col,
-.fg-facturacion .fg-fact-price-col {
-	text-align: center;
-}
-
-.fg-facturacion .fg-fact-qty-label {
-	font-size: 0.7rem;
-	color: var(--fg-text-muted);
-	margin-bottom: 4px;
-}
-
-.fg-facturacion .fg-fact-qty-label small {
-	color: var(--fg-text-faint);
-	font-weight: 400;
-}
-
-.fg-facturacion .fg-fact-qty-value {
+.fg-fact-review-col-qty {
 	font-size: 1rem;
 	font-weight: 700;
-	color: var(--fg-text);
+	color: var(--fg-text, #101828);
 }
 
-.fg-facturacion .fg-fact-qty-col--pending .fg-fact-qty-value {
-	color: var(--fg-primary-dark);
+.fg-fact-review-col-uom {
+	font-size: 0.85rem;
+	color: var(--fg-text-muted, #667085);
 }
 
-.fg-facturacion .fg-fact-qty-col--stock .fg-fact-qty-value {
-	color: var(--fg-text-muted);
-	font-weight: 600;
-}
-
-.fg-facturacion .fg-fact-price-col--amount .fg-fact-qty-value {
-	color: var(--fg-success-dark);
-}
-
-/* ------------------------------------------------------------------ */
-/* Commit 21.5 -- checklist "VERIFICADO" per línea. Frontend-only state, */
-/* so the only thing styled here is the checkbox row itself; nothing     */
-/* about it is ever persisted.                                           */
-/* ------------------------------------------------------------------ */
-.fg-facturacion .fg-fact-verify-row {
+.fg-fact-review-col-status {
 	display: flex;
 	align-items: center;
 	gap: 10px;
-	min-height: var(--fg-touch);
-	padding: 4px 2px;
-	font-size: 0.85rem;
+}
+
+.fg-fact-review-status-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	padding: 5px 12px;
+	border-radius: var(--fg-radius-pill, 999px);
+	font-size: 0.76rem;
 	font-weight: 700;
-	color: var(--fg-text);
-	cursor: pointer;
-	user-select: none;
+	white-space: nowrap;
 }
 
-.fg-facturacion .fg-fact-verify-row input[type="checkbox"] {
-	width: 22px;
-	height: 22px;
-	flex-shrink: 0;
-	accent-color: var(--fg-success-dark);
-	cursor: pointer;
+.fg-fact-review-status-badge .fg-icon {
+	width: 13px;
+	height: 13px;
 }
 
-.fg-facturacion .fg-fact-verify-row--none {
-	color: var(--fg-text-faint);
+.fg-fact-review-status-badge.is-pendiente {
+	background: var(--fg-fact-rose-tint);
+	color: var(--fg-fact-rose);
+}
+
+.fg-fact-review-status-badge.is-revisado {
+	background: var(--fg-success-tint, #e9f9ee);
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+.fg-fact-review-item-feedback {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 0.72rem;
+	font-weight: 600;
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+/* Discrete "guardando" spinner -- reuses the same fg-spin keyframe name
+ * page/bodega/bodega.css already uses for its own refresh icon, redefined
+ * here (reproduced, not imported) so this file stays self-contained. */
+.fg-fact-review-item-feedback .fg-spin {
+	animation: fg-spin 0.8s linear infinite;
+	color: var(--fg-text-muted, #667085);
+}
+
+@keyframes fg-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* -- Instructional callout ("Marca cada producto...") ------------------ */
+.fg-fact-review-callout {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	background: var(--fg-primary-tint, #eaf2fd);
+	color: var(--fg-primary-dark, #1e63c4);
+	border-radius: 12px;
+	padding: 14px 16px;
+	font-size: 0.85rem;
 	font-weight: 500;
-	cursor: default;
+	line-height: 1.4;
 }
 
-.fg-facturacion .fg-fact-item-card.is-verified {
-	border-color: var(--fg-success-dark);
-	background: var(--fg-success-tint);
+.fg-fact-review-callout .fg-icon {
+	flex-shrink: 0;
+	margin-top: 1px;
 }
 
-/* ------------------------------------------------------------------ */
-/* Incidencia warning -- purely visual, never a gate on the button.     */
-/* ------------------------------------------------------------------ */
-.fg-facturacion .fg-fact-shortage-warning {
+.fg-fact-review-readonly-note {
 	display: flex;
 	align-items: center;
 	gap: 8px;
-	background: var(--fg-danger-tint);
-	color: var(--fg-danger);
-	border: 1px solid var(--fg-danger);
-	border-radius: var(--fg-radius-md);
-	padding: 12px 16px;
+	background: var(--fg-success-tint, #e9f9ee);
+	color: var(--fg-success-dark, #1f9c46);
+	border: 1px solid var(--fg-success-dark, #1f9c46);
+	border-radius: 10px;
+	padding: 10px 14px;
 	font-size: 0.85rem;
 	font-weight: 600;
-	margin-bottom: 16px;
+	margin-top: 14px;
 }
 
-/* ------------------------------------------------------------------ */
-/* Resumen previo + GENERAR FACTURA                                     */
-/* ------------------------------------------------------------------ */
-.fg-facturacion .fg-fact-generate-wrap {
-	margin-top: 4px;
-}
-
-.fg-facturacion .fg-fact-generate-section {
-	background: var(--fg-card);
-	border: 1px solid var(--fg-border);
-	border-radius: var(--fg-radius-lg);
-	box-shadow: var(--fg-shadow-sm);
-	padding: 18px 20px;
-	display: flex;
+/* -- Footer buttons -- icon + label, brand blue primary, muted disabled  */
+/* state (both visual AND functional -- disable_primary_action()/         */
+/* enable_primary_action() in facturacion.js toggle the real .disabled    */
+/* class Frappe's own Dialog uses, this only re-skins it). ------------- */
+.fg-fact-review-dialog .btn-modal-secondary,
+.fg-fact-review-dialog .btn-secondary {
+	display: inline-flex;
 	align-items: center;
-	justify-content: space-between;
-	gap: 16px;
-	flex-wrap: wrap;
-}
-
-.fg-facturacion .fg-fact-generate-summary {
-	display: flex;
-	flex-direction: column;
-	gap: 4px;
-	font-size: 0.85rem;
-	color: var(--fg-text-muted);
-}
-
-.fg-facturacion .fg-fact-generate-summary strong {
-	color: var(--fg-text);
-	font-size: 0.95rem;
-}
-
-.fg-facturacion .fg-fact-generate-btn {
-	flex-shrink: 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* Diálogos (confirmación GENERAR FACTURA / éxito FACTURA GENERADA) --   */
-/* frappe.ui.Dialog renders into a modal appended to <body>, outside     */
-/* .fg-facturacion entirely, so these rules are deliberately unscoped -- */
-/* same convention page/bodega/bodega.css already established for its   */
-/* own .fg-shortage-dialog/.fg-shortage-summary. Prefixed fg-fact- so    */
-/* nothing here can collide with that or any other Page's own dialog.    */
-/* ------------------------------------------------------------------ */
-.fg-fact-confirm-summary,
-.fg-fact-success-summary {
-	font-family: var(--font-stack, -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif);
-}
-
-.fg-fact-confirm-question {
+	gap: 8px;
+	border-radius: 10px;
 	font-weight: 700;
-	font-size: 1rem;
-	margin-bottom: 14px;
+	padding: 10px 20px;
 }
 
-.fg-fact-confirm-row {
-	display: flex;
+.fg-fact-review-dialog .btn-primary {
+	display: inline-flex;
 	align-items: center;
-	justify-content: space-between;
-	gap: 12px;
-	padding: 9px 0;
-	border-bottom: 1px solid var(--fg-border, #e5e9f0);
-	font-size: 0.88rem;
-}
-
-.fg-fact-confirm-row:last-child {
-	border-bottom: none;
-}
-
-.fg-fact-confirm-row span {
-	color: #667085;
-}
-
-.fg-fact-success-summary {
-	text-align: center;
-	padding: 8px 0;
-}
-
-.fg-fact-success-pedido {
-	font-weight: 800;
-	font-size: 1.15rem;
-	margin-bottom: 4px;
-}
-
-.fg-fact-success-invoice {
-	font-size: 0.92rem;
-	color: #475569;
-	margin-bottom: 14px;
-}
-
-.fg-fact-success-counts {
-	display: flex;
-	justify-content: center;
-	gap: 18px;
-	font-size: 0.88rem;
-	color: #667085;
-	margin-bottom: 10px;
-}
-
-.fg-fact-success-total {
-	font-size: 1.05rem;
+	gap: 8px;
+	border-radius: 10px;
 	font-weight: 700;
-	padding-top: 10px;
-	border-top: 1px solid #e5e9f0;
+	padding: 10px 22px;
+	background: var(--fg-primary, #2b7be4);
+	border-color: var(--fg-primary, #2b7be4);
+}
+
+.fg-fact-review-dialog .btn-primary:hover:not(.disabled) {
+	background: var(--fg-primary-dark, #1e63c4);
+	border-color: var(--fg-primary-dark, #1e63c4);
+}
+
+.fg-fact-review-dialog .btn-primary.disabled {
+	background: var(--fg-primary-tint, #eaf2fd);
+	border-color: var(--fg-primary-tint, #eaf2fd);
+	color: var(--fg-primary, #2b7be4);
+	opacity: 1;
+	pointer-events: none;
 }
 
 /* ------------------------------------------------------------------ */
@@ -703,29 +897,38 @@
 /* (~640px), matching the breakpoints already approved for every other  */
 /* Page in this app. Touch targets stay >=44px (var(--fg-touch)) at     */
 /* every width -- no rule here ever shrinks a button/input below it.    */
+/* Modal content never overflows horizontally at any width -- the        */
+/* product table switches from a grid to stacked cards at <=640px,       */
+/* driven purely by CSS (same DOM, no re-render).                        */
 /* ------------------------------------------------------------------ */
 @media (max-width: 860px) {
 	.fg-facturacion.fg-shell .fg-kpis--facturacion {
-		grid-template-columns: repeat(2, 1fr);
+		grid-template-columns: repeat(3, 1fr);
 	}
 
-	.fg-facturacion .fg-fact-item-qtygrid {
-		grid-template-columns: repeat(2, 1fr);
+	.fg-fact-review-dialog .modal-dialog {
+		max-width: 92vw;
+	}
+
+	.fg-fact-review-info {
+		flex-direction: column;
+	}
+
+	.fg-fact-review-summary-cards {
+		width: 100%;
+		grid-template-columns: repeat(3, 1fr);
+	}
+
+	.fg-fact-review-table-head,
+	.fg-fact-review-row {
+		grid-template-columns: 36px minmax(160px, 2fr) 110px 130px 90px 120px;
 	}
 }
 
 @media (max-width: 640px) {
 	.fg-facturacion.fg-shell .fg-kpis--facturacion {
-		grid-template-columns: 1fr 1fr;
+		grid-template-columns: 1fr;
 		gap: 10px;
-	}
-
-	.fg-facturacion .fg-np-section {
-		padding: 16px;
-	}
-
-	.fg-facturacion .fg-fact-detail-card {
-		padding: 16px;
 	}
 
 	.fg-facturacion .fg-fact-queue-card {
@@ -737,18 +940,48 @@
 		justify-content: center;
 	}
 
-	.fg-facturacion .fg-fact-item-price {
+	.fg-fact-review-dialog .modal-body {
+		padding: 18px;
+	}
+
+	.fg-fact-review-summary-cards {
 		grid-template-columns: 1fr 1fr;
 	}
 
-	.fg-facturacion .fg-fact-generate-section {
-		flex-direction: column;
-		align-items: stretch;
-		padding: 16px;
+	.fg-fact-review-summary-card--progress {
+		grid-column: span 2;
 	}
 
-	.fg-facturacion .fg-fact-generate-btn {
-		width: 100%;
-		justify-content: center;
+	.fg-fact-review-table-head {
+		display: none;
+	}
+
+	.fg-fact-review-row {
+		grid-template-columns: 1fr;
+		gap: 6px;
+		padding: 14px;
+		border-radius: 12px;
+		border: 1px solid var(--fg-border, #e5e9f0);
+		margin-bottom: 10px;
+	}
+
+	.fg-fact-review-table-body {
+		max-height: none;
+	}
+
+	.fg-fact-review-col-idx {
+		display: none;
+	}
+
+	.fg-fact-review-col-code::before,
+	.fg-fact-review-col-qty::before,
+	.fg-fact-review-col-uom::before {
+		content: attr(data-label) ": ";
+		font-weight: 600;
+		color: var(--fg-text-faint, #98a2b3);
+	}
+
+	.fg-fact-review-col-status {
+		margin-top: 4px;
 	}
 }

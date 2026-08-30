@@ -138,6 +138,22 @@ class TestFacturacionPermissions(IntegrationTestCase):
 		with fx.as_user(self.facturacion_a):
 			frappe.get_doc("Pick List", self.pl.name).check_permission("read")
 
+	def test_can_write_and_submit_pick_list_for_invoicing_status(self):
+		"""Commit 23.0: Facturación's Custom DocPerm on Pick List gained
+		write=1 AND submit=1 (was read-only) -- the one permission change
+		that commit made, and explicitly not an accounting one (this role
+		still has zero Account permission, see
+		test_has_select_on_account_not_read below). submit=1 is required
+		alongside write=1 because Frappe's own
+		Document.check_docstatus_transition() calls check_permission
+		("submit") for ANY save on an already-submitted document, even one
+		that only touches allow_on_submit fields -- exactly what
+		api.facturacion.mark_as_invoiced() does. See that module's own top
+		docstring for the full architectural explanation."""
+		with fx.as_user(self.facturacion_a):
+			self.assertTrue(frappe.has_permission("Pick List", "write"))
+			self.assertTrue(frappe.has_permission("Pick List", "submit"))
+
 	def test_can_read_sales_order(self):
 		with fx.as_user(self.facturacion_a):
 			frappe.get_doc("Sales Order", self.so.name).check_permission("read")
@@ -191,11 +207,8 @@ class TestFacturacionPermissions(IntegrationTestCase):
 			doc.check_permission("write")
 
 	# -- Negative: read-only doctypes stay read-only -----------------------
-
-	def test_cannot_write_pick_list(self):
-		with fx.as_user(self.facturacion_a):
-			with self.assertRaises(frappe.PermissionError):
-				frappe.get_doc("Pick List", self.pl.name).check_permission("write")
+	# (Pick List moved out of this section in Commit 23.0 -- see
+	# test_can_write_and_submit_pick_list_for_invoicing_status above.)
 
 	def test_cannot_write_sales_order(self):
 		with fx.as_user(self.facturacion_a):

@@ -367,6 +367,30 @@ fixtures = [
 					# api/jefe_bodega.py's receive_shortage_purchase().
 					"fg_shortage_report",
 					"fg_purchase_reference",
+					# Commit 23.0 -- Pick List's own OPERATIONAL invoicing
+					# state (never contable): api/facturacion.py's
+					# mark_as_invoiced().
+					"fg_invoicing_status",
+					"fg_invoiced_on",
+					"fg_invoiced_by",
+				],
+			]
+		],
+	},
+	{
+		# Commit 23.0 (correction) -- per-item invoicing checklist,
+		# api/facturacion.py's set_invoicing_item_checked()/
+		# get_invoicing_detail(). Same reasoning as the Pick List-level
+		# fields above, on the child doctype instead.
+		"dt": "Custom Field",
+		"filters": [
+			[
+				"name",
+				"in",
+				[
+					"Pick List Item-fg_invoicing_checked",
+					"Pick List Item-fg_invoicing_checked_on",
+					"Pick List Item-fg_invoicing_checked_by",
 				],
 			]
 		],
