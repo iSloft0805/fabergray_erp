@@ -1,0 +1,216 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "hash",
+ "creation": "2026-08-30 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "recorrido",
+  "sequence",
+  "pick_list",
+  "column_break_links",
+  "sales_order",
+  "customer",
+  "customer_name",
+  "section_break_address",
+  "customer_address",
+  "address_display",
+  "column_break_geo",
+  "latitude",
+  "longitude",
+  "section_break_qty",
+  "item_count",
+  "total_qty",
+  "section_break_delivery",
+  "status",
+  "arrived_on",
+  "delivered_on",
+  "delivery_note"
+ ],
+ "fields": [
+  {
+   "description": "Commit 24.1 -- por qué Recorrido Parada es un DocType normal y no una Table hija de Recorrido: ver el docstring del módulo api/recorridos.py.",
+   "fieldname": "recorrido",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Recorrido",
+   "options": "Recorrido",
+   "reqd": 1
+  },
+  {
+   "fieldname": "sequence",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Orden",
+   "non_negative": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "pick_list",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Pick List",
+   "options": "Pick List",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_links",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "sales_order",
+   "fieldtype": "Link",
+   "label": "Pedido (Sales Order)",
+   "options": "Sales Order",
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Cliente",
+   "options": "Customer",
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Nombre del cliente",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_address",
+   "fieldtype": "Section Break",
+   "label": "Dirección"
+  },
+  {
+   "fieldname": "customer_address",
+   "fieldtype": "Link",
+   "label": "Dirección (Address)",
+   "options": "Address",
+   "read_only": 1
+  },
+  {
+   "description": "Snapshot de texto tomado al momento de crear/asignar la parada -- el cliente podría cambiar su dirección después sin que esto cambie retroactivamente.",
+   "fieldname": "address_display",
+   "fieldtype": "Small Text",
+   "label": "Dirección (texto)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_geo",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Commit 24.1 -- reservado para geocodificación futura (24.4). Nunca calculado en este commit.",
+   "fieldname": "latitude",
+   "fieldtype": "Float",
+   "label": "Latitud",
+   "precision": "6",
+   "read_only": 1
+  },
+  {
+   "fieldname": "longitude",
+   "fieldtype": "Float",
+   "label": "Longitud",
+   "precision": "6",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_qty",
+   "fieldtype": "Section Break",
+   "label": "Cantidades"
+  },
+  {
+   "fieldname": "item_count",
+   "fieldtype": "Int",
+   "label": "Cantidad de productos",
+   "non_negative": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_qty",
+   "fieldtype": "Float",
+   "label": "Cantidad total",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_delivery",
+   "fieldtype": "Section Break",
+   "label": "Entrega"
+  },
+  {
+   "default": "Pendiente",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Estado",
+   "options": "Pendiente\nEntregado\nNo Entregado",
+   "reqd": 1
+  },
+  {
+   "description": "Commit 24.1 -- reservado para 24.6/24.9. Ningún código de este commit lo escribe.",
+   "fieldname": "arrived_on",
+   "fieldtype": "Datetime",
+   "label": "Llegada",
+   "read_only": 1
+  },
+  {
+   "description": "Commit 24.1 -- reservado para 24.7 (evidencia de entrega). Ningún código de este commit lo escribe.",
+   "fieldname": "delivered_on",
+   "fieldtype": "Datetime",
+   "label": "Entregado el",
+   "read_only": 1
+  },
+  {
+   "description": "Texto libre reservado para uso futuro -- deliberadamente NO es un Link a la Delivery Note nativa de ERPNext: Recorridos nunca crea ni referencia Delivery Note en este commit.",
+   "fieldname": "delivery_note",
+   "fieldtype": "Small Text",
+   "label": "Nota de entrega",
+   "read_only": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "is_submittable": 0,
+ "links": [],
+ "modified": "2026-08-30 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Fabrigray ERP",
+ "name": "Recorrido Parada",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "export": 1,
+   "print": 1,
+   "read": 1,
+   "report": 1,
+   "role": "Recorrido",
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

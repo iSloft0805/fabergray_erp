@@ -63,5 +63,18 @@
   "restrict_to_domain": null,
   "role_name": "Gestión de Clientes",
   "two_factor_auth": 0
+ },
+{
+  "desk_access": 1,
+  "disabled": 0,
+  "docstatus": 0,
+  "doctype": "Role",
+  "home_page": null,
+  "is_custom": 0,
+  "modified": "2026-08-30 06:35:02.157886",
+  "name": "Recorrido",
+  "restrict_to_domain": null,
+  "role_name": "Recorrido",
+  "two_factor_auth": 0
  }
 ]

@@ -235,12 +235,22 @@ fixtures = [
 	{
 		"dt": "Role",
 		"filters": [
-			["name", "in", ["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes"]]
+			[
+				"name",
+				"in",
+				["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes", "Recorrido"],
+			]
 		],
 	},
 	{
 		"dt": "Custom DocPerm",
-		"filters": [["role", "in", ["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes"]]],
+		"filters": [
+			[
+				"role",
+				"in",
+				["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes", "Recorrido"],
+			]
+		],
 	},
 	{
 		# Commit 22.4 -- "System Manager" is a standard Frappe role (never

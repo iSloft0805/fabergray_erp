@@ -433,7 +433,20 @@ class TestWorld:
 		(child-before-parent) order, cancelling submittable documents first.
 		Never used in application code (api/bodega.py, api/jefe_bodega.py) --
 		only here.
-		"""
+
+		ignore_on_trash=True (Commit 24.1's own on_trash guard on Recorrido
+		Parada, see its own controller): many Recorridos tests deliberately
+		leave a route in Planificado/En Ruta/Completado/Cancelado at the end
+		of a test method (e.g. test_cannot_edit_stops_in_en_ruta,
+		test_cancel_route_from_en_ruta_rejected) -- exactly the states that
+		guard exists to block a direct delete FROM PRODUCTION CODE against.
+		Test teardown is not that: it is this same sanctioned,
+		Administrator-only, already-ignore_permissions path, deleting only
+		fixtures this same TestWorld created, and needs to succeed
+		regardless of what status those fixtures were left in. Applied to
+		every doctype here (not just Recorrido Parada) since a future
+		doctype's own on_trash guard would hit the identical teardown
+		problem for the identical reason."""
 		frappe.set_user("Administrator")
 		for doctype, name in reversed(self._created):
 			if not frappe.db.exists(doctype, name):
@@ -452,7 +465,7 @@ class TestWorld:
 				# of issue _purge_stock_ledger_for_warehouse() already
 				# handles for Warehouse/Stock Ledger Entry).
 				frappe.db.delete("GL Entry", {"account": name})
-			frappe.delete_doc(doctype, name, ignore_permissions=True, force=True)
+			frappe.delete_doc(doctype, name, ignore_permissions=True, force=True, ignore_on_trash=True)
 		frappe.db.commit()
 
 	@staticmethod
