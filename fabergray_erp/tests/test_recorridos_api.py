@@ -23,6 +23,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import flt
 
+from fabergray_erp import geocoding
 from fabergray_erp.api import bodega, facturacion, recorridos
 from fabergray_erp.tests import fixtures as fx
 
@@ -122,6 +123,21 @@ class TestRecorridosApi(IntegrationTestCase):
 		# owns Address write natively since Commit 22.7 and is the one role
 		# whose set_address_geolocation() calls must actually succeed.
 		cls.gestion_clientes_user = cls.world.user("fg243-gestion@example.com", ["Gestión de Clientes"])
+		# Commit 24.4 -- a real, non-Administrator System Manager user:
+		# Administrator itself bypasses every permission check outright
+		# (frappe.has_permission() always True for it), so it can never
+		# stand in for "the System Manager ROLE actually grants this" --
+		# only a genuine System Manager user proves that.
+		cls.system_manager_user = cls.world.user("fg244-sysmanager@example.com", ["System Manager"])
+
+		# Commit 24.4 -- geocode_address()'s own _google_api_key() check
+		# runs before this suite's own patch.object(geocoding,
+		# "_google_geocode_address", ...) mocks are ever reached, so a
+		# fake key must be configured for the whole class -- never a real
+		# one, and frappe.conf (not site_config.json on disk) so nothing
+		# is ever written to a real file.
+		frappe.conf["fg_google_maps_api_key"] = "test-key-not-real"
+		cls.addClassCleanup(lambda: frappe.conf.pop("fg_google_maps_api_key", None))
 
 		# Company-isolation fixtures (Commit 24.1 section 16/17) -- created
 		# ONCE here (not per-test) since IntegrationTestCase in this app
@@ -1356,6 +1372,312 @@ class TestRecorridosApi(IntegrationTestCase):
 		self.assertEqual(flt(row.fg_latitude), 0.0)
 		self.assertEqual(flt(row.fg_longitude), 0.0)
 		self.assertEqual(row.fg_geocoding_status, "Pendiente")
+
+	# =====================================================================
+	# Commit 24.4 -- geocode_customer_address() / geocode_route_pending_addresses()
+	# Every test below mocks fabergray_erp.geocoding._google_geocode_address
+	# (patch.object, same convention _count_queries() already uses) -- ZERO
+	# real HTTP calls anywhere in this class (brief section 19).
+	# =====================================================================
+
+	@staticmethod
+	def _google_payload(lat=4.6, lng=-74.0, country_long="Colombia", country_short="CO", partial_match=False, formatted="Calle Falsa 123, Bogotá, Colombia"):
+		components = []
+		if country_long or country_short:
+			components.append({"long_name": country_long, "short_name": country_short, "types": ["country", "political"]})
+		return {
+			"status": "OK",
+			"results": [
+				{
+					"geometry": {"location": {"lat": lat, "lng": lng}},
+					"formatted_address": formatted,
+					"place_id": "fake-place-id",
+					"partial_match": partial_match,
+					"address_components": components,
+				}
+			],
+		}
+
+	def _mock_google(self, payload=None, side_effect=None):
+		if side_effect is not None:
+			return patch.object(geocoding, "_google_geocode_address", side_effect=side_effect)
+		return patch.object(geocoding, "_google_geocode_address", return_value=payload)
+
+	def _make_geocode_customer(self, suffix, country="Colombia"):
+		customer = self.world.customer(f"FG244 {suffix} Customer")
+		self._set_customer_primary_address(customer, address_line1=f"Calle {suffix} 1", city="Bogotá")
+		self._facturado_pick_list(customer=customer)
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+		if country != "Colombia":
+			frappe.db.set_value("Address", address_name, "country", country)
+		return customer, address_name
+
+	def test_geocode_customer_address_ok_valid(self):
+		customer, address_name = self._make_geocode_customer("OKValid")
+		with self._mock_google(self._google_payload(lat=4.6097, lng=-74.0817)):
+			with fx.as_user(self.gestion_clientes_user):
+				result = recorridos.geocode_customer_address(address_name)
+		self.assertEqual(result["status"], "Geolocalizado")
+		self.assertFalse(result["skipped"])
+		self.assertAlmostEqual(flt(result["latitude"]), 4.6097, places=4)
+		address = frappe.get_doc("Address", address_name)
+		self.assertEqual(address.fg_geocoding_source, "Google")
+		self.assertEqual(address.fg_geocoded_by, self.gestion_clientes_user)
+		self.assertIsNotNone(address.fg_geocoded_on)
+
+	def test_geocode_customer_address_invalid_coordinates_from_google_rejected(self):
+		"""Google's own (0, 0) null-island sentinel must never be accepted
+		as Geolocalizado -- routed through is_valid_coordinate_pair() same
+		as the manual path."""
+		customer, address_name = self._make_geocode_customer("NullIsland")
+		with self._mock_google(self._google_payload(lat=0, lng=0)):
+			with fx.as_user(self.gestion_clientes_user):
+				result = recorridos.geocode_customer_address(address_name)
+		self.assertEqual(result["status"], "Error")
+		self.assertIsNone(result["latitude"])
+
+	def test_geocode_customer_address_zero_results(self):
+		customer, address_name = self._make_geocode_customer("ZeroResults")
+		with self._mock_google({"status": "ZERO_RESULTS", "results": []}):
+			with fx.as_user(self.gestion_clientes_user):
+				result = recorridos.geocode_customer_address(address_name)
+		self.assertEqual(result["status"], "Error")
+		address = frappe.get_doc("Address", address_name)
+		self.assertEqual(address.fg_geocoding_status, "Error")
+		self.assertEqual(flt(address.fg_latitude), 0.0)
+
+	def test_geocode_customer_address_request_denied_raises(self):
+		customer, address_name = self._make_geocode_customer("ReqDenied")
+		with self._mock_google({"status": "REQUEST_DENIED"}):
+			with fx.as_user(self.gestion_clientes_user):
+				with self.assertRaises(geocoding.GeocodingProviderError):
+					recorridos.geocode_customer_address(address_name)
+		# Never partially applied.
+		self.assertEqual(frappe.db.get_value("Address", address_name, "fg_geocoding_status"), "Pendiente")
+
+	def test_geocode_customer_address_over_query_limit_raises(self):
+		customer, address_name = self._make_geocode_customer("OverQuery")
+		with self._mock_google({"status": "OVER_QUERY_LIMIT"}):
+			with fx.as_user(self.gestion_clientes_user):
+				with self.assertRaises(geocoding.GeocodingProviderError):
+					recorridos.geocode_customer_address(address_name)
+
+	def test_geocode_customer_address_timeout_raises(self):
+		"""_google_geocode_address() itself already has its own dedicated
+		requests.exceptions.Timeout -> GeocodingProviderError translation
+		test in test_geocoding.py -- this test only confirms
+		geocode_customer_address() correctly propagates that (already
+		-translated) exception without writing anything to the Address,
+		so the mock here raises exactly what the real transport layer
+		would have already turned it into."""
+		customer, address_name = self._make_geocode_customer("Timeout")
+		with self._mock_google(side_effect=geocoding.GeocodingProviderError("Google Maps no respondió a tiempo.")):
+			with fx.as_user(self.gestion_clientes_user):
+				with self.assertRaises(geocoding.GeocodingProviderError):
+					recorridos.geocode_customer_address(address_name)
+		self.assertEqual(frappe.db.get_value("Address", address_name, "fg_geocoding_status"), "Pendiente")
+
+	def test_geocode_customer_address_partial_match_becomes_revisar(self):
+		customer, address_name = self._make_geocode_customer("PartialMatch")
+		with self._mock_google(self._google_payload(partial_match=True)):
+			with fx.as_user(self.gestion_clientes_user):
+				result = recorridos.geocode_customer_address(address_name)
+		self.assertEqual(result["status"], "Revisar")
+		address = frappe.get_doc("Address", address_name)
+		# Candidate coordinates ARE kept for Revisar (brief section 9).
+		self.assertNotEqual(flt(address.fg_latitude), 0.0)
+
+	def test_geocode_customer_address_country_match(self):
+		customer, address_name = self._make_geocode_customer("CountryMatch", country="Colombia")
+		with self._mock_google(self._google_payload(country_long="Colombia", country_short="CO")):
+			with fx.as_user(self.gestion_clientes_user):
+				result = recorridos.geocode_customer_address(address_name)
+		self.assertEqual(result["status"], "Geolocalizado")
+
+	def test_geocode_customer_address_country_mismatch_becomes_revisar(self):
+		customer, address_name = self._make_geocode_customer("CountryMismatch", country="Colombia")
+		with self._mock_google(self._google_payload(country_long="United States", country_short="US")):
+			with fx.as_user(self.gestion_clientes_user):
+				result = recorridos.geocode_customer_address(address_name)
+		self.assertEqual(result["status"], "Revisar")
+
+	def test_geocode_customer_address_recorrido_role_rejected(self):
+		customer, address_name = self._make_geocode_customer("RecorridoDenied")
+		with self._mock_google(self._google_payload()):
+			with fx.as_user(self.recorrido_user):
+				with self.assertRaises(frappe.PermissionError):
+					recorridos.geocode_customer_address(address_name)
+
+	def test_geocode_customer_address_gestion_clientes_allowed(self):
+		customer, address_name = self._make_geocode_customer("GestionAllowed")
+		with self._mock_google(self._google_payload()):
+			with fx.as_user(self.gestion_clientes_user):
+				result = recorridos.geocode_customer_address(address_name)
+		self.assertEqual(result["status"], "Geolocalizado")
+
+	def test_geocode_customer_address_system_manager_allowed(self):
+		customer, address_name = self._make_geocode_customer("SysManagerAllowed")
+		with self._mock_google(self._google_payload()):
+			with fx.as_user(self.system_manager_user):
+				result = recorridos.geocode_customer_address(address_name)
+		self.assertEqual(result["status"], "Geolocalizado")
+
+	def test_geocode_customer_address_company_isolation(self):
+		so, pl = self._other_company_facturado_pick_list()
+		address_name = frappe.db.get_value("Customer", self.other_customer.name, "customer_primary_address")
+		if not address_name:
+			self._set_customer_primary_address(self.other_customer, address_line1="Otra Empresa Geo 1", city="Bogotá")
+			address_name = frappe.db.get_value("Customer", self.other_customer.name, "customer_primary_address")
+		with self._mock_google(self._google_payload()):
+			with fx.as_user(self.gestion_clientes_user):
+				with self.assertRaises(frappe.PermissionError):
+					recorridos.geocode_customer_address(address_name)
+
+	def test_geocode_customer_address_force_false_does_not_overwrite_manual(self):
+		customer, address_name = self._make_geocode_customer("ForceFalseManual")
+		with fx.as_user(self.gestion_clientes_user):
+			recorridos.set_address_geolocation(address_name, 1.111111, -71.111111, source="Manual")
+		with self._mock_google(self._google_payload(lat=9.9, lng=-79.9)):
+			with fx.as_user(self.gestion_clientes_user):
+				result = recorridos.geocode_customer_address(address_name, force=False)
+		self.assertTrue(result["skipped"])
+		address = frappe.get_doc("Address", address_name)
+		self.assertEqual(address.fg_geocoding_source, "Manual")
+		self.assertAlmostEqual(flt(address.fg_latitude), 1.111111, places=4)
+
+	def test_geocode_customer_address_force_true_overwrites(self):
+		customer, address_name = self._make_geocode_customer("ForceTrueOverwrite")
+		with fx.as_user(self.gestion_clientes_user):
+			recorridos.set_address_geolocation(address_name, 1.111111, -71.111111, source="Manual")
+		with self._mock_google(self._google_payload(lat=9.9, lng=-79.9)):
+			with fx.as_user(self.gestion_clientes_user):
+				result = recorridos.geocode_customer_address(address_name, force=True)
+		self.assertFalse(result["skipped"])
+		self.assertEqual(result["status"], "Geolocalizado")
+		address = frappe.get_doc("Address", address_name)
+		self.assertEqual(address.fg_geocoding_source, "Google")
+		self.assertAlmostEqual(flt(address.fg_latitude), 9.9, places=4)
+
+	def test_geocode_customer_address_nonexistent_address(self):
+		with fx.as_user(self.gestion_clientes_user):
+			with self.assertRaises(frappe.DoesNotExistError):
+				recorridos.geocode_customer_address("FG244-NO-SUCH-ADDRESS")
+
+	# -- geocode_route_pending_addresses() -----------------------------------
+
+	def test_geocode_route_pending_addresses_batch_deduplicates_address(self):
+		"""3 stops sharing the SAME Address -- exactly 1 Google call, not
+		3 (brief section 14)."""
+		customer = self.world.customer("FG244 Batch Dedup Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Dedup 1", city="Bogotá")
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+
+		so1, pl1 = self._facturado_pick_list(customer=customer, item=self.item)
+		so2, pl2 = self._facturado_pick_list(customer=customer, item=self.item2)
+		so3, pl3 = self._facturado_pick_list(customer=customer, item=self.item, rate=200)
+
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl1.name, pl2.name, pl3.name])
+
+		call_count = {"n": 0}
+
+		def counting_google(address_text, api_key):
+			call_count["n"] += 1
+			return self._google_payload()
+
+		with self._mock_google(side_effect=counting_google):
+			with fx.as_user(self.system_manager_user):
+				result = recorridos.geocode_route_pending_addresses(route["name"])
+
+		self.assertEqual(call_count["n"], 1)
+		self.assertEqual(result["total_stops"], 3)
+		self.assertEqual(result["unique_addresses"], 1)
+		self.assertEqual(result["geocoded"], 1)
+		self.assertEqual(result["ready_for_routing"], True)
+
+	def test_geocode_route_pending_addresses_skips_already_geolocated(self):
+		customer = self.world.customer("FG244 Batch Skip Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Skip 1", city="Bogotá")
+		with fx.as_user(self.gestion_clientes_user):
+			address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+			recorridos.set_address_geolocation(address_name, 4.1, -74.1, source="Manual")
+		so, pl = self._facturado_pick_list(customer=customer)
+
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+
+		call_count = {"n": 0}
+
+		def counting_google(address_text, api_key):
+			call_count["n"] += 1
+			return self._google_payload()
+
+		with self._mock_google(side_effect=counting_google):
+			with fx.as_user(self.system_manager_user):
+				result = recorridos.geocode_route_pending_addresses(route["name"])
+
+		self.assertEqual(call_count["n"], 0)
+		self.assertEqual(result["already_geolocated"], 1)
+		self.assertEqual(result["geocoded"], 0)
+
+	def test_geocode_route_pending_addresses_borrador_refreshes_snapshot(self):
+		customer = self.world.customer("FG244 Batch Refresh Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Refresh Batch 1", city="Bogotá")
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+		self.assertEqual(route["stops"][0]["geolocation_status"], "Pendiente")
+
+		with self._mock_google(self._google_payload(lat=4.65, lng=-74.05)):
+			with fx.as_user(self.system_manager_user):
+				recorridos.geocode_route_pending_addresses(route["name"])
+
+		with fx.as_user(self.recorrido_user):
+			detail = recorridos.get_route_detail(route["name"])
+		self.assertEqual(detail["stops"][0]["geolocation_status"], "Geolocalizado")
+		self.assertAlmostEqual(flt(detail["stops"][0]["latitude"]), 4.65, places=4)
+
+	def test_geocode_route_pending_addresses_planificado_does_not_mutate_snapshot(self):
+		"""A Planificado route is rejected outright (brief section 15's
+		own "NO mutar snapshot del Recorrido Planificado") -- same
+		guarantee refresh_route_geolocation() already makes."""
+		customer = self.world.customer("FG244 Batch Planificado Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Batch Plan 1", city="Bogotá")
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+			self._plan_route(route["name"])
+		with fx.as_user(self.system_manager_user):
+			with self.assertRaises(recorridos.RouteNotEditableError):
+				recorridos.geocode_route_pending_addresses(route["name"])
+
+	def test_geocode_route_pending_addresses_requires_both_permissions(self):
+		"""Gestión de Clientes alone (Address write, no Recorrido grant)
+		must be rejected -- this endpoint also needs Recorrido-write to
+		touch the route's own Paradas, see its own docstring."""
+		customer = self.world.customer("FG244 Batch Perm Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Batch Perm 1", city="Bogotá")
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+		with fx.as_user(self.gestion_clientes_user):
+			with self.assertRaises(frappe.PermissionError):
+				recorridos.geocode_route_pending_addresses(route["name"])
+		with fx.as_user(self.recorrido_user):
+			with self.assertRaises(frappe.PermissionError):
+				recorridos.geocode_route_pending_addresses(route["name"])
+
+	def test_geocode_route_pending_addresses_no_economic_values(self):
+		forbidden_keys = {"rate", "amount", "grand_total", "net_total", "price", "account", "outstanding_amount"}
+		customer = self.world.customer("FG244 Batch NoEcon Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Batch NoEcon 1", city="Bogotá")
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+		with fx.as_user(self.system_manager_user):
+			with self._mock_google(self._google_payload()):
+				result = recorridos.geocode_route_pending_addresses(route["name"])
+		self.assertFalse(forbidden_keys & set(result.keys()), result.keys())
 
 	# =====================================================================
 	# Commit 24.3 -- refresh_route_geolocation()

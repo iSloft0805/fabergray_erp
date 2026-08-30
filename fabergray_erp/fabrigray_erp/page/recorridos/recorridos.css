@@ -1737,6 +1737,58 @@
 	background: #e6ddfd;
 }
 
+/* Commit 24.4 -- "Obtener ubicación" (automatic, Google), placed NEXT TO
+   .fg-route-geo-configure-btn (manual) above -- a solid fill distinguishes
+   the automatic action from the manual one without a new color. */
+.fg-route-geo-auto-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: var(--fg-route-violet);
+	color: #fff;
+	border: none;
+	border-radius: 8px;
+	padding: 5px 12px;
+	font-weight: 700;
+	font-size: 0.76rem;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.fg-route-geo-auto-btn:hover {
+	filter: brightness(1.08);
+}
+
+.fg-route-geo-auto-btn:disabled {
+	opacity: 0.7;
+	cursor: default;
+}
+
+.fg-route-geo-batch-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	margin-top: 10px;
+	background: var(--fg-route-violet);
+	color: #fff;
+	border: none;
+	border-radius: 8px;
+	padding: 7px 14px;
+	font-weight: 700;
+	font-size: 0.78rem;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.fg-route-geo-batch-btn:hover {
+	filter: brightness(1.08);
+}
+
+.fg-route-geo-batch-btn:disabled {
+	opacity: 0.7;
+	cursor: default;
+}
+
 .fg-route-geo-pending-text {
 	font-size: 0.76rem;
 	font-weight: 600;

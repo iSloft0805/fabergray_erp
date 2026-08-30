@@ -276,6 +276,39 @@ fixtures = [
 		#
 		# Commit 22.8 -- "Stock Entry" added: same reasoning, for the
 		# Material Receipt flow behind receive_shortage_purchase().
+		#
+		# Commit 24.4 -- "Address" added, and this one is NOT the same
+		# "System Manager never had any native grant here" story as the
+		# rows above. Address's OWN native permissions
+		# (frappe/contacts/doctype/address/address.json) DO list System
+		# Manager (read=1/write=1) -- but Address has carried Custom
+		# DocPerm rows of its own since at least Commit 22.7 (Vendedora/
+		# Gestión de Clientes), which -- confirmed live via
+		# frappe.permissions.get_valid_perms("Address") -- means Frappe
+		# has been silently ignoring ALL of Address's native permission
+		# rows for EVERY role ever since, System Manager included. The
+		# exact "Reporte de Faltante incident" class this app's own
+		# native_restore fixture entry below already exists to fix for
+		# Item Price/Stock Ledger Entry/Stock Reconciliation/Stock Entry
+		# -- just never previously noticed for Address, because every
+		# geolocation test before this commit's own real, non-
+		# Administrator System Manager test user either used
+		# Administrator (which bypasses every permission check outright)
+		# or Gestión de Clientes (which already has its own explicit
+		# Custom DocPerm row).
+		#
+		# Deliberately NOT a native_restore entry, though: Address's
+		# OTHER masked native grants (Sales User/Purchase User/
+		# Maintenance User/Accounts User/"All", all read=1/write=1) are
+		# NOT replicated here. Restoring "All" -- literally every user on
+		# the site -- would silently reopen the exact vulnerability the
+		# turn-4 security audit spent an entire commit closing (Recorrido
+		# and every other role regaining Address write through "All").
+		# Only the ONE grant this commit's own brief explicitly requires
+		# ("Autorizados: Gestión de Clientes / System Manager") is added.
+		# Whether to restore the other four roles is a separate product
+		# decision, flagged in this commit's own report, not resolved
+		# here.
 		"dt": "Custom DocPerm",
 		"prefix": "system_manager",
 		"filters": [
@@ -291,6 +324,7 @@ fixtures = [
 					"Stock Reconciliation",
 					"Warehouse",
 					"Stock Entry",
+					"Address",
 				],
 			],
 		],

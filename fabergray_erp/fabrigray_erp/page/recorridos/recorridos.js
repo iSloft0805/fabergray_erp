@@ -1128,13 +1128,27 @@ fabergray_erp.Recorridos = class Recorridos {
 							is_geo_ready && s.latitude && s.longitude
 								? `<div class="fg-route-geo-coords">${flt(s.latitude).toFixed(5)}, ${flt(s.longitude).toFixed(5)}</div>`
 								: "";
+						// Commit 24.4 -- "OBTENER UBICACIÓN" (automatic, Google) sits
+						// NEXT TO "Configurar ubicación" (manual, Commit 24.3),
+						// never replacing it: brief section 17's own manual
+						// confirm/correct flow via set_address_geolocation() stays
+						// exactly as it was. Same can_administer_geolocation gate
+						// as the manual button -- Recorrido only ever sees the
+						// plain "Ubicación pendiente" text, brief section 16's
+						// own "Rol Recorrido: solo visualiza estado".
 						const geo_configure_btn =
 							is_borrador && !is_geo_ready && s.customer_address
 								? can_administer_geolocation
-									? `<button type="button" class="fg-route-geo-configure-btn" data-action="configure-location" data-name="${s.name}">${icon(
+									? `
+									<button type="button" class="fg-route-geo-auto-btn" data-action="auto-geocode" data-name="${s.name}">${icon(
+											"sparkles",
+											"fg-icon-sm"
+									  )} ${__("Obtener ubicación")}</button>
+									<button type="button" class="fg-route-geo-configure-btn" data-action="configure-location" data-name="${s.name}">${icon(
 											"map-pin",
 											"fg-icon-sm"
-									  )} ${__("Configurar ubicación")}</button>`
+									  )} ${__("Configurar ubicación")}</button>
+								`
 									: `<span class="fg-route-geo-pending-text">${__("Ubicación pendiente")}</span>`
 								: "";
 						return `
@@ -1220,6 +1234,14 @@ fabergray_erp.Recorridos = class Recorridos {
 								: `<div class="fg-route-geo-status fg-route-geo-status--warn">
 										<div class="fg-route-geo-status-title">${icon("triangle-alert", "fg-icon-sm")} ${__("{0} ubicaciones pendientes", [geo_pending_count])}</div>
 										<div class="fg-route-geo-status-sub">${__("Completa las ubicaciones antes de calcular la ruta.")}</div>
+										${
+											is_borrador && can_administer_geolocation
+												? `<button type="button" class="fg-route-geo-batch-btn" data-action="auto-geocode-pending">${icon(
+														"sparkles",
+														"fg-icon-sm"
+												  )} ${__("Obtener ubicaciones pendientes")}</button>`
+												: ""
+										}
 									</div>`
 						}
 					</div>
@@ -1261,6 +1283,69 @@ fabergray_erp.Recorridos = class Recorridos {
 			const stop = this.detail.stops.find((s) => s.name === $(e.currentTarget).data("name"));
 			if (stop) this.open_configure_location_dialog(stop);
 		});
+		$html.find('[data-action="auto-geocode"]').on("click", (e) => {
+			const stop = this.detail.stops.find((s) => s.name === $(e.currentTarget).data("name"));
+			if (stop) this.auto_geocode_stop($(e.currentTarget), stop);
+		});
+		$html.find('[data-action="auto-geocode-pending"]').on("click", (e) => this.auto_geocode_pending($(e.currentTarget)));
+	}
+
+	// =====================================================================
+	// Commit 24.4 -- Obtener ubicación (automático, Google Maps Platform).
+	// geocode_customer_address()/geocode_route_pending_addresses() ->
+	// refresh_route_geolocation() -> refrescar detalle. NEXT TO, never
+	// instead of, Commit 24.3's own manual "Configurar ubicación" --
+	// brief section 17's own manual confirm/correct flow is untouched.
+	// =====================================================================
+	auto_geocode_stop($btn, stop) {
+		const original_html = $btn.html();
+		$btn.prop("disabled", true).html(`<span class="fg-route-btn-spinner"></span> ${__("Buscando ubicación...")}`);
+
+		this.call("geocode_customer_address", { address_name: stop.customer_address })
+			.then((result) => this.call("refresh_route_geolocation", { route_name: this.detail.name }).then(() => result))
+			.then((result) => {
+				this.show_geocode_result_alert(result && result.status);
+				return this.reload_detail(this.detail.name);
+			})
+			.finally(() => {
+				$btn.prop("disabled", false).html(original_html);
+			});
+	}
+
+	auto_geocode_pending($btn) {
+		const original_html = $btn.html();
+		$btn.prop("disabled", true).html(`<span class="fg-route-btn-spinner"></span> ${__("Buscando ubicaciones...")}`);
+		this.set_busy(true);
+
+		this.call("geocode_route_pending_addresses", { route_name: this.detail.name })
+			.then((result) => {
+				frappe.show_alert(
+					{
+						message: __("Geolocalizadas: {0} · Por revisar: {1} · Errores: {2}", [
+							result.geocoded + result.already_geolocated,
+							result.review,
+							result.errors,
+						]),
+						indicator: result.errors ? "orange" : "green",
+					},
+					6
+				);
+				return this.reload_detail(this.detail.name);
+			})
+			.finally(() => {
+				$btn.prop("disabled", false).html(original_html);
+				this.set_busy(false);
+			});
+	}
+
+	show_geocode_result_alert(status) {
+		if (status === "Geolocalizado") {
+			frappe.show_alert({ message: "✓ " + __("UBICACIÓN LISTA"), indicator: "green" }, 5);
+		} else if (status === "Revisar") {
+			frappe.show_alert({ message: "⚠ " + __("REVISAR UBICACIÓN"), indicator: "orange" }, 5);
+		} else {
+			frappe.show_alert({ message: "✕ " + __("NO ENCONTRADA"), indicator: "red" }, 5);
+		}
 	}
 
 	// =====================================================================

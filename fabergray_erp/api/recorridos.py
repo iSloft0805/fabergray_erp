@@ -1222,13 +1222,9 @@ def set_address_geolocation(address_name, latitude, longitude, source="Manual", 
 
 	address = frappe.get_doc("Address", address_name)
 	address.check_permission("write")
-	address.fg_latitude = flt(latitude)
-	address.fg_longitude = flt(longitude)
-	address.fg_geocoding_status = "Geolocalizado"
-	address.fg_geocoding_source = source
-	address.fg_geocoded_on = now_datetime()
-	address.fg_geocoded_by = frappe.session.user
-	address.fg_geocoding_note = note or None
+	_apply_address_geolocation(
+		address, status="Geolocalizado", source=source, note=note, latitude=latitude, longitude=longitude
+	)
 	address.save()
 
 	return {
@@ -1237,6 +1233,384 @@ def set_address_geolocation(address_name, latitude, longitude, source="Manual", 
 		"longitude": address.fg_longitude,
 		"geocoding_status": address.fg_geocoding_status,
 		"geocoding_source": address.fg_geocoding_source,
+	}
+
+
+def _apply_address_geolocation(address, status, source, note=None, latitude=None, longitude=None):
+	"""Commit 24.4, brief section 11's own "No duplicar escritura de
+	fg_*" -- the ONE place any code in this module sets Address' own
+	fg_* geolocation fields, shared by set_address_geolocation() (Commit
+	24.3, manual) and _geocode_one_address() below (Commit 24.4, Google)
+	so neither path can drift from the other (one remembering
+	fg_geocoded_by, the other forgetting it, etc.). `address` must
+	already be a loaded, write-permission-checked Address document --
+	this never loads, checks permission, or calls .save() itself; the
+	caller decides exactly when the single .save() happens.
+
+	Coordinates are written ONLY for status="Geolocalizado" (a confirmed,
+	routable result) and "Revisar" (a provider's own candidate, kept for
+	an authorized human to confirm or correct -- brief section 9's own
+	"conservar coordenadas candidatas si la arquitectura lo permite de
+	forma segura": safe here because nothing anywhere treats
+	status="Revisar" as ready_for_routing -- _resolve_stop_geolocation()
+	above already propagates a non-"Geolocalizado" Address status onto
+	the stop as Pendiente-shaped, coordinates included, and is left
+	completely untouched by this commit). status="Error" NEVER writes a
+	coordinate, real or candidate (brief section 12's own explicit "no
+	escribir coordenadas falsas") -- whatever was on the Address before
+	(usually nothing) is left exactly as it was."""
+	if status in ("Geolocalizado", "Revisar"):
+		address.fg_latitude = flt(latitude)
+		address.fg_longitude = flt(longitude)
+	address.fg_geocoding_status = status
+	address.fg_geocoding_source = source
+	address.fg_geocoded_on = now_datetime()
+	address.fg_geocoded_by = frappe.session.user
+	address.fg_geocoding_note = note or None
+
+
+def _google_country_matches(address_country, google_result):
+	"""Brief section 10 -- if the Address itself has no country set,
+	there is nothing to compare against: treated as a match, never a
+	mismatch just because OUR OWN data is incomplete (a data-quality gap
+	on this app's side, not evidence Google found the wrong place).
+	Otherwise compares case-insensitively against BOTH the long_name
+	Google returned for the "country" address_component (matches
+	Frappe's own Country.name, e.g. "Colombia") and the short_name
+	(matches Country.code, e.g. "CO") -- accepting either avoids a false
+	mismatch from a naming variant neither side controls.
+
+	frappe.db.get_value() (a raw read) resolves Country.code -- the same
+	"purely internal, never a document permission check" reasoning this
+	module's own _address_belongs_to_company() already documents:
+	Gestión de Clientes has no explicit Country permission of its own,
+	and this only ever produces a boolean, never exposes the Country
+	document itself."""
+	if not address_country:
+		return True
+
+	long_name = (google_result.get("country_long_name") or "").strip().lower()
+	short_name = (google_result.get("country_short_name") or "").strip().lower()
+	if not long_name and not short_name:
+		return False
+
+	address_country_name = address_country.strip().lower()
+	address_country_code = (frappe.db.get_value("Country", address_country, "code") or "").strip().lower()
+
+	return address_country_name == long_name or (bool(address_country_code) and address_country_code == short_name)
+
+
+def _build_google_revisar_note(google_result, country_ok):
+	"""Human-readable reason(s) an automatic Google result was parked as
+	"Revisar" instead of "Geolocalizado" (brief section 9/10) -- shown to
+	whoever reviews it via set_address_geolocation()'s own existing
+	manual-correction flow (brief section 17), never a code the UI has
+	to re-derive on its own."""
+	reasons = []
+	if google_result.get("partial_match"):
+		reasons.append(_("Google indicó una coincidencia parcial (partial_match)."))
+	if not country_ok:
+		reasons.append(_("El país devuelto por Google no coincide con el país registrado en la dirección."))
+	formatted = google_result.get("formatted_address")
+	if formatted:
+		reasons.append(_("Dirección formateada por Google: {0}").format(formatted))
+	return " ".join(reasons) or None
+
+
+def _geocode_one_address(address_name, force=False):
+	"""Commit 24.4 -- the shared core of geocode_customer_address() and
+	geocode_route_pending_addresses() below (brief section 11's own
+	numbered steps 4-8, and section 14's own dedup requirement: called
+	at most once per UNIQUE Address, never once per stop). Never checks
+	permission or company isolation itself -- both callers already did
+	that against the Address/route they were actually given before
+	reaching here; re-checking here would be redundant, not safer.
+
+	force=False (default) skips calling the provider at all when the
+	Address is ALREADY status="Geolocalizado" with a currently-valid
+	coordinate pair, regardless of source -- brief section 13's own "NO
+	sobrescribir automáticamente salvo force=True" for a Manual
+	confirmation is a strict subset of this broader rule (a Manual
+	Geolocalizado address is, definitionally, also "already
+	Geolocalizado with valid coordinates"), and brief section 14's own
+	batch rule ("No llamar provider para: status Geolocalizado ...
+	salvo force explícito") needs the exact same check -- one rule,
+	never two copies that could drift.
+
+	Never raises for a normal address-level outcome (OK/ZERO_RESULTS) --
+	only geocoding.GeocodingProviderError propagates, for a genuine
+	provider/config failure, and only AFTER this function's own
+	`address.check_permission("write")` already passed, so a failed
+	Google call never happens as a side effect of an unauthorized
+	request."""
+	address = frappe.get_doc("Address", address_name)
+	address.check_permission("write")
+
+	if (
+		not force
+		and address.fg_geocoding_status == "Geolocalizado"
+		and geocoding.is_valid_coordinate_pair(address.fg_latitude, address.fg_longitude)
+	):
+		return {
+			"address": address.name,
+			"status": address.fg_geocoding_status,
+			"latitude": address.fg_latitude,
+			"longitude": address.fg_longitude,
+			"geocoding_source": address.fg_geocoding_source,
+			"skipped": True,
+		}
+
+	address_text = geocoding.build_geocoding_address(address)
+	google_result = geocoding.geocode_address(address_text)
+
+	if google_result["status"] != "OK" or not geocoding.is_valid_coordinate_pair(
+		google_result["latitude"], google_result["longitude"]
+	):
+		_apply_address_geolocation(
+			address,
+			status="Error",
+			source="Google",
+			note=_("Google no encontró resultados para esta dirección."),
+		)
+		address.save()
+		return {
+			"address": address.name,
+			"status": "Error",
+			"latitude": None,
+			"longitude": None,
+			"geocoding_source": "Google",
+			"skipped": False,
+		}
+
+	country_ok = _google_country_matches(address.country, google_result)
+	needs_review = bool(google_result.get("partial_match")) or not country_ok
+
+	if needs_review:
+		_apply_address_geolocation(
+			address,
+			status="Revisar",
+			source="Google",
+			note=_build_google_revisar_note(google_result, country_ok),
+			latitude=google_result["latitude"],
+			longitude=google_result["longitude"],
+		)
+	else:
+		_apply_address_geolocation(
+			address,
+			status="Geolocalizado",
+			source="Google",
+			note=google_result.get("formatted_address"),
+			latitude=google_result["latitude"],
+			longitude=google_result["longitude"],
+		)
+	address.save()
+
+	return {
+		"address": address.name,
+		"status": address.fg_geocoding_status,
+		"latitude": address.fg_latitude,
+		"longitude": address.fg_longitude,
+		"formatted_address": google_result.get("formatted_address"),
+		"geocoding_source": address.fg_geocoding_source,
+		"skipped": False,
+	}
+
+
+@frappe.whitelist()
+def geocode_customer_address(address_name, force=False):
+	"""Commit 24.4, brief section 11 -- automatic Google geocoding for
+	ONE Address, the numbered steps in brief order: (1) permission,
+	(2) load/exists, (3) company isolation, (4-8) delegated to
+	_geocode_one_address() above (build text -> call provider -> validate
+	-> persist via the shared helper -> return normalized result).
+
+	Permissions -- deliberately the exact same boundary as
+	set_address_geolocation() (brief section 11's own "Autorizados:
+	Gestión de Clientes / System Manager. Recorrido: NO"): Recorrido is a
+	CONSUMER of geolocation, never an ADMINISTRATOR of it, regardless of
+	whether the coordinate came from a human or from Google. No new
+	Custom DocPerm grant needed -- `frappe.has_permission("Address",
+	"write")` and `address.check_permission("write")` (inside
+	_geocode_one_address()) already resolve to exactly Gestión de
+	Clientes/System Manager now that Recorrido's own Address `write` is
+	back to 0 (turn-4 security audit). Never ignore_permissions.
+
+	force=False (default): a Manual or already-valid-Google
+	confirmation is never silently overwritten (brief section 13).
+	force=True: same permission boundary, just skips that guard --
+	still never ignore_permissions, still requires the same real
+	Address-write permission."""
+	_require_login()
+	force = cint(force)
+
+	if not frappe.db.exists("Address", address_name):
+		frappe.throw(_("La dirección {0} no existe.").format(address_name), frappe.DoesNotExistError)
+
+	frappe.has_permission("Address", "write", throw=True)
+
+	company = get_default_company()
+	if not _address_belongs_to_company(address_name, company):
+		frappe.throw(
+			_("Esta dirección no pertenece a un cliente de esta empresa."),
+			frappe.PermissionError,
+		)
+
+	return _geocode_one_address(address_name, force=force)
+
+
+def _refresh_route_stops_snapshot(route):
+	"""Commit 24.3's own refresh_route_geolocation() body, extracted
+	unchanged in Commit 24.4 so geocode_route_pending_addresses() below
+	can reuse the exact same snapshot-refresh logic instead of a second
+	copy (brief section 1's own "NO duplicar lógica existente"). `route`
+	must already be a loaded, write-permission-checked Recorrido whose
+	CURRENT status the caller has already confirmed is "Borrador" (this
+	function itself never re-checks status -- both callers already did,
+	each under their own concurrency-appropriate lock)."""
+	stops = frappe.get_list(
+		"Recorrido Parada",
+		filters={"recorrido": route.name},
+		fields=["name", "customer_address"],
+	)
+	for s in stops:
+		geo = _resolve_stop_geolocation(s.customer_address)
+		stop_doc = frappe.get_doc("Recorrido Parada", s.name)
+		stop_doc.check_permission("write")
+		stop_doc.latitude = geo["latitude"]
+		stop_doc.longitude = geo["longitude"]
+		stop_doc.geolocation_status = geo["geolocation_status"]
+		stop_doc.geolocation_source = geo["geolocation_source"]
+		stop_doc.save()
+
+
+@frappe.whitelist()
+def geocode_route_pending_addresses(route_name, force=False):
+	"""Commit 24.4, brief section 14 -- batch-geocode every UNIQUE
+	Address behind a Borrador route's own pending stops, then refresh the
+	route's snapshot exactly like refresh_route_geolocation() does.
+
+	Permissions -- deliberately audited, not assumed, and reported as an
+	open question rather than silently resolved: this function needs BOTH
+	Address-write (to actually geocode -- Gestión de Clientes/System
+	Manager) AND Recorrido-write (to read/refresh the route's own
+	Paradas -- Recorrido/System Manager, confirmed via a direct read of
+	recorrido.json/recorrido_parada.json's own `permissions` arrays,
+	which carry NO Gestión de Clientes grant at all). Today, System
+	Manager is the only role both sets have in common -- this function
+	requires BOTH checks upfront, never silently widening either role's
+	existing grant, so a Gestión de Clientes-only or Recorrido-only
+	caller gets a real, honest PermissionError rather than a half-applied
+	batch (Addresses geocoded but the route's own snapshot never
+	refreshed, or vice versa). See this commit's own final report for
+	the explicit question this raises for product decision, not
+	something this commit resolves unilaterally.
+
+	Deduplication (brief section 14's own "Si 3 paradas apuntan al mismo
+	Address: 1 llamada Google, no 3"): iterates the SORTED SET of unique
+	customer_address values across the route's stops, calling
+	_geocode_one_address() once per unique Address -- never once per
+	stop. force=False also means an Address already Geolocalizado is
+	skipped entirely (zero Google calls), counted under
+	`already_geolocated`, not `geocoded`.
+
+	Concurrency (brief section 15) -- explicitly does NOT hold a route
+	lock across the Google HTTP calls: (A) validates Borrador with a
+	plain, non-locking read; (B) reads stops/addresses, still unlocked;
+	(D) calls Google for each unique Address (each individual
+	_geocode_one_address() call takes its own Address-level
+	check_permission()+.save(), never a route-level lock -- an Address's
+	own geocoding is valid independent of any one route's status); only
+	AFTER every Google call returns does this (E) re-acquire the route's
+	status under `for_update=True` (the same primitive
+	refresh_route_geolocation() already uses) and (F/G) only refresh the
+	Recorrido Parada snapshots if the route is STILL Borrador at that
+	point. If it moved to Planificado while Google was answering, the
+	Address-level geocoding already saved is kept (a real, valid
+	correction to master data, brief section 15's own "Address puede
+	conservar su geocodificación maestra si corresponde") but the
+	now-frozen Planificado route's own snapshot is never touched --
+	exactly refresh_route_geolocation()'s own existing guarantee, never
+	weakened here.
+
+	A `geocoding.GeocodingProviderError` for one Address (a provider/
+	config failure, never a normal ZERO_RESULTS) is caught PER ADDRESS
+	and counted under `errors`, not raised -- a batch never aborts
+	outright just because one Address's geocoding attempt failed; every
+	other unique Address in the route still gets its own attempt.
+
+	No economic value anywhere in the return (brief section 14's own "NO
+	valores económicos"), same guarantee get_route_geolocation_status()
+	already makes."""
+	_require_login()
+	frappe.has_permission("Address", "write", throw=True)
+	frappe.has_permission("Recorrido", "write", throw=True)
+	force = cint(force)
+
+	# A. Validate Borrador -- a plain read, never for_update: brief
+	# section 15's own explicit "NO mantener SELECT FOR UPDATE mientras
+	# esperas HTTP".
+	route = frappe.get_doc("Recorrido", route_name)
+	route.check_permission("read")
+	if route.status != "Borrador":
+		frappe.throw(
+			_("Solo se pueden geocodificar direcciones de un recorrido en Borrador."),
+			RouteNotEditableError,
+		)
+
+	# B. Read stops/addresses -- still no lock.
+	stops = frappe.get_list(
+		"Recorrido Parada",
+		filters={"recorrido": route.name},
+		fields=["name", "customer_address"],
+	)
+	total_stops = len(stops)
+	unique_addresses = sorted({s.customer_address for s in stops if s.customer_address})
+
+	already_geolocated = 0
+	geocoded = 0
+	review = 0
+	errors = 0
+
+	# C/D. No DB lock held across this loop -- each HTTP call to Google
+	# happens with no Recorrido/Recorrido Parada row lock outstanding.
+	for address_name in unique_addresses:
+		try:
+			result = _geocode_one_address(address_name, force=force)
+		except geocoding.GeocodingProviderError:
+			errors += 1
+			continue
+
+		if result["skipped"]:
+			already_geolocated += 1
+		elif result["status"] == "Geolocalizado":
+			geocoded += 1
+		elif result["status"] == "Revisar":
+			review += 1
+		else:
+			errors += 1
+
+	# E/F/G. Re-acquire the route's CURRENT status under a real lock
+	# before touching any Recorrido Parada -- the exact "User A opens
+	# Borrador, User B Planifica while Google is still answering" race
+	# brief section 15 names explicitly.
+	locked_status = frappe.db.get_value("Recorrido", route.name, "status", for_update=True)
+	route_still_borrador = locked_status == "Borrador"
+	if route_still_borrador:
+		_refresh_route_stops_snapshot(route)
+
+	ready_for_routing = False
+	if route_still_borrador:
+		ready_for_routing = get_route_geolocation_status(route.name)["ready_for_routing"]
+
+	return {
+		"route": route.name,
+		"total_stops": total_stops,
+		"unique_addresses": len(unique_addresses),
+		"already_geolocated": already_geolocated,
+		"geocoded": geocoded,
+		"review": review,
+		"errors": errors,
+		"ready_for_routing": ready_for_routing,
 	}
 
 
@@ -1288,20 +1662,7 @@ def refresh_route_geolocation(route_name):
 			RouteNotEditableError,
 		)
 
-	stops = frappe.get_list(
-		"Recorrido Parada",
-		filters={"recorrido": route.name},
-		fields=["name", "customer_address"],
-	)
-	for s in stops:
-		geo = _resolve_stop_geolocation(s.customer_address)
-		stop_doc = frappe.get_doc("Recorrido Parada", s.name)
-		stop_doc.check_permission("write")
-		stop_doc.latitude = geo["latitude"]
-		stop_doc.longitude = geo["longitude"]
-		stop_doc.geolocation_status = geo["geolocation_status"]
-		stop_doc.geolocation_source = geo["geolocation_source"]
-		stop_doc.save()
+	_refresh_route_stops_snapshot(route)
 
 	return get_route_detail(route.name)
 
