@@ -1082,6 +1082,24 @@ fabergray_erp.Recorridos = class Recorridos {
 			total_qty += flt(s.total_qty);
 		});
 
+		// Commit 24.3 -- geographic readiness, computed straight from
+		// get_route_detail()'s own stops (already carries geolocation_
+		// status/latitude/longitude per stop) -- no extra API round-trip
+		// needed just to render this card.
+		const geo_total = d.stops.length;
+		const geo_ready_count = d.stops.filter((s) => s.geolocation_status === "Geolocalizado").length;
+		const geo_pending_count = geo_total - geo_ready_count;
+		const geo_ready_for_routing = geo_total > 0 && geo_pending_count === 0;
+
+		// Turn-4 security audit -- set_address_geolocation() only ever
+		// succeeds for a role that already owns Address write natively
+		// (Gestión de Clientes/System Manager); Recorrido is a CONSUMER of
+		// geolocation, never an ADMINISTRATOR of it. This is UX only (the
+		// server-side frappe.has_permission("Address", "write") check is
+		// the real boundary either way) -- it just avoids showing a
+		// Recorrido user a button that would always fail.
+		const can_administer_geolocation = frappe.user.has_role(["Gestión de Clientes", "System Manager"]);
+
 		const stops_html = d.stops.length
 			? d.stops
 					.map((s, idx) => {
@@ -1102,6 +1120,23 @@ fabergray_erp.Recorridos = class Recorridos {
 							</div>
 						`
 							: "";
+						const is_geo_ready = s.geolocation_status === "Geolocalizado";
+						const geo_badge = is_geo_ready
+							? `<span class="fg-route-geo-badge fg-route-geo-badge--ready">● ${__("UBICACIÓN LISTA")}</span>`
+							: `<span class="fg-route-geo-badge fg-route-geo-badge--pending">● ${__("UBICACIÓN PENDIENTE")}</span>`;
+						const geo_coords =
+							is_geo_ready && s.latitude && s.longitude
+								? `<div class="fg-route-geo-coords">${flt(s.latitude).toFixed(5)}, ${flt(s.longitude).toFixed(5)}</div>`
+								: "";
+						const geo_configure_btn =
+							is_borrador && !is_geo_ready && s.customer_address
+								? can_administer_geolocation
+									? `<button type="button" class="fg-route-geo-configure-btn" data-action="configure-location" data-name="${s.name}">${icon(
+											"map-pin",
+											"fg-icon-sm"
+									  )} ${__("Configurar ubicación")}</button>`
+									: `<span class="fg-route-geo-pending-text">${__("Ubicación pendiente")}</span>`
+								: "";
 						return `
 						<div class="fg-route-card fg-route-card--white" data-name="${s.name}">
 							<div class="fg-route-card-handle">${icon("grip-vertical")}</div>
@@ -1122,6 +1157,11 @@ fabergray_erp.Recorridos = class Recorridos {
 									<span class="fg-badge fg-badge--route-products">${s.item_count} ${s.item_count === 1 ? __("producto") : __("productos")}</span>
 									<span class="fg-badge fg-badge--route-units">${format_qty(s.total_qty)} ${__("unidades")}</span>
 									${parada_status_badge_html(s.status)}
+								</div>
+								<div class="fg-route-geo-row">
+									${geo_badge}
+									${geo_coords}
+									${geo_configure_btn}
 								</div>
 							</div>
 							${edit_actions}
@@ -1168,6 +1208,21 @@ fabergray_erp.Recorridos = class Recorridos {
 						<div class="fg-route-aside-row"><span>${__("Total productos")}</span><strong>${total_items}</strong></div>
 						<div class="fg-route-aside-row"><span>${__("Total unidades")}</span><strong>${format_qty(total_qty)}</strong></div>
 					</div>
+					<div class="fg-route-aside-card fg-route-aside-card--geo">
+						<div class="fg-route-aside-card-title">${icon("map-pin", "fg-icon-sm")} ${__("Preparación de ruta")}</div>
+						<div class="fg-route-geo-progress">${geo_ready_count} / ${geo_total} ${__("ubicaciones listas")}</div>
+						${
+							geo_ready_for_routing
+								? `<div class="fg-route-geo-status fg-route-geo-status--ok">
+										<div class="fg-route-geo-status-title">${icon("circle-check", "fg-icon-sm")} ${__("Ruta preparada")}</div>
+										<div class="fg-route-geo-status-sub">${__("Todas las paradas tienen una ubicación válida.")}</div>
+									</div>`
+								: `<div class="fg-route-geo-status fg-route-geo-status--warn">
+										<div class="fg-route-geo-status-title">${icon("triangle-alert", "fg-icon-sm")} ${__("{0} ubicaciones pendientes", [geo_pending_count])}</div>
+										<div class="fg-route-geo-status-sub">${__("Completa las ubicaciones antes de calcular la ruta.")}</div>
+									</div>`
+						}
+					</div>
 					<div class="fg-route-aside-card fg-route-aside-card--green">
 						<div class="fg-route-aside-card-title">${icon("lightbulb", "fg-icon-sm")} ${__("Consejos")}</div>
 						<div class="fg-route-tip">${icon("circle-check", "fg-icon-sm")} ${__("Puedes reordenar las paradas usando las flechas.")}</div>
@@ -1202,6 +1257,95 @@ fabergray_erp.Recorridos = class Recorridos {
 		$html.find('[data-action="down"]').on("click", (e) => this.move_detail_stop($(e.currentTarget).data("name"), 1));
 		$html.find('[data-action="remove"]').on("click", (e) => this.confirm_remove_stop($(e.currentTarget).data("name")));
 		$html.find(".fg-recorridos-add-stops-btn").on("click", () => this.open_add_pick_lists_dialog());
+		$html.find('[data-action="configure-location"]').on("click", (e) => {
+			const stop = this.detail.stops.find((s) => s.name === $(e.currentTarget).data("name"));
+			if (stop) this.open_configure_location_dialog(stop);
+		});
+	}
+
+	// =====================================================================
+	// Commit 24.3 -- Configurar ubicación (manual, brief section 15/16).
+	// set_address_geolocation() -> refresh_route_geolocation() -> refrescar
+	// detalle -- nunca inventa coordenadas, nunca llama un proveedor
+	// externo. Mismo .fg-route-dialog compartido (icon-fix, min-height:0,
+	// etc.) que los otros dos modales -- ninguna regla de ese scope se
+	// tocó para construir este.
+	// =====================================================================
+	open_configure_location_dialog(stop) {
+		if (!stop.customer_address) return;
+
+		const dialog = new frappe.ui.Dialog({
+			title: `
+				<div class="fg-route-dialog-title">
+					<div class="fg-route-dialog-title-icon fg-route-dialog-title-icon--violet">${icon("map-pin")}</div>
+					<div class="fg-route-dialog-title-text">
+						<div class="fg-route-dialog-title-main">${__("Configurar ubicación")}</div>
+						<div class="fg-route-dialog-title-sub">${__(
+							"Ingresa manualmente las coordenadas de esta dirección. Nunca se inventan ni se calculan automáticamente."
+						)}</div>
+					</div>
+				</div>
+			`,
+			fields: [
+				{ fieldtype: "Data", fieldname: "customer_display", label: __("Cliente"), read_only: 1, default: stop.customer_name || stop.customer || "" },
+				{
+					fieldtype: "Small Text",
+					fieldname: "address_display_field",
+					label: __("Dirección"),
+					read_only: 1,
+					default: stop.address_display || __("Sin dirección registrada"),
+				},
+				{ fieldtype: "Section Break" },
+				{
+					fieldtype: "Float",
+					fieldname: "latitude",
+					label: __("Latitud"),
+					precision: 6,
+					reqd: 1,
+					default: stop.latitude || "",
+				},
+				{ fieldtype: "Column Break" },
+				{
+					fieldtype: "Float",
+					fieldname: "longitude",
+					label: __("Longitud"),
+					precision: 6,
+					reqd: 1,
+					default: stop.longitude || "",
+				},
+			],
+			primary_action_label: `${icon("check", "fg-icon-sm")} ${__("Guardar ubicación")}`,
+			primary_action: () => this.submit_configure_location(dialog, stop),
+			secondary_action_label: __("Cancelar"),
+			secondary_action: () => dialog.hide(),
+		});
+		dialog.$wrapper.addClass("fg-route-dialog fg-recorridos-geo-dialog");
+		dialog.$wrapper.find(".modal-dialog").addClass("modal-dialog-scrollable");
+		dialog.show();
+	}
+
+	submit_configure_location(dialog, stop) {
+		const values = dialog.get_values(true);
+		if (!values) return;
+		dialog.disable_primary_action();
+		this.set_busy(true);
+
+		this.call("set_address_geolocation", {
+			address_name: stop.customer_address,
+			latitude: values.latitude,
+			longitude: values.longitude,
+			source: "Manual",
+		})
+			.then(() => this.call("refresh_route_geolocation", { route_name: this.detail.name }))
+			.then(() => {
+				frappe.show_alert({ message: "✓ " + __("Ubicación guardada correctamente."), indicator: "green" }, 5);
+				dialog.hide();
+				return this.reload_detail(this.detail.name);
+			})
+			.finally(() => {
+				dialog.enable_primary_action();
+				this.set_busy(false);
+			});
 	}
 
 	_detail_pick_lists_in_order() {

@@ -117,6 +117,11 @@ class TestRecorridosApi(IntegrationTestCase):
 		cls.recorrido_user = cls.world.user("fg241-recorrido@example.com", ["Recorrido"])
 		cls.recorrido_user_b = cls.world.user("fg241-recorrido-b@example.com", ["Recorrido"])
 		cls.no_role_user = cls.world.user("fg241-norole@example.com", [])
+		# Turn-4 security audit -- Recorrido is a CONSUMER of geolocation,
+		# never an ADMINISTRATOR of Address; "Gestión de Clientes" already
+		# owns Address write natively since Commit 22.7 and is the one role
+		# whose set_address_geolocation() calls must actually succeed.
+		cls.gestion_clientes_user = cls.world.user("fg243-gestion@example.com", ["Gestión de Clientes"])
 
 		# Company-isolation fixtures (Commit 24.1 section 16/17) -- created
 		# ONCE here (not per-test) since IntegrationTestCase in this app
@@ -205,9 +210,25 @@ class TestRecorridosApi(IntegrationTestCase):
 	def _set_customer_primary_address(self, customer, address_line1="Calle 10 # 5-20", city="Bogotá"):
 		from fabergray_erp.api import clientes
 
-		return clientes.update_customer(
+		result = clientes.update_customer(
 			customer.name, address={"address_line1": address_line1, "city": city, "state": "Bogotá D.C."}
 		)
+		# Track the Address clientes.update_customer() just created/updated
+		# for this customer -- without this, world.cleanup() force-deletes
+		# the Customer (via `customer`'s own tracking) but never touches
+		# the Address itself, leaking it across test runs under its own
+		# deterministic "{customer_name}-Billing" name. A LATER run then
+		# creating a fresh Customer with the SAME name has its own
+		# _set_customer_primary_address() call silently reuse that stale,
+		# orphaned Address (Commit 24.3's own set_address_geolocation()
+		# tests found this the hard way: a previous run's leftover Address
+		# still carried Geolocalizado/lat/lng from a PRIOR test's own
+		# set_address_geolocation() call, corrupting an ostensibly-fresh
+		# fixture).
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+		if address_name:
+			self.world.track_existing("Address", address_name)
+		return result
 
 	def _force_route_status(self, route_name, status):
 		"""Simulates a future commit's own start_route()/deliver_stop() --
@@ -215,6 +236,29 @@ class TestRecorridosApi(IntegrationTestCase):
 		that need an En Ruta/Completado route set it directly, exactly as
 		the brief's own section 13 anticipates."""
 		frappe.db.set_value("Recorrido", route_name, "status", status)
+
+	def _geocode_customer_address(self, customer, latitude=4.710989, longitude=-74.072092, source="Manual"):
+		"""Commit 24.3 -- fixture-setup shortcut, same convention as
+		_force_route_status() right above: directly seeds an already-
+		primary-addressed customer's Address with valid coordinates, for
+		tests whose actual subject is create_route()/refresh_route_
+		geolocation()'s own snapshot behavior, not set_address_geolocation()
+		itself (which has its own dedicated tests calling the real
+		whitelisted function end to end). Requires
+		_set_customer_primary_address() to have already run for this
+		customer. Returns the Address name."""
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+		frappe.db.set_value(
+			"Address",
+			address_name,
+			{
+				"fg_latitude": latitude,
+				"fg_longitude": longitude,
+				"fg_geocoding_status": "Geolocalizado",
+				"fg_geocoding_source": source,
+			},
+		)
+		return address_name
 
 	def _track_route(self, route):
 		"""Every recorridos.* write call below goes through the thin
@@ -832,6 +876,9 @@ class TestRecorridosApi(IntegrationTestCase):
 			recorridos.update_route_stops,
 			recorridos.plan_route,
 			recorridos.cancel_route,
+			recorridos.set_address_geolocation,
+			recorridos.refresh_route_geolocation,
+			recorridos.get_route_geolocation_status,
 		):
 			source = inspect.getsource(fn)
 			self.assertNotIn("frappe.db.commit()", source, f"{fn.__name__}() must never call frappe.db.commit()")
@@ -1051,6 +1098,406 @@ class TestRecorridosApi(IntegrationTestCase):
 		with fx.as_user(self.recorrido_user):
 			summary = recorridos.get_routes_summary()
 		self.assertFalse(forbidden_keys & set(summary.keys()), summary.keys())
+
+	# =====================================================================
+	# Commit 24.3 -- create_route()/update_route_stops() geolocation snapshot
+	# =====================================================================
+
+	def test_create_route_snapshot_pendiente_without_coordinates(self):
+		customer = self.world.customer("FG243 No Geo Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Sin Geo 1", city="Bogotá")
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+		stop = route["stops"][0]
+		self.assertEqual(stop["geolocation_status"], "Pendiente")
+		# Frappe's own Float fieldtype coerces a None value to 0.0 at
+		# insert time (confirmed empirically -- there is no way to store a
+		# real SQL NULL in a Float column through the normal Document API
+		# in this Frappe version) -- geolocation_status is the actual
+		# signal to read, not the raw float value, which is why
+		# is_valid_coordinate_pair() also explicitly rejects (0, 0).
+		self.assertEqual(flt(stop["latitude"]), 0)
+		self.assertEqual(flt(stop["longitude"]), 0)
+
+	def test_create_route_snapshot_geolocalizado_with_valid_coordinates(self):
+		customer = self.world.customer("FG243 Geo Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Con Geo 1", city="Bogotá")
+		self._geocode_customer_address(customer, latitude=4.710989, longitude=-74.072092)
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+		stop = route["stops"][0]
+		self.assertEqual(stop["geolocation_status"], "Geolocalizado")
+		self.assertAlmostEqual(flt(stop["latitude"]), 4.710989, places=5)
+		self.assertAlmostEqual(flt(stop["longitude"]), -74.072092, places=5)
+
+	def test_create_route_never_fails_without_coordinates(self):
+		"""Brief section 8's own explicit requirement -- a customer with NO
+		primary address at all (not even a text one) must still let
+		create_route() succeed, parada simply Pendiente."""
+		customer = self.world.customer("FG243 No Address At All")
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+		self.assertEqual(route["stops"][0]["geolocation_status"], "Pendiente")
+
+	def test_address_change_after_creation_does_not_modify_parada_snapshot(self):
+		"""Brief section 5's own explicit requirement -- correcting an
+		Address's coordinates later must NEVER silently rewrite an
+		already-created parada's own snapshot (only refresh_route_
+		geolocation() -- an explicit, Borrador-only call -- may do that;
+		see the dedicated tests for it below)."""
+		customer = self.world.customer("FG243 Snapshot Frozen Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Frozen 1", city="Bogotá")
+		address_name = self._geocode_customer_address(customer, latitude=4.1, longitude=-74.1)
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+		stop_name = route["stops"][0]["name"]
+
+		# Correct the Address's coordinates AFTER the parada already exists.
+		frappe.db.set_value("Address", address_name, {"fg_latitude": 9.9, "fg_longitude": -79.9})
+
+		with fx.as_user(self.recorrido_user):
+			detail_again = recorridos.get_route_detail(route["name"])
+		stop_again = next(s for s in detail_again["stops"] if s["name"] == stop_name)
+		self.assertAlmostEqual(flt(stop_again["latitude"]), 4.1, places=5)
+		self.assertAlmostEqual(flt(stop_again["longitude"]), -74.1, places=5)
+
+	# =====================================================================
+	# Commit 24.3 -- set_address_geolocation()
+	# =====================================================================
+
+	def test_set_address_geolocation_saves_valid_coordinates(self):
+		"""Section 5a -- an authorized user (Gestión de Clientes) can edit
+		valid geolocation for real."""
+		customer = self.world.customer("FG243 Set Geo Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Set Geo 1", city="Bogotá")
+		self._facturado_pick_list(customer=customer)
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+
+		with fx.as_user(self.gestion_clientes_user):
+			result = recorridos.set_address_geolocation(address_name, 4.6097, -74.0817, source="Manual", note="Frente al parque")
+
+		self.assertEqual(result["geocoding_status"], "Geolocalizado")
+		self.assertAlmostEqual(flt(result["latitude"]), 4.6097, places=4)
+		address = frappe.get_doc("Address", address_name)
+		self.assertEqual(address.fg_geocoding_source, "Manual")
+		self.assertEqual(address.fg_geocoded_by, self.gestion_clientes_user)
+		self.assertIsNotNone(address.fg_geocoded_on)
+		self.assertEqual(address.fg_geocoding_note, "Frente al parque")
+
+	def test_set_address_geolocation_rejects_invalid_latitude(self):
+		customer = self.world.customer("FG243 Bad Lat Customer")
+		self._set_customer_primary_address(customer)
+		self._facturado_pick_list(customer=customer)
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+		with fx.as_user(self.gestion_clientes_user):
+			with self.assertRaises(recorridos.RouteValidationError):
+				recorridos.set_address_geolocation(address_name, 91, -74)
+
+	def test_set_address_geolocation_rejects_null_island(self):
+		customer = self.world.customer("FG243 Null Island Customer")
+		self._set_customer_primary_address(customer)
+		self._facturado_pick_list(customer=customer)
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+		with fx.as_user(self.gestion_clientes_user):
+			with self.assertRaises(recorridos.RouteValidationError):
+				recorridos.set_address_geolocation(address_name, 0, 0)
+
+	def test_set_address_geolocation_rejects_invalid_source(self):
+		customer = self.world.customer("FG243 Bad Source Customer")
+		self._set_customer_primary_address(customer)
+		self._facturado_pick_list(customer=customer)
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+		with fx.as_user(self.gestion_clientes_user):
+			with self.assertRaises(recorridos.RouteValidationError):
+				recorridos.set_address_geolocation(address_name, 4.6, -74.0, source="Bogus")
+
+	def test_set_address_geolocation_rejects_nonexistent_address(self):
+		with fx.as_user(self.gestion_clientes_user):
+			with self.assertRaises(frappe.DoesNotExistError):
+				recorridos.set_address_geolocation("FG243-NO-SUCH-ADDRESS", 4.6, -74.0)
+
+	def test_set_address_geolocation_requires_permission(self):
+		"""A no-role user has neither Recorrido nor Gestión de Clientes --
+		frappe.has_permission("Address", "write") must reject it before any
+		other check runs."""
+		customer = self.world.customer("FG243 No Perm Customer")
+		self._set_customer_primary_address(customer)
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+		with fx.as_user(self.no_role_user):
+			with self.assertRaises(frappe.PermissionError):
+				recorridos.set_address_geolocation(address_name, 4.6, -74.0)
+
+	def test_set_address_geolocation_rejects_recorrido_role(self):
+		"""Section 1/5b -- turn-4 security audit's central fix. Recorrido
+		is a CONSUMER of geolocation (reads via _resolve_stop_geolocation()),
+		never an ADMINISTRATOR of Address: it must be rejected here exactly
+		like any other unauthorized role, now that its own Address `write`
+		Custom DocPerm is back to 0."""
+		customer = self.world.customer("FG243 Recorrido Denied Customer")
+		self._set_customer_primary_address(customer)
+		self._facturado_pick_list(customer=customer)
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+		with fx.as_user(self.recorrido_user):
+			with self.assertRaises(frappe.PermissionError):
+				recorridos.set_address_geolocation(address_name, 4.6, -74.0)
+		# Never partially applied either.
+		self.assertEqual(frappe.db.get_value("Address", address_name, "fg_geocoding_status"), "Pendiente")
+
+	def test_recorrido_role_cannot_edit_address_line1_directly(self):
+		"""Section 1 -- proves the underlying vulnerability the turn-4
+		security audit was triggered by is actually closed: under the OLD
+		design (Recorrido had its own DocType-level `write: 1` grant on
+		Address), this exact call succeeded and silently rewrote
+		address_line1, confirmed with a standalone reproduction script
+		against that grant before this fix (doc.save() and
+		frappe.client.save() both succeeded). With Recorrido's Address
+		permission back to `write: 0`, the SAME generic Document API a
+		Desk quick-edit or frappe.client.save() call would use must be
+		rejected -- this is never a set_address_geolocation()-specific
+		restriction, it is Recorrido's real, DocType-level Address
+		permission."""
+		customer = self.world.customer("FG243 Line1 Security Customer")
+		self._set_customer_primary_address(customer, address_line1="Original Line 1")
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+
+		with fx.as_user(self.recorrido_user):
+			self.assertFalse(frappe.has_permission("Address", "write"))
+			address_doc = frappe.get_doc("Address", address_name)
+			address_doc.address_line1 = "Hacked by Recorrido"
+			with self.assertRaises(frappe.PermissionError):
+				address_doc.save()
+
+		self.assertEqual(frappe.db.get_value("Address", address_name, "address_line1"), "Original Line 1")
+
+	def test_recorrido_role_cannot_edit_other_address_master_fields(self):
+		"""Section 5c -- the same DocType-level rejection extends to any
+		other Address field, not just address_line1 (city here)."""
+		customer = self.world.customer("FG243 City Security Customer")
+		self._set_customer_primary_address(customer, city="Bogotá")
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+
+		with fx.as_user(self.recorrido_user):
+			address_doc = frappe.get_doc("Address", address_name)
+			address_doc.city = "Medellín"
+			with self.assertRaises(frappe.PermissionError):
+				address_doc.save()
+
+		self.assertEqual(frappe.db.get_value("Address", address_name, "city"), "Bogotá")
+
+	def test_set_address_geolocation_company_isolation(self):
+		"""Section 4/5e -- the Address belongs to a customer whose only
+		Sales Order is in "_Test Company" -- never fabrigraysas, this
+		site's own default company -- so even an authorized Gestión de
+		Clientes user must be rejected: this is a company-isolation check,
+		not a role check."""
+		so, pl = self._other_company_facturado_pick_list()
+		address_name = frappe.db.get_value("Customer", self.other_customer.name, "customer_primary_address")
+		if not address_name:
+			# This fixture's own customer has no primary address set by
+			# default -- give it one so this test actually exercises the
+			# company-isolation branch, not the "no linked customer" one.
+			self._set_customer_primary_address(self.other_customer, address_line1="Otra Empresa 1", city="Bogotá")
+			address_name = frappe.db.get_value("Customer", self.other_customer.name, "customer_primary_address")
+		with fx.as_user(self.gestion_clientes_user):
+			with self.assertRaises(frappe.PermissionError):
+				recorridos.set_address_geolocation(address_name, 4.6, -74.0)
+
+	def test_set_address_geolocation_allows_fabrigray_context_customer(self):
+		"""Section 5d -- a valid customer with a real Sales Order in this
+		site's own default company (fabrigraysas) works for an authorized
+		user, the ordinary/expected path."""
+		customer = self.world.customer("FG243 Fabrigray Context Customer")
+		self._set_customer_primary_address(customer, address_line1="Fabrigray Context 1")
+		self._facturado_pick_list(customer=customer)
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+		with fx.as_user(self.gestion_clientes_user):
+			result = recorridos.set_address_geolocation(address_name, 4.6, -74.0)
+		self.assertEqual(result["geocoding_status"], "Geolocalizado")
+
+	def test_set_address_geolocation_allows_brand_new_customer_without_sales_order(self):
+		"""Section 4/5f -- _address_belongs_to_company()'s central fix. A
+		Customer that legitimately belongs to this company's own context
+		but has not placed a Sales Order yet must NOT be incorrectly
+		rejected: absence of a Sales Order in `company` is not, by itself,
+		evidence the Customer belongs to a DIFFERENT company. Only
+		positive evidence of exclusive ties elsewhere (test right below)
+		is grounds for rejection."""
+		customer = self.world.customer("FG243 Brand New No SO Customer")
+		self._set_customer_primary_address(customer, address_line1="Brand New 1")
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+		self.assertIsNone(frappe.db.get_value("Sales Order", {"customer": customer.name}, "name"))
+		with fx.as_user(self.gestion_clientes_user):
+			result = recorridos.set_address_geolocation(address_name, 4.6, -74.0)
+		self.assertEqual(result["geocoding_status"], "Geolocalizado")
+
+	def test_set_address_geolocation_no_cross_company_data_leak(self):
+		"""Section 5g -- the rejected _Test Company Address's coordinates
+		are never written, confirming the isolation check runs BEFORE any
+		mutation, not merely that the caller sees an error while the write
+		still lands."""
+		so, pl = self._other_company_facturado_pick_list()
+		address_name = frappe.db.get_value("Customer", self.other_customer.name, "customer_primary_address")
+		if not address_name:
+			self._set_customer_primary_address(self.other_customer, address_line1="Otra Empresa Leak 1", city="Bogotá")
+			address_name = frappe.db.get_value("Customer", self.other_customer.name, "customer_primary_address")
+		with fx.as_user(self.gestion_clientes_user):
+			with self.assertRaises(frappe.PermissionError):
+				recorridos.set_address_geolocation(address_name, 9.9, -99.9)
+		row = frappe.db.get_value(
+			"Address", address_name, ["fg_latitude", "fg_longitude", "fg_geocoding_status"], as_dict=True
+		)
+		# fg_latitude/fg_longitude are Float fields -- never populated here,
+		# so they hold Frappe's own insert-time default (0.0), never the
+		# rejected call's 9.9/-99.9 values.
+		self.assertEqual(flt(row.fg_latitude), 0.0)
+		self.assertEqual(flt(row.fg_longitude), 0.0)
+		self.assertEqual(row.fg_geocoding_status, "Pendiente")
+
+	# =====================================================================
+	# Commit 24.3 -- refresh_route_geolocation()
+	# =====================================================================
+
+	def test_refresh_route_geolocation_updates_borrador(self):
+		customer = self.world.customer("FG243 Refresh Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Refresh 1", city="Bogotá")
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+		stop_before = route["stops"][0]
+		self.assertEqual(stop_before["geolocation_status"], "Pendiente")
+
+		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
+		with fx.as_user(self.gestion_clientes_user):
+			recorridos.set_address_geolocation(address_name, 4.65, -74.05)
+		with fx.as_user(self.recorrido_user):
+			refreshed = recorridos.refresh_route_geolocation(route["name"])
+
+		stop_after = refreshed["stops"][0]
+		self.assertEqual(stop_after["geolocation_status"], "Geolocalizado")
+		self.assertAlmostEqual(flt(stop_after["latitude"]), 4.65, places=4)
+		# Identity preserved -- same stop `name`/sequence/pick_list, only
+		# the 4 geo fields changed (brief section 10's own requirement).
+		self.assertEqual(stop_after["name"], stop_before["name"])
+		self.assertEqual(stop_after["sequence"], stop_before["sequence"])
+		self.assertEqual(stop_after["pick_list"], stop_before["pick_list"])
+
+	def test_refresh_route_geolocation_rejects_planificado(self):
+		customer = self.world.customer("FG243 Refresh Planificado Customer")
+		self._set_customer_primary_address(customer)
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+			self._plan_route(route["name"])
+			with self.assertRaises(recorridos.RouteNotEditableError):
+				recorridos.refresh_route_geolocation(route["name"])
+
+	def test_refresh_route_geolocation_requires_permission(self):
+		customer = self.world.customer("FG243 Refresh No Perm Customer")
+		self._set_customer_primary_address(customer)
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+		with fx.as_user(self.no_role_user):
+			with self.assertRaises(frappe.PermissionError):
+				recorridos.refresh_route_geolocation(route["name"])
+
+	def test_refresh_route_geolocation_does_not_change_qty_or_accounting(self):
+		customer = self.world.customer("FG243 Refresh Guardrail Customer")
+		self._set_customer_primary_address(customer)
+		so, pl = self._facturado_pick_list(customer=customer, qty=7)
+		before_pl = frappe.db.get_value("Sales Order", so.name, ["per_billed", "per_delivered"])
+		before_gl = frappe.db.count("GL Entry")
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+			recorridos.refresh_route_geolocation(route["name"])
+		after_pl = frappe.db.get_value("Sales Order", so.name, ["per_billed", "per_delivered"])
+		after_gl = frappe.db.count("GL Entry")
+		self.assertEqual([flt(v) for v in before_pl], [flt(v) for v in after_pl])
+		self.assertEqual(before_gl, after_gl)
+
+	# =====================================================================
+	# Commit 24.3 -- get_route_geolocation_status()
+	# =====================================================================
+
+	def test_get_route_geolocation_status_ready_false_with_pending(self):
+		customer = self.world.customer("FG243 Ready False Customer")
+		self._set_customer_primary_address(customer)
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+			status = recorridos.get_route_geolocation_status(route["name"])
+		self.assertFalse(status["ready_for_routing"])
+		self.assertEqual(status["pending_stops"], 1)
+		self.assertEqual(status["geolocated_stops"], 0)
+		self.assertEqual(status["total_stops"], 1)
+
+	def test_get_route_geolocation_status_ready_true_when_all_geolocated(self):
+		customer1 = self.world.customer("FG243 Ready True Customer 1")
+		customer2 = self.world.customer("FG243 Ready True Customer 2")
+		self._set_customer_primary_address(customer1, address_line1="Calle Ready 1")
+		self._set_customer_primary_address(customer2, address_line1="Calle Ready 2")
+		self._geocode_customer_address(customer1, latitude=4.1, longitude=-74.1)
+		self._geocode_customer_address(customer2, latitude=4.2, longitude=-74.2)
+		so1, pl1 = self._facturado_pick_list(customer=customer1)
+		so2, pl2 = self._facturado_pick_list(customer=customer2)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl1.name, pl2.name])
+			status = recorridos.get_route_geolocation_status(route["name"])
+		self.assertTrue(status["ready_for_routing"])
+		self.assertEqual(status["geolocated_stops"], 2)
+		self.assertEqual(status["pending_stops"], 0)
+
+	def test_get_route_geolocation_status_empty_route_not_ready(self):
+		company = frappe.db.get_value("Warehouse", self.wh.name, "company")
+		route_doc = frappe.get_doc({"doctype": "Recorrido", "company": company})
+		route_doc.insert(ignore_permissions=True)
+		self.world.track_existing("Recorrido", route_doc.name)
+		with fx.as_user(self.recorrido_user):
+			status = recorridos.get_route_geolocation_status(route_doc.name)
+		self.assertFalse(status["ready_for_routing"])
+		self.assertEqual(status["total_stops"], 0)
+
+	def test_get_route_geolocation_status_no_economic_values(self):
+		forbidden_keys = {"rate", "amount", "grand_total", "net_total", "price", "account", "outstanding_amount"}
+		customer = self.world.customer("FG243 No Econ Customer")
+		self._set_customer_primary_address(customer)
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+			status = recorridos.get_route_geolocation_status(route["name"])
+		self.assertFalse(forbidden_keys & set(status.keys()), status.keys())
+		for stop in status["stops"]:
+			self.assertFalse(forbidden_keys & set(stop.keys()), stop.keys())
+
+	def test_get_route_geolocation_status_requires_permission(self):
+		with fx.as_user(self.no_role_user):
+			with self.assertRaises(frappe.PermissionError):
+				recorridos.get_route_geolocation_status("REC-DOES-NOT-MATTER")
+
+	def test_get_route_geolocation_status_query_count_is_bounded(self):
+		"""5 stops on the same route -- must cost a small, constant number
+		of queries, never one query per stop (same _count_queries()
+		technique this suite's own get_routes()/get_available_orders()
+		bounded-query tests already use)."""
+		customers = [self.world.customer(f"FG243 Bounded Geo Customer {i}") for i in range(5)]
+		pick_lists = []
+		for c in customers:
+			self._set_customer_primary_address(c, address_line1=f"Calle Bounded {c.name}")
+			self._geocode_customer_address(c, latitude=4.0 + len(pick_lists) * 0.01, longitude=-74.0)
+			so, pl = self._facturado_pick_list(customer=c)
+			pick_lists.append(pl.name)
+
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=pick_lists)
+			with _count_queries() as counted:
+				status = recorridos.get_route_geolocation_status(route["name"])
+
+		self.assertEqual(status["total_stops"], 5)
+		self.assertLess(counted["n"], 12)
 
 	# =====================================================================
 	# 42. Concurrencia real -- doble asignación

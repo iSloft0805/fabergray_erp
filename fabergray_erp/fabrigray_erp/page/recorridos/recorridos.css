@@ -1673,3 +1673,153 @@
 		max-width: none;
 	}
 }
+
+/* ====================================================================
+ * Commit 24.3 -- Geolocalización. Purely ADDITIVE: every class below is
+ * new (never redefines an existing 24.2 rule), added to the Detalle/
+ * Borrador modal's already-approved layout (per-stop badge/coords/
+ * button inside the existing .fg-route-card-info, one more card inside
+ * the already-existing .fg-route-detail-aside) plus its own small
+ * "Configurar ubicación" dialog (.fg-recorridos-geo-dialog, sharing the
+ * same .fg-route-dialog base chrome as the other two). Nothing here
+ * touches .fg-recorridos-create-dialog/.fg-recorridos-detail-dialog's
+ * own frozen rules above.
+ * ==================================================================== */
+
+.fg-route-geo-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+	margin-top: 4px;
+}
+
+.fg-route-geo-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	font-size: 0.7rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+}
+
+.fg-route-geo-badge--ready {
+	color: var(--fg-success-dark);
+}
+
+.fg-route-geo-badge--pending {
+	color: var(--fg-warning-dark);
+}
+
+.fg-route-geo-coords {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.76rem;
+	color: var(--fg-text-faint);
+}
+
+.fg-route-geo-configure-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: var(--fg-route-violet-tint);
+	color: var(--fg-route-violet);
+	border: none;
+	border-radius: 8px;
+	padding: 5px 12px;
+	font-weight: 700;
+	font-size: 0.76rem;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.fg-route-geo-configure-btn:hover {
+	background: #e6ddfd;
+}
+
+.fg-route-geo-pending-text {
+	font-size: 0.76rem;
+	font-weight: 600;
+	color: var(--fg-text-faint);
+	white-space: nowrap;
+}
+
+/* -- "Preparación de ruta" aside card ---------------------------------- */
+.fg-route-aside-card--geo {
+	background: #e6fbfb;
+}
+
+.fg-route-geo-progress {
+	font-size: 1.3rem;
+	font-weight: 800;
+	color: var(--fg-text);
+	margin-bottom: 12px;
+}
+
+.fg-route-geo-status {
+	border-radius: 12px;
+	padding: 12px 14px;
+}
+
+.fg-route-geo-status--ok {
+	background: var(--fg-success-tint);
+}
+
+.fg-route-geo-status--warn {
+	background: var(--fg-warning-tint);
+}
+
+.fg-route-geo-status-title {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-weight: 700;
+	font-size: 0.88rem;
+	margin-bottom: 4px;
+}
+
+.fg-route-geo-status--ok .fg-route-geo-status-title {
+	color: var(--fg-success-dark);
+}
+
+.fg-route-geo-status--warn .fg-route-geo-status-title {
+	color: var(--fg-warning-dark);
+}
+
+.fg-route-geo-status-sub {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	line-height: 1.4;
+}
+
+/* -- "Configurar ubicación" modal -- small, same chrome as the other two */
+.fg-recorridos-geo-dialog .modal-dialog {
+	max-width: 520px;
+}
+
+.fg-recorridos-geo-dialog .btn-modal-primary,
+.fg-recorridos-geo-dialog .btn-primary {
+	background: var(--fg-route-violet-tint);
+	color: var(--fg-route-violet);
+	border: none;
+}
+
+.fg-recorridos-geo-dialog .btn-modal-primary:hover:not(.disabled),
+.fg-recorridos-geo-dialog .btn-primary:hover:not(.disabled) {
+	background: #e6ddfd;
+}
+
+.fg-recorridos-geo-dialog .btn-modal-secondary,
+.fg-recorridos-geo-dialog .btn-secondary {
+	background: var(--fg-card);
+	border: 1.5px solid var(--fg-border);
+	color: var(--fg-text);
+}
+
+@media (max-width: 640px) {
+	.fg-recorridos-geo-dialog .modal-dialog {
+		max-width: 100vw;
+		width: 100%;
+		margin: 6px auto;
+	}
+}

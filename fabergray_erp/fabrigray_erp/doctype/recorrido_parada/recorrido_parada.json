@@ -20,6 +20,8 @@
   "column_break_geo",
   "latitude",
   "longitude",
+  "geolocation_status",
+  "geolocation_source",
   "section_break_qty",
   "item_count",
   "total_qty",
@@ -105,7 +107,7 @@
    "fieldtype": "Column Break"
   },
   {
-   "description": "Commit 24.1 -- reservado para geocodificación futura (24.4). Nunca calculado en este commit.",
+   "description": "Commit 24.3 -- snapshot geográfico resuelto por api.recorridos._resolve_stop_geolocation() al momento de crear/refrescar la parada (Address.fg_latitude en ese instante) -- nunca recalculado automáticamente si la Address cambia después. Vacío mientras geolocation_status sea \"Pendiente\".",
    "fieldname": "latitude",
    "fieldtype": "Float",
    "label": "Latitud",
@@ -117,6 +119,25 @@
    "fieldtype": "Float",
    "label": "Longitud",
    "precision": "6",
+   "read_only": 1
+  },
+  {
+   "default": "Pendiente",
+   "description": "Snapshot -- refleja el estado de geolocalización de la Address al momento de crear/refrescar esta parada, no en tiempo real.",
+   "fieldname": "geolocation_status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Estado de ubicación",
+   "options": "Pendiente\nGeolocalizado\nRevisar\nError",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "geolocation_source",
+   "fieldtype": "Select",
+   "label": "Fuente de ubicación",
+   "options": "\nManual\nGoogle\nMapbox\nOtro",
    "read_only": 1
   },
   {

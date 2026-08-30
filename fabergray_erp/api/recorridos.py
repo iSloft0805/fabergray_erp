@@ -95,10 +95,11 @@ import functools
 import frappe
 from frappe import _
 from frappe.contacts.doctype.address.address import get_address_display
-from frappe.utils import cint, flt, nowdate
+from frappe.utils import cint, flt, now_datetime, nowdate
 
 from erpnext import get_default_company
 
+from fabergray_erp import geocoding
 from fabergray_erp.api.bodega import _require_login
 from fabergray_erp.api.clientes import _primary_address_name
 from fabergray_erp.api.facturacion import FG_INVOICING_FACTURADO, _sales_order_of
@@ -314,6 +315,59 @@ def _retrying_on_deadlock(fn):
 	return wrapper
 
 
+def _resolve_stop_geolocation(customer_address):
+	"""Commit 24.3's own central geolocation-snapshot helper (brief
+	section 7). Given the Address name already resolved for a stop
+	(possibly None, e.g. a customer with no primary address on file),
+	returns the geographic snapshot dict a Recorrido Parada needs:
+	latitude/longitude/geolocation_status/geolocation_source.
+
+	Never calls an external provider -- see fabergray_erp.geocoding.
+	geocode_address()'s own docstring for why; this only reads whatever
+	coordinates already exist on the Address record right now, through
+	fabergray_erp.geocoding.is_valid_coordinate_pair(), the same single
+	validity rule set_address_geolocation() below enforces when those
+	coordinates are first written. A missing Address, missing
+	coordinates, or invalid coordinates all resolve to
+	geolocation_status="Pendiente" -- this function never raises, so
+	create_route()/update_route_stops() can never fail because of it
+	(brief section 8's own explicit requirement).
+
+	An Address whose OWN fg_geocoding_status is "Revisar"/"Error" (a
+	future, 24.4+ provider flagging a low-confidence or failed lookup)
+	propagates that same status onto the stop rather than miscategorizing
+	it as a plain "Pendiente" -- neither value is ever produced by this
+	commit's own code today (nothing sets Address.fg_geocoding_status to
+	anything but "Pendiente"/"Geolocalizado"), but the DocType's own
+	Select already reserves the options, so this passthrough costs
+	nothing and needs no later revisit."""
+	pending = {"latitude": None, "longitude": None, "geolocation_status": "Pendiente", "geolocation_source": None}
+	if not customer_address:
+		return pending
+
+	row = frappe.db.get_value(
+		"Address",
+		customer_address,
+		["fg_latitude", "fg_longitude", "fg_geocoding_status", "fg_geocoding_source"],
+		as_dict=True,
+	)
+	if not row:
+		return pending
+
+	if geocoding.is_valid_coordinate_pair(row.fg_latitude, row.fg_longitude):
+		return {
+			"latitude": row.fg_latitude,
+			"longitude": row.fg_longitude,
+			"geolocation_status": "Geolocalizado",
+			"geolocation_source": row.fg_geocoding_source or None,
+		}
+
+	if row.fg_geocoding_status in ("Revisar", "Error"):
+		return {**pending, "geolocation_status": row.fg_geocoding_status}
+
+	return pending
+
+
 def _resolve_pick_list_snapshot(pl):
 	"""Everything a Recorrido Parada needs, resolved from the real,
 	already-permission-checked Pick List doc `pl` -- never from client
@@ -342,6 +396,8 @@ def _resolve_pick_list_snapshot(pl):
 			customer_address = address_name
 			address_display = get_address_display(address_name)
 
+	geo = _resolve_stop_geolocation(customer_address)
+
 	return {
 		"sales_order": sales_order,
 		"commercial_name": root_commercial_name(sales_order) if sales_order else None,
@@ -351,6 +407,10 @@ def _resolve_pick_list_snapshot(pl):
 		"address_display": address_display,
 		"item_count": item_count,
 		"total_qty": total_qty,
+		"latitude": geo["latitude"],
+		"longitude": geo["longitude"],
+		"geolocation_status": geo["geolocation_status"],
+		"geolocation_source": geo["geolocation_source"],
 	}
 
 
@@ -598,6 +658,10 @@ def get_route_detail(route_name):
 			"address_display",
 			"item_count",
 			"total_qty",
+			"latitude",
+			"longitude",
+			"geolocation_status",
+			"geolocation_source",
 			"status",
 		],
 		order_by="sequence asc",
@@ -842,6 +906,10 @@ def create_route(route_date=None, pick_lists=None, driver=None, vehicle=None, st
 				"address_display": snap["address_display"],
 				"item_count": snap["item_count"],
 				"total_qty": snap["total_qty"],
+				"latitude": snap["latitude"],
+				"longitude": snap["longitude"],
+				"geolocation_status": snap["geolocation_status"],
+				"geolocation_source": snap["geolocation_source"],
 				"status": "Pendiente",
 			}
 		).insert()
@@ -932,6 +1000,10 @@ def update_route_stops(route_name, pick_lists=None):
 					"address_display": snap["address_display"],
 					"item_count": snap["item_count"],
 					"total_qty": snap["total_qty"],
+					"latitude": snap["latitude"],
+					"longitude": snap["longitude"],
+					"geolocation_status": snap["geolocation_status"],
+					"geolocation_source": snap["geolocation_source"],
 					"status": "Pendiente",
 				}
 			).insert()
@@ -1015,3 +1087,272 @@ def cancel_route(route_name):
 	route.save()
 
 	return get_route_detail(route.name)
+
+
+# ---------------------------------------------------------------------------
+# Geolocalización (Commit 24.3) -- corrección manual de Address, refresco
+# de snapshots de Borrador, y el resumen de "listo para calcular ruta".
+# NO llama ningún proveedor externo, NO dibuja mapa, NO optimiza orden --
+# ver fabergray_erp/geocoding.py's own docstring para el alcance exacto.
+# ---------------------------------------------------------------------------
+
+
+def _address_belongs_to_company(address_name, company):
+	"""Company isolation for set_address_geolocation() (brief section 19,
+	revised in the turn-4 security audit). Address has no `company` field
+	of its own (native Frappe doctype -- section 8 of that audit forbids
+	inventing one) -- it links to Customer only through the standard
+	Dynamic Link child table, so "does this Address belong to my company"
+	has to be answered indirectly through the Customer(s) linked to it.
+
+	A Customer having a Sales Order in `company` is sufficient proof it
+	belongs there. But the ABSENCE of one is NOT proof it belongs to some
+	OTHER company: a brand-new Customer, correctly created for this
+	company's own context, legitimately has zero Sales Orders for a
+	while -- rejecting it on that basis alone would block a real
+	Fabrigray customer, not stop an attacker. So this only rejects when
+	there is *positive* evidence the linked Customer(s) transact
+	exclusively with some other company (at least one Sales Order exists
+	and none of it is in `company`); a Customer with no Sales Order
+	anywhere yet gets the benefit of the doubt.
+
+	`parent_doctype="Address"` is required, not optional: Dynamic Link is
+	a child table, which -- as this module's own top docstring already
+	established for Pick List Item -- has no independent permission model
+	in this Frappe version; without routing the check through its real
+	parent (Address), a bare frappe.get_list("Dynamic Link", ...) raises
+	PermissionError for every role, confirmed the hard way while writing
+	this function's own tests.
+
+	Both Sales Order checks below deliberately use frappe.db.get_value()
+	(a raw read), not frappe.get_list(): neither Recorrido nor Gestión de
+	Clientes has Sales Order permission (by design -- never part of this
+	module's own minimal permission set, see api/recorridos.py's own top
+	docstring), and this check's purpose is purely internal ("does a
+	Sales Order tie this Address to my company, or to another one"),
+	never a document the caller is meant to see the contents of -- exactly
+	the same reasoning fabergray_erp.sales_order_naming.
+	root_commercial_name() already documents for its own identical choice
+	("a raw, single-field read ... never a document permission check")."""
+	customers = frappe.get_list(
+		"Dynamic Link",
+		filters={"parent": address_name, "parenttype": "Address", "link_doctype": "Customer"},
+		pluck="link_name",
+		parent_doctype="Address",
+	)
+	if not customers:
+		return False
+
+	if frappe.db.get_value(
+		"Sales Order", {"customer": ["in", customers], "company": company}, "name"
+	):
+		return True
+
+	has_sales_order_elsewhere = frappe.db.get_value(
+		"Sales Order", {"customer": ["in", customers]}, "name"
+	)
+	return not has_sales_order_elsewhere
+
+
+@frappe.whitelist()
+def set_address_geolocation(address_name, latitude, longitude, source="Manual", note=None):
+	"""The ONE controlled way an operator corrects an Address's
+	coordinates (brief section 9/15/16). Manual only in this commit --
+	see fabergray_erp/geocoding.py's own docstring for why this never
+	invents coordinates from free text and never calls an external
+	provider.
+
+	Permissions -- REVISED in the turn-4 security audit. The original
+	24.3 design gave Recorrido role its own `write: 1` grant on Address
+	so this function's own address.check_permission("write") call would
+	pass for Recorrido users. That was proven too broad: it is a
+	DocType-level grant, so it also authorized the generic Document API
+	(frappe.get_doc("Address", ...).save(), frappe.client.save()) to
+	change ANY Address field for ANY Recorrido user, not just the two
+	fields this function itself writes -- confirmed by
+	test_recorrido_role_cannot_edit_address_line1_directly's own proof
+	run against the old grant before this fix.
+
+	Recorrido's Address permission is back to `write: 0`
+	(fixtures/custom_docperm.json). Recorrido is a CONSUMER of
+	geolocation (reads Address/coordinates/snapshots via
+	_resolve_stop_geolocation(), never edits Address), never an
+	ADMINISTRATOR of it. Address write is reserved for roles that already
+	own that master data natively: Gestión de Clientes (`write: 1` since
+	Commit 22.7 -- customer/address management is its whole purpose) and
+	System Manager (native full access). No new Custom DocPerm grant was
+	added for either -- this function's only remaining job is to *use*
+	frappe.has_permission()/check_permission() for real, never
+	ignore_permissions, so those two roles' EXISTING permissions become
+	the actual authorization boundary. A Recorrido-only or no-role caller
+	is rejected here with a real PermissionError, not by convention.
+
+	This function's own fixed signature (only latitude/longitude/source/
+	note are ever accepted or written) remains the field-level boundary
+	for whichever role IS authorized: Gestión de Clientes can write any
+	Address field via Desk already, so nothing new is exposed by giving
+	it a working geolocation form too.
+
+	Never ignore_permissions. Never commits the transaction itself --
+	Frappe's own request-lifecycle commit covers that, same as every
+	other write in this module."""
+	_require_login()
+
+	if not frappe.db.exists("Address", address_name):
+		frappe.throw(_("La dirección {0} no existe.").format(address_name), frappe.DoesNotExistError)
+
+	frappe.has_permission("Address", "write", throw=True)
+
+	company = get_default_company()
+	if not _address_belongs_to_company(address_name, company):
+		frappe.throw(
+			_("Esta dirección no pertenece a un cliente de esta empresa."),
+			frappe.PermissionError,
+		)
+
+	if not geocoding.is_valid_coordinate_pair(latitude, longitude):
+		frappe.throw(
+			_("Las coordenadas ingresadas no son válidas para calcular una ruta."),
+			RouteValidationError,
+		)
+
+	source = source or "Manual"
+	if source not in geocoding.GEOCODING_SOURCES:
+		frappe.throw(_("Fuente de geocodificación inválida: {0}.").format(source), RouteValidationError)
+
+	address = frappe.get_doc("Address", address_name)
+	address.check_permission("write")
+	address.fg_latitude = flt(latitude)
+	address.fg_longitude = flt(longitude)
+	address.fg_geocoding_status = "Geolocalizado"
+	address.fg_geocoding_source = source
+	address.fg_geocoded_on = now_datetime()
+	address.fg_geocoded_by = frappe.session.user
+	address.fg_geocoding_note = note or None
+	address.save()
+
+	return {
+		"address": address.name,
+		"latitude": address.fg_latitude,
+		"longitude": address.fg_longitude,
+		"geocoding_status": address.fg_geocoding_status,
+		"geocoding_source": address.fg_geocoding_source,
+	}
+
+
+@frappe.whitelist()
+@_retrying_on_deadlock
+def refresh_route_geolocation(route_name):
+	"""Re-resolves EVERY Borrador stop's geographic snapshot from its own
+	Address's CURRENT coordinates (brief section 10) -- the explicit,
+	on-demand step an operator runs after correcting an Address via
+	set_address_geolocation(). Never touches identity: stop `name`,
+	`sequence`, `pick_list`, `customer`, ... are all left exactly as they
+	are, same guarantee update_route_stops() already makes for its own
+	kept stops. Only the 4 geo fields (latitude/longitude/
+	geolocation_status/geolocation_source) are ever reassigned, via the
+	real Document API (never frappe.db.set_value), one .save() per stop.
+
+	Concurrency (brief section 21) -- the exact "User A opens Borrador,
+	User B Planifica, User A tries to refresh" race: reads Recorrido.
+	status under `for_update=True` (the same native-Frappe row-locking
+	primitive _lock_pick_lists() already uses, no raw SQL) before trusting
+	it. This alone is sufficient for real mutual exclusion even though
+	plan_route() itself never explicitly takes a lock: plan_route()'s own
+	route.save() must acquire that same row's write lock to commit its
+	UPDATE, so it either commits fully BEFORE this function's own
+	for_update read runs (which then correctly observes "Planificado" and
+	rejects) or is still in flight (in which case this function's
+	for_update read blocks until it resolves, then observes whichever
+	state actually won) -- there is no window where either side can act
+	on stale, pre-lock status, the same reasoning already documented for
+	_locked_assigned_pick_lists()'s own FOR UPDATE read above.
+
+	Planificado/En Ruta/Completado/Cancelado (brief section 22): rejected
+	outright, never silently updated -- a Planificado route's own geo
+	snapshot is frozen history from the moment it left Borrador, exactly
+	like update_route_stops() already refuses to edit its stops at all
+	past that point."""
+	_require_login()
+	frappe.has_permission("Recorrido", "write", throw=True)
+
+	route = frappe.get_doc("Recorrido", route_name)
+	route.check_permission("write")
+
+	locked_status = frappe.db.get_value("Recorrido", route_name, "status", for_update=True)
+	if locked_status is None:
+		frappe.throw(_("El recorrido {0} no existe.").format(route_name), frappe.DoesNotExistError)
+	if locked_status != "Borrador":
+		frappe.throw(
+			_("Solo se puede actualizar la geolocalización de un recorrido en Borrador."),
+			RouteNotEditableError,
+		)
+
+	stops = frappe.get_list(
+		"Recorrido Parada",
+		filters={"recorrido": route.name},
+		fields=["name", "customer_address"],
+	)
+	for s in stops:
+		geo = _resolve_stop_geolocation(s.customer_address)
+		stop_doc = frappe.get_doc("Recorrido Parada", s.name)
+		stop_doc.check_permission("write")
+		stop_doc.latitude = geo["latitude"]
+		stop_doc.longitude = geo["longitude"]
+		stop_doc.geolocation_status = geo["geolocation_status"]
+		stop_doc.geolocation_source = geo["geolocation_source"]
+		stop_doc.save()
+
+	return get_route_detail(route.name)
+
+
+@frappe.whitelist()
+def get_route_geolocation_status(route_name):
+	"""Read-only geographic-readiness summary for a route (brief section
+	11/12) -- no economic value anywhere. `ready_for_routing` is a pure,
+	never-persisted computed signal: true only when there is at least one
+	stop AND every single one of them is geolocation_status=
+	"Geolocalizado" (never true for an empty route, never true while any
+	stop is Pendiente/Revisar/Error). This means "the data is ready for a
+	future routing calculation to run on" -- it does NOT mean the route
+	is optimized, and no code anywhere sets or reads this value except
+	this endpoint computing it fresh on every call."""
+	_require_login()
+	frappe.has_permission("Recorrido", "read", throw=True)
+
+	route = frappe.get_doc("Recorrido", route_name)
+	route.check_permission("read")
+
+	stops = frappe.get_list(
+		"Recorrido Parada",
+		filters={"recorrido": route.name},
+		fields=[
+			"name",
+			"sequence",
+			"pick_list",
+			"sales_order",
+			"customer",
+			"customer_name",
+			"customer_address",
+			"address_display",
+			"latitude",
+			"longitude",
+			"geolocation_status",
+		],
+		order_by="sequence asc",
+	)
+
+	resolve_commercial_name = _commercial_name_cache()
+	for s in stops:
+		s["commercial_name"] = resolve_commercial_name(s.sales_order)
+
+	geolocated_stops = sum(1 for s in stops if s.geolocation_status == "Geolocalizado")
+
+	return {
+		"route": route.name,
+		"total_stops": len(stops),
+		"geolocated_stops": geolocated_stops,
+		"pending_stops": len(stops) - geolocated_stops,
+		"ready_for_routing": bool(stops) and geolocated_stops == len(stops),
+		"stops": stops,
+	}

@@ -883,7 +883,7 @@
   "submit": 1,
   "write": 1
  },
-{
+ {
   "amend": 0,
   "cancel": 0,
   "create": 0,
@@ -948,7 +948,7 @@
   "impersonate": 0,
   "import": 0,
   "mask": 0,
-  "modified": "2026-08-30 06:35:49.330064",
+  "modified": "2026-08-31 00:00:00.000000",
   "name": "4q5q6sr4u6",
   "parent": "Address",
   "permlevel": 0,
