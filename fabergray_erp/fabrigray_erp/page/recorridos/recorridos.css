@@ -1,0 +1,1675 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Commit 24.2 -- Page Recorridos. Everything generic (header, KPI card
+ * shell, badge shell, buttons, progress bars, skeleton loaders, design
+ * tokens) comes from the shared fg_shell.css (loaded globally via
+ * app_include_css, same file every other Page in this app already uses)
+ * -- this file only styles what is genuinely new here, reproduced (not
+ * imported) from page/facturacion/facturacion.css/page/cotizaciones/
+ * cotizaciones.css, same reasoning already documented in those files: a
+ * few dozen rules, zero business logic, keeps this Page's asset loading
+ * independent of theirs. Scoped under .fg-recorridos so nothing leaks
+ * outside this Page.
+ *
+ * Commit 24.2's own visual redesign of the CREAR RECORRIDO and Detalle/
+ * Borrador modals (against design_references/recorridos_crear_v2.png and
+ * recorridos_detalle_borrador_v2.png) lives under ".fg-route-dialog"
+ * below -- presentation only, no JS business logic changed to produce
+ * it. See that section's own comment for the "iconos negros gigantes"
+ * root cause and fix (same class of bug already fixed once for
+ * Facturación's own review dialog, page/facturacion/facturacion.css).
+ */
+
+.fg-recorridos .fg-body {
+	display: flex;
+	flex-direction: column;
+}
+
+/* ------------------------------------------------------------------ */
+/* KPIs (brief section 4) -- 4 cards, distinct modifier names from      */
+/* fg_shell.css's/other Pages' own so nothing collides.                 */
+/* ------------------------------------------------------------------ */
+.fg-recorridos.fg-shell .fg-kpis--recorridos {
+	grid-template-columns: repeat(4, 1fr);
+}
+
+.fg-recorridos .fg-kpi--recorridos-disponibles {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-recorridos .fg-kpi--recorridos-borrador {
+	--fg-kpi-color: var(--fg-warning-dark);
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-recorridos .fg-kpi--recorridos-planificado {
+	--fg-kpi-color: var(--fg-primary-dark);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-recorridos .fg-kpi--recorridos-en-ruta {
+	--fg-kpi-color: var(--fg-aqua);
+	--fg-kpi-tint: #e6fbfb;
+}
+
+/* ------------------------------------------------------------------ */
+/* Top-level tabs -- Pedidos disponibles / Recorridos / Historial       */
+/* ------------------------------------------------------------------ */
+.fg-recorridos .fg-recorridos-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 8px;
+	margin-bottom: 18px;
+}
+
+.fg-recorridos .fg-recorridos-tab {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: transparent;
+	border: none;
+	border-radius: var(--fg-radius-md);
+	padding: 10px 16px;
+	min-height: 40px;
+	font-size: 0.82rem;
+	font-weight: 600;
+	color: var(--fg-text-muted);
+	cursor: pointer;
+	transition: background var(--fg-transition), color var(--fg-transition);
+}
+
+.fg-recorridos .fg-recorridos-tab.is-active {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+/* ------------------------------------------------------------------ */
+/* Toolbar (búsqueda) -- shared shape between the main "disponibles"    */
+/* tab and the AGREGAR PEDIDOS sub-dialog.                              */
+/* ------------------------------------------------------------------ */
+.fg-recorridos-toolbar {
+	display: flex;
+	gap: 12px;
+	margin-bottom: 16px;
+	flex-wrap: wrap;
+}
+
+.fg-recorridos-search-wrap {
+	position: relative;
+	flex: 1 1 260px;
+	margin-bottom: 14px;
+}
+
+.fg-recorridos-search-icon {
+	position: absolute;
+	left: 14px;
+	top: 50%;
+	transform: translateY(-50%);
+	color: var(--fg-text-faint);
+	pointer-events: none;
+}
+
+.fg-recorridos-search-input {
+	width: 100%;
+	height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	padding: 0 14px 0 40px;
+	font-size: 0.9rem;
+	color: var(--fg-text);
+}
+
+.fg-recorridos-search-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+/* ------------------------------------------------------------------ */
+/* Pedidos disponibles -- cards with a checkbox (brief section 6/7)     */
+/* ------------------------------------------------------------------ */
+.fg-recorridos-avail-cards {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	margin-bottom: 18px;
+}
+
+.fg-recorridos-avail-card {
+	display: flex;
+	align-items: flex-start;
+	gap: 14px;
+	background: var(--fg-card);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 20px;
+	cursor: pointer;
+	transition: box-shadow var(--fg-transition), border-color var(--fg-transition), background var(--fg-transition);
+}
+
+.fg-recorridos-avail-card:hover {
+	box-shadow: var(--fg-shadow);
+}
+
+.fg-recorridos-avail-card.is-selected {
+	border-color: var(--fg-primary);
+	background: var(--fg-primary-tint);
+}
+
+.fg-recorridos-avail-checkbox {
+	margin-top: 4px;
+	width: 20px;
+	height: 20px;
+	flex-shrink: 0;
+	accent-color: var(--fg-primary);
+	cursor: pointer;
+}
+
+.fg-recorridos-avail-card-body {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	flex: 1;
+	min-width: 0;
+}
+
+.fg-recorridos-avail-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.fg-recorridos-avail-card-id {
+	font-weight: 700;
+	font-size: 1rem;
+}
+
+.fg-recorridos-avail-card-customer {
+	font-size: 0.9rem;
+	font-weight: 600;
+	color: var(--fg-text);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.fg-recorridos-avail-card-address {
+	font-size: 0.85rem;
+	color: var(--fg-text-muted);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.fg-recorridos-avail-card-meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 16px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	margin-top: 2px;
+}
+
+.fg-recorridos-avail-card-meta span {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.fg-recorridos-avail-card-picklist {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.74rem;
+	color: var(--fg-text-faint);
+}
+
+.fg-recorridos-avail-card--compact {
+	padding: 12px 16px;
+}
+
+.fg-recorridos-avail-cards--compact {
+	max-height: 50vh;
+	overflow-y: auto;
+	gap: 10px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Badges -- estado de pedido/recorrido                                 */
+/* ------------------------------------------------------------------ */
+.fg-recorridos .fg-badge--route-facturado {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-recorridos .fg-badge--route-borrador {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-recorridos .fg-badge--route-planificado {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-recorridos .fg-badge--route-en-ruta {
+	background: #e6fbfb;
+	color: #0e7490;
+}
+
+.fg-recorridos .fg-badge--route-completado {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-recorridos .fg-badge--route-cancelado {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+/* ------------------------------------------------------------------ */
+/* Sticky selection bar (brief section 7) -- fixed to the viewport      */
+/* bottom, never covering the sidebar's own width; the app itself has   */
+/* no precedent for this pattern (audited: no other Page needs one), so */
+/* this is new, matching fg_shell.css's own tokens exactly.             */
+/* ------------------------------------------------------------------ */
+.fg-recorridos-selection-bar {
+	position: fixed;
+	left: 50%;
+	bottom: 24px;
+	transform: translateX(-50%);
+	z-index: 1000;
+	display: flex;
+	align-items: center;
+	gap: 20px;
+	background: var(--fg-text);
+	color: #fff;
+	border-radius: var(--fg-radius-lg);
+	box-shadow: 0 8px 24px rgba(16, 24, 40, 0.24);
+	padding: 14px 20px;
+	max-width: calc(100vw - 32px);
+}
+
+.fg-recorridos-selection-count {
+	font-weight: 600;
+	font-size: 0.9rem;
+	white-space: nowrap;
+}
+
+.fg-recorridos-selection-actions {
+	display: flex;
+	gap: 10px;
+}
+
+.fg-recorridos-selection-bar .fg-btn--ghost {
+	color: #fff;
+	border-color: rgba(255, 255, 255, 0.3);
+}
+
+.fg-recorridos-selection-bar .fg-btn--ghost:hover {
+	background: rgba(255, 255, 255, 0.12);
+}
+
+/* ------------------------------------------------------------------ */
+/* Recorridos / Historial -- filter chips + route cards                 */
+/* ------------------------------------------------------------------ */
+.fg-recorridos-filter-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 18px;
+}
+
+.fg-recorridos-filter-chip {
+	background: var(--fg-card);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-pill);
+	padding: 8px 16px;
+	font-size: 0.8rem;
+	font-weight: 600;
+	color: var(--fg-text-muted);
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition), color var(--fg-transition);
+}
+
+.fg-recorridos-filter-chip.is-active {
+	background: var(--fg-primary-tint);
+	border-color: var(--fg-primary);
+	color: var(--fg-primary-dark);
+}
+
+.fg-recorridos-route-cards {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 16px;
+	margin-bottom: 18px;
+}
+
+.fg-recorridos-route-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 18px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	transition: box-shadow var(--fg-transition);
+}
+
+.fg-recorridos-route-card:hover {
+	box-shadow: var(--fg-shadow);
+}
+
+.fg-recorridos-route-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+}
+
+.fg-recorridos-route-card-id {
+	font-weight: 700;
+	font-size: 1rem;
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.fg-recorridos-route-card-grid {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 10px 16px;
+	font-size: 0.85rem;
+}
+
+.fg-recorridos-route-card-grid > div {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.fg-recorridos-route-card-label {
+	font-size: 0.72rem;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--fg-text-faint);
+	font-weight: 600;
+}
+
+.fg-recorridos-route-card-actions {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	margin-top: auto;
+}
+
+.fg-recorridos-route-card-actions .fg-btn {
+	flex: 1;
+	white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ */
+/* Pagination                                                           */
+/* ------------------------------------------------------------------ */
+.fg-recorridos-pagination {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.fg-recorridos-pagination-info {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-recorridos-pagination-controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-recorridos-pagination-btn {
+	width: var(--fg-touch);
+	height: var(--fg-touch);
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.fg-recorridos-pagination-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.fg-recorridos-pagination-page {
+	font-weight: 700;
+	font-size: 0.85rem;
+	min-width: 20px;
+	text-align: center;
+}
+
+/* ------------------------------------------------------------------ */
+/* .fg-route-dialog -- shared chrome for BOTH the CREAR RECORRIDO and    */
+/* Detalle/Borrador modals (Commit 24.2's own visual redesign).          */
+/*                                                                       */
+/* THE REAL ROOT CAUSE of "CREAR RECORRIDO" rendering with barely-       */
+/* visible white-on-pale-lavender text (this commit's own bugfix):       */
+/* every --fg-* design token (--fg-primary, --fg-border, --fg-text,      */
+/* --fg-card, --fg-bg, --fg-success/--fg-warning/--fg-danger, --fg-      */
+/* radius-*, --fg-shadow*, --fg-touch...) is defined ONLY on ".fg-shell" */
+/* in fg_shell.css -- confirmed by reading that file directly, only one  */
+/* declaration site, scoped to that one selector. Bootstrap's own        */
+/* Modal.show() moves this dialog's wrapper to be a DIRECT CHILD OF      */
+/* <body> the moment .modal("show") runs (confirmed in frappe/public/js/ */
+/* frappe/ui/dialog.js's own show()), making it a SIBLING of .fg-shell,  */
+/* never its descendant -- so none of those custom properties inherit
+ * here. Per the CSS custom-properties spec, a var() referencing an
+ * undefined property with no fallback makes the property using it
+ * invalid at computed-value time: for a non-inherited property like
+ * `background` (linear-gradient(135deg, var(--fg-primary), ...)), that
+ * resolves to the INITIAL value (background-image: none) -- there is no
+ * background at all, so white button text sits on the page's own pale
+ * background showing through, exactly the reported symptom. This was
+ * already fixed once for .fg-icon/.fg-badge/.fg-empty (see their own
+ * comments below) but the same fix was never applied to the underlying
+ * COLOR/SPACING TOKENS every one of those (and dozens of other rules in
+ * this file) are built from -- this block is that fix, values copied
+ * byte-for-byte from fg_shell.css's own ".fg-shell" block so this
+ * dialog always renders identically to the rest of the app regardless
+ * of where Bootstrap relocates it in the DOM. Extra pastel tokens
+ * fg_shell.css doesn't ship (--fg-route-*) stay alongside, same pattern
+ * as facturacion.css's own --fg-fact-purple/--fg-fact-rose. */
+.fg-route-dialog {
+	--fg-primary: #2b7be4;
+	--fg-primary-dark: #1e63c4;
+	--fg-primary-tint: #eaf2fd;
+	--fg-success: #34c759;
+	--fg-success-dark: #1f9c46;
+	--fg-success-tint: #e9f9ee;
+	--fg-aqua: #22c3c9;
+	--fg-purple: #8b5cf6;
+	--fg-warning: #ffc53d;
+	--fg-warning-dark: #b45309;
+	--fg-warning-tint: #fff7e0;
+	--fg-danger: #dc2626;
+	--fg-danger-tint: #fdecec;
+	--fg-bg: #f8fafc;
+	--fg-card: #ffffff;
+	--fg-border: #e5e9f0;
+	--fg-text: #101828;
+	--fg-text-muted: #667085;
+	--fg-text-faint: #98a2b3;
+	--fg-radius-lg: 18px;
+	--fg-radius-md: 14px;
+	--fg-radius-sm: 10px;
+	--fg-radius-pill: 999px;
+	--fg-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 12px rgba(16, 24, 40, 0.05);
+	--fg-shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+	--fg-transition: 200ms ease;
+	--fg-touch: 44px;
+
+	--fg-route-violet: #7c5cfc;
+	--fg-route-violet-tint: #f3f0fe;
+	--fg-route-orange: #b45309;
+	--fg-route-orange-tint: #fff7e0;
+	--fg-route-cream: #fffbf0;
+	--fg-route-cream-border: #f5e6c8;
+}
+
+/* frappe.ui.Dialog renders outside .fg-shell (appended straight to
+ * <body>, see frappe.get_modal() in frappe/public/js/frappe/dom.js), so
+ * fg_shell.css's own ".fg-shell .fg-icon" base rule (size, stroke,
+ * fill:none) never reaches anything in here -- without this, every
+ * <svg class="fg-icon"> below renders at its raw intrinsic size with a
+ * default black fill, i.e. exactly the "iconos negros gigantes" this
+ * redesign was asked to remove (same root cause already fixed once for
+ * Facturación's own review dialog -- .fg-fact-review-dialog .fg-icon in
+ * facturacion.css). Scoped to OUR OWN icon class only, never a bare
+ * `svg` selector -- Frappe's native Link-field/Date-field/awesomplete
+ * chrome (search icon, calendar trigger, dropdown arrow) uses its own
+ * markup and must never be touched here. */
+.fg-route-dialog .fg-icon {
+	width: 18px;
+	height: 18px;
+	stroke: currentColor;
+	fill: none;
+	flex-shrink: 0;
+}
+
+.fg-route-dialog .fg-icon-sm {
+	width: 14px;
+	height: 14px;
+}
+
+/* Same story as .fg-icon above -- .fg-badge and .fg-empty are also only
+ * ever defined as ".fg-shell .fg-badge"/".fg-shell .fg-empty" in
+ * fg_shell.css, so without their own base rule here every badge inside
+ * either dialog would render as bare unstyled text (no pill, no padding,
+ * no color) and the empty-state row would render as a plain unstyled
+ * paragraph. Colors for each --route-* modifier are set further below,
+ * this only reproduces the shared SHAPE. */
+.fg-route-dialog .fg-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 4px 10px;
+	border-radius: var(--fg-radius-pill);
+	font-size: 0.7rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	white-space: nowrap;
+}
+
+.fg-route-dialog .fg-empty {
+	text-align: center;
+	color: var(--fg-text-muted);
+	padding: 40px 0;
+	background: var(--fg-bg);
+	border: 1px dashed var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+}
+
+.fg-route-dialog .modal-dialog {
+	max-width: min(1280px, calc(100vw - 60px));
+	width: 100%;
+}
+
+.fg-route-dialog .modal-content {
+	border-radius: 20px;
+	border: none;
+	box-shadow: 0 20px 60px rgba(16, 24, 40, 0.18), 0 4px 12px rgba(16, 24, 40, 0.08);
+	max-height: 92vh;
+	/* display:flex; flex-direction:column already Bootstrap's own default
+	 * for .modal-content (node_modules/bootstrap/scss/_modal.scss) --
+	 * not redeclared here, only the constraint Bootstrap doesn't apply on
+	 * its own (max-height) plus the clip that makes the 20px radius above
+	 * actually round the header/footer's own square corners. */
+	overflow: hidden;
+}
+
+.fg-route-dialog .modal-header {
+	flex: 0 0 auto;
+	padding: 24px 28px;
+	border-bottom: 1px solid var(--fg-border);
+}
+
+.fg-route-dialog .modal-header .title-section {
+	flex: 1;
+	min-width: 0;
+}
+
+.fg-route-dialog .modal-title {
+	width: 100%;
+	white-space: normal;
+}
+
+/* THE root-cause fix for "CREAR RECORRIDO disappeared" / "Fecha-
+ * Conductor-Vehículo not visible on open": a flex item's default
+ * min-height is `auto`, which resolves to its OWN CONTENT height, not 0
+ * -- so .modal-body (flex:1 1 auto + overflow-y:auto) refused to shrink
+ * below the combined height of every field row + the stops list, even
+ * though .modal-content is hard-capped at max-height:92vh above. With
+ * header+body+footer together taller than that cap and overflow:hidden
+ * on .modal-content, the excess got silently clipped -- exactly why the
+ * footer (last in DOM/flex order) and the top field rows (pushed by a
+ * body that never got its OWN bounded, independently-scrollable box)
+ * rendered inconsistently instead of "header fixed, body scrolls,
+ * footer fixed". min-height:0 is the standard, spec-documented fix for
+ * a flex child that must actually respect overflow:auto instead of
+ * dictating the container's size -- confirmed this exact field is ALSO
+ * missing from Bootstrap's own official .modal-dialog-scrollable
+ * pattern (same _modal.scss), which is why it only ever bites when body
+ * content is tall enough to matter, exactly this modal's case. */
+.fg-route-dialog .modal-body {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	padding: 26px 28px;
+}
+
+.fg-route-dialog .modal-footer {
+	flex: 0 0 auto;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+	padding: 18px 28px;
+	border-top: 1px solid var(--fg-border);
+	background: var(--fg-bg);
+}
+
+/* custom-actions (the footer callout) is allowed to shrink/wrap;
+ * standard-actions (Cancelar + the real primary action button) never
+ * does -- so on any width where both can't share one row, it's the
+ * callout that wraps to its own line, never the actual action buttons. */
+.fg-route-dialog .custom-actions {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex: 1 1 auto;
+	min-width: 0;
+	flex-wrap: wrap;
+}
+
+.fg-route-dialog .standard-actions {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex: 0 0 auto;
+	flex-wrap: wrap;
+}
+
+.fg-route-dialog .btn-modal-secondary,
+.fg-route-dialog .btn-secondary {
+	border-radius: 10px;
+	font-weight: 700;
+	padding: 10px 20px;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.fg-route-dialog .btn-modal-primary,
+.fg-route-dialog .btn-primary {
+	border-radius: 10px;
+	font-weight: 700;
+	padding: 10px 22px;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+}
+
+/* -- Rich header (icon square + title + subtitle), passed as the       */
+/* Dialog's own `title` HTML string -- same technique facturacion.js's   */
+/* own review dialog already uses for a rich modal-title. -------------- */
+.fg-route-dialog-title {
+	display: flex;
+	align-items: flex-start;
+	gap: 16px;
+	text-align: left;
+}
+
+.fg-route-dialog-title-icon {
+	width: 56px;
+	height: 56px;
+	border-radius: 16px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+}
+
+.fg-route-dialog-title-icon .fg-icon {
+	width: 26px;
+	height: 26px;
+}
+
+.fg-route-dialog-title-icon--blue {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary);
+}
+
+.fg-route-dialog-title-icon--violet {
+	background: var(--fg-route-violet-tint);
+	color: var(--fg-route-violet);
+}
+
+.fg-route-dialog-title-text {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	min-width: 0;
+}
+
+.fg-route-dialog-title-main {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+	font-size: 1.4rem;
+	font-weight: 800;
+	color: var(--fg-text);
+}
+
+.fg-route-dialog-title-sub {
+	font-size: 0.88rem;
+	color: var(--fg-text-muted);
+	font-weight: 500;
+	line-height: 1.4;
+}
+
+.fg-route-dialog-title-meta {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 0.8rem;
+	color: var(--fg-text-faint);
+	margin-top: 2px;
+}
+
+/* -- Instructional callout (footer, CREAR RECORRIDO; body, Detalle) --- */
+.fg-route-callout {
+	display: flex;
+	align-items: flex-start;
+	gap: 10px;
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+	border-radius: 12px;
+	padding: 12px 16px;
+	font-size: 0.85rem;
+	font-weight: 500;
+	line-height: 1.4;
+	max-width: 460px;
+}
+
+/* -- Section head (Pedidos seleccionados / Paradas) -------------------- */
+.fg-route-section-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	flex-wrap: wrap;
+}
+
+.fg-route-section-head-main {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.fg-route-section-title {
+	font-size: 1.05rem;
+	font-weight: 700;
+	color: var(--fg-text);
+}
+
+.fg-route-section-sub {
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-route-section-sub--block {
+	display: block;
+	margin: 2px 0 12px;
+}
+
+.fg-route-dialog .fg-badge--route-count {
+	background: var(--fg-route-violet-tint);
+	color: var(--fg-route-violet);
+}
+
+/* -- Card badges (pedido/pick list/products/units) ---------------------- */
+.fg-route-dialog .fg-badge--route-pedido {
+	background: var(--fg-route-orange-tint);
+	color: var(--fg-route-orange);
+}
+
+.fg-route-dialog .fg-badge--route-picklist {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	color: var(--fg-text-muted);
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	text-transform: none;
+	letter-spacing: 0;
+	font-weight: 600;
+}
+
+.fg-route-dialog .fg-badge--route-products {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-route-dialog .fg-badge--route-units {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+/* -- Pedido/Parada cards -- cream (CREAR RECORRIDO) or white (Detalle) - */
+.fg-route-cards-list {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	max-height: 42vh;
+	overflow-y: auto;
+	padding: 2px 4px 2px 2px;
+	margin: 14px 0;
+}
+
+.fg-route-card {
+	display: flex;
+	align-items: flex-start;
+	gap: 14px;
+	background: var(--fg-route-cream);
+	border: 1px solid var(--fg-route-cream-border);
+	border-radius: 16px;
+	padding: 16px 18px;
+}
+
+.fg-route-card--white {
+	background: var(--fg-card);
+	border-color: var(--fg-border);
+	box-shadow: var(--fg-shadow-sm);
+}
+
+.fg-route-card-handle {
+	display: flex;
+	align-items: center;
+	padding-top: 8px;
+	color: var(--fg-text-faint);
+	cursor: grab;
+}
+
+.fg-route-card-handle .fg-icon {
+	width: 16px;
+	height: 16px;
+}
+
+.fg-route-card-num {
+	width: 34px;
+	height: 34px;
+	border-radius: 12px;
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+	font-weight: 800;
+	font-size: 1rem;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	margin-top: 4px;
+}
+
+.fg-route-card-num--violet {
+	background: var(--fg-route-violet-tint);
+	color: var(--fg-route-violet);
+}
+
+.fg-route-card-avatar {
+	width: 40px;
+	height: 40px;
+	border-radius: 50%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex-shrink: 0;
+	margin-top: 4px;
+}
+
+.fg-route-card-avatar .fg-icon {
+	width: 18px;
+	height: 18px;
+}
+
+.fg-route-card-avatar--blue {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary);
+}
+
+.fg-route-card-avatar--green {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-route-card-avatar--violet {
+	background: var(--fg-route-violet-tint);
+	color: var(--fg-route-violet);
+}
+
+.fg-route-card-info {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding-top: 2px;
+}
+
+.fg-route-card-title-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.fg-route-card-name {
+	font-weight: 700;
+	font-size: 0.95rem;
+	color: var(--fg-text);
+}
+
+.fg-route-card-codes {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.fg-route-card-address {
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.fg-route-card-tags {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	align-items: center;
+}
+
+.fg-route-card-actions {
+	display: flex;
+	gap: 6px;
+	flex-shrink: 0;
+	align-self: center;
+}
+
+/* -- Square ↑ ↓ 🗑 buttons ------------------------------------------- */
+.fg-route-sqbtn {
+	width: 36px;
+	height: 36px;
+	border-radius: 10px;
+	border: 1px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text-muted);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition);
+}
+
+.fg-route-sqbtn .fg-icon {
+	width: 16px;
+	height: 16px;
+}
+
+.fg-route-sqbtn:disabled {
+	opacity: 0.35;
+	cursor: not-allowed;
+}
+
+.fg-route-sqbtn--up:not(:disabled) {
+	background: var(--fg-route-violet-tint);
+	border-color: var(--fg-route-violet-tint);
+	color: var(--fg-route-violet);
+}
+
+.fg-route-sqbtn--danger {
+	background: var(--fg-danger-tint);
+	border-color: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+.fg-route-sqbtn--danger:hover:not(:disabled) {
+	background: #fbdada;
+}
+
+/* -- Busy-state spinner inside CREAR RECORRIDO's own primary button ---- */
+.fg-route-btn-spinner {
+	display: inline-block;
+	width: 13px;
+	height: 13px;
+	border: 2px solid rgba(255, 255, 255, 0.45);
+	border-top-color: #fff;
+	border-radius: 50%;
+	animation: fg-route-spin 0.7s linear infinite;
+	margin-right: 2px;
+}
+
+@keyframes fg-route-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+/* ====================================================================
+ * CREAR RECORRIDO -- Commit 24.2's third pass, against
+ * design_references/recorridos_crear_v3.png. Rebuilt clean rather than
+ * patched further (previous two passes' field-decoration/button rules
+ * replaced wholesale here); everything below is scoped to
+ * .fg-recorridos-create-dialog specifically and touches NOTHING the
+ * Detalle/Borrador modal (.fg-recorridos-detail-dialog) reads -- the
+ * shared mechanics above (.fg-route-dialog's icon-size fix, modal-body
+ * min-height:0 + overflow-y:auto, header/footer flex:0 0 auto,
+ * .fg-route-card/.fg-route-sqbtn base shapes) are untouched and already
+ * proven working for both dialogs; only THIS dialog's own colors/sizes
+ * are overridden below, at higher selector specificity, never the
+ * shared base rules themselves.
+ * ==================================================================== */
+
+/* -- Modal size, per v3 (distinct from Detalle's own 1280px/92vh,       */
+/* untouched above). ---------------------------------------------------- */
+.fg-recorridos-create-dialog .modal-dialog {
+	max-width: min(1320px, calc(100vw - 40px));
+}
+
+.fg-recorridos-create-dialog .modal-content {
+	max-height: 94vh;
+}
+
+/* Title ~26-30px per v3 (Detalle's own title, a route NAME, stays at the
+ * shared .fg-route-dialog-title-main size above -- untouched). */
+.fg-recorridos-create-dialog .fg-route-dialog-title-main {
+	font-size: 1.75rem;
+}
+
+/* -- Fecha / Conductor / Vehículo / Punto de salida / Notas -- only the  */
+/* input/textarea's OWN box (border, radius, height) is touched, never   */
+/* Frappe's Link autocomplete/Date picker/validation. ------------------- */
+.fg-recorridos-create-dialog [data-fieldname="route_date"] .input-with-feedback,
+.fg-recorridos-create-dialog [data-fieldname="driver"] input,
+.fg-recorridos-create-dialog [data-fieldname="vehicle"] input {
+	border-radius: 10px;
+	border: 1.5px solid var(--fg-border);
+	height: 48px;
+	font-size: 0.88rem;
+}
+
+.fg-recorridos-create-dialog [data-fieldname="start_address"] textarea,
+.fg-recorridos-create-dialog [data-fieldname="notes"] textarea {
+	border-radius: 10px;
+	border: 1.5px solid var(--fg-border);
+	min-height: 118px;
+	font-size: 0.88rem;
+	resize: vertical;
+}
+
+/* Conductor/Vehículo visually marked required (brief's own explicit
+ * ask) WITHOUT touching validation: this is a decorative ::after only,
+ * never `reqd: 1` on the field definition -- `reqd:1` would ALSO make
+ * frappe.ui.Dialog.get_values(true) block submission on an empty value,
+ * a real functional change create_route() itself does not enforce
+ * today (driver/vehicle are both `frappe.get_doc(...).driver = driver or
+ * None` -- fully optional; confirmed also in Recorrido's own DocType
+ * JSON, neither field has "reqd":1 there either). Cosmetic-only, exactly
+ * per the brief's own instruction not to turn this into a hidden
+ * functional change. */
+.fg-recorridos-create-dialog [data-fieldname="driver"] .control-label::after,
+.fg-recorridos-create-dialog [data-fieldname="vehicle"] .control-label::after {
+	content: " *";
+	color: var(--fg-danger);
+}
+
+/* Decorative left icons -- Conductor (user)/Vehículo (truck) inputs and
+ * Punto de salida (map-pin)/Notas (sticky-note) textareas alike.
+ * pointer-events:none + purely absolute-positioned over a
+ * position:relative wrapper -- never intercepts a click/keystroke meant
+ * for the real control, never removes/replaces it. Positioned via JS
+ * (decorate_route_dialog_fields()), not hardcoded per field here. */
+.fg-recorridos-create-dialog [data-fieldname="driver"] .control-input,
+.fg-recorridos-create-dialog [data-fieldname="vehicle"] .control-input,
+.fg-recorridos-create-dialog [data-fieldname="start_address"] .control-input,
+.fg-recorridos-create-dialog [data-fieldname="notes"] .control-input {
+	position: relative;
+}
+
+.fg-recorridos-create-dialog [data-fieldname="driver"] input,
+.fg-recorridos-create-dialog [data-fieldname="vehicle"] input {
+	padding-left: 38px;
+}
+
+.fg-recorridos-create-dialog [data-fieldname="start_address"] textarea,
+.fg-recorridos-create-dialog [data-fieldname="notes"] textarea {
+	padding-left: 38px;
+}
+
+.fg-route-field-icon {
+	position: absolute;
+	left: 12px;
+	top: 12px;
+	color: var(--fg-text-faint);
+	pointer-events: none;
+	display: flex;
+}
+
+/* Vertically centered for the two Link inputs (single-line, fixed 48px
+ * height); the textarea variant keeps top:12px above (multi-line box,
+ * icon reads better pinned to the first line). */
+.fg-recorridos-create-dialog [data-fieldname="driver"] .fg-route-field-icon,
+.fg-recorridos-create-dialog [data-fieldname="vehicle"] .fg-route-field-icon {
+	top: 50%;
+	transform: translateY(-50%);
+}
+
+.fg-route-field-icon .fg-icon {
+	width: 16px;
+	height: 16px;
+}
+
+/* -- "Pedidos seleccionados" cards -- square icon tile (not the         */
+/* colored circle Detalle's own paradas cards use), larger 44px ↑ ↓ 🗑    */
+/* buttons, a clearly-visible (not near-invisible) disabled state.       */
+/* Overrides ONLY apply inside .fg-recorridos-create-dialog -- Detalle's */
+/* own .fg-route-card-avatar/.fg-route-sqbtn instances are governed by   */
+/* the shared base rules above, untouched. ------------------------------ */
+.fg-recorridos-create-dialog .fg-route-card-avatar {
+	width: 36px;
+	height: 36px;
+	border-radius: 9px;
+	background: var(--fg-bg);
+	border: 1px solid var(--fg-border);
+	color: var(--fg-route-violet);
+}
+
+.fg-recorridos-create-dialog .fg-route-sqbtn {
+	width: 44px;
+	height: 44px;
+	border-radius: 10px;
+}
+
+.fg-recorridos-create-dialog .fg-route-sqbtn:disabled {
+	opacity: 0.5;
+}
+
+.fg-recorridos-create-dialog .fg-route-sqbtn--up:not(:disabled) {
+	background: var(--fg-card);
+	border-color: var(--fg-border);
+	color: var(--fg-text-muted);
+}
+
+/* -- Footer -- very soft violet-white (brief: "blanco / gris-violeta     */
+/* extremadamente suave"), overriding the shared --fg-bg gray. ---------- */
+.fg-recorridos-create-dialog .modal-footer {
+	background: #fbfaff;
+}
+
+/* -- CANCELAR -- neutral, never competes with the primary CTA. --------- */
+.fg-recorridos-create-dialog .btn-modal-secondary,
+.fg-recorridos-create-dialog .btn-secondary {
+	background: #fff;
+	border: 1.5px solid var(--fg-border);
+	color: var(--fg-text);
+	height: 50px;
+	padding: 0 24px;
+}
+
+/* -- CREAR RECORRIDO -- the ONE real primary_action button
+ * (dialog.get_primary_btn()), rebuilt clean. Explicit width/height
+ * (never min/max only, so the box is unambiguous), no transform, no
+ * pseudo-elements, no absolutely-positioned overlay anywhere in this
+ * rule set -- the hitbox audited in this same commit found no
+ * ::before/::after, no position:absolute sibling, no negative margin
+ * and no z-index layering over this button; its own full border-box
+ * IS the clickable area, exactly what <button> already guarantees
+ * natively. The one defensive addition is the `* { pointer-events:
+ * none }` below: the spinner/icon/text set via .html() are children,
+ * never separate elements capable of stealing a click, but this makes
+ * that guarantee explicit rather than incidental. */
+.fg-recorridos-create-dialog .btn-modal-primary,
+.fg-recorridos-create-dialog .btn-primary {
+	background: linear-gradient(135deg, var(--fg-primary), var(--fg-route-violet));
+	border: none;
+	color: #fff;
+	border-radius: 10px;
+	min-width: 260px;
+	max-width: 300px;
+	height: 52px;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	font-weight: 700;
+	font-size: 0.92rem;
+	white-space: nowrap;
+	box-shadow: 0 8px 20px rgba(124, 92, 252, 0.28);
+	transition: filter 150ms ease, box-shadow 150ms ease;
+}
+
+.fg-recorridos-create-dialog .btn-modal-primary *,
+.fg-recorridos-create-dialog .btn-primary * {
+	pointer-events: none;
+}
+
+.fg-recorridos-create-dialog .btn-modal-primary:hover:not(.disabled),
+.fg-recorridos-create-dialog .btn-primary:hover:not(.disabled) {
+	filter: brightness(1.08);
+	box-shadow: 0 10px 24px rgba(124, 92, 252, 0.35);
+}
+
+.fg-recorridos-create-dialog .btn-modal-primary.disabled,
+.fg-recorridos-create-dialog .btn-primary.disabled {
+	opacity: 0.55;
+	pointer-events: none;
+}
+
+/* ------------------------------------------------------------------ */
+/* Detalle / Borrador -- header meta, summary cards, notes, 70/30 body   */
+/* split, right column (resumen + consejos), dynamic footer.            */
+/* ------------------------------------------------------------------ */
+.fg-recorridos-detail-loading {
+	text-align: center;
+	color: var(--fg-text-muted);
+	padding: 60px 0;
+}
+
+.fg-route-summary-grid {
+	display: grid;
+	grid-template-columns: repeat(5, 1fr);
+	gap: 14px;
+	margin-bottom: 20px;
+}
+
+.fg-route-summary-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: 14px;
+	padding: 14px 16px;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	min-width: 0;
+}
+
+.fg-route-summary-card-icon {
+	width: 30px;
+	height: 30px;
+	border-radius: 9px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	margin-bottom: 4px;
+}
+
+.fg-route-summary-card-icon .fg-icon {
+	width: 15px;
+	height: 15px;
+}
+
+.fg-route-summary-card-icon--blue {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary);
+}
+
+.fg-route-summary-card-icon--green {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-route-summary-card-icon--orange {
+	background: var(--fg-route-orange-tint);
+	color: var(--fg-route-orange);
+}
+
+.fg-route-summary-card-icon--violet {
+	background: var(--fg-route-violet-tint);
+	color: var(--fg-route-violet);
+}
+
+.fg-route-summary-card-label {
+	font-size: 0.68rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--fg-text-faint);
+}
+
+.fg-route-summary-card-value {
+	font-size: 0.95rem;
+	font-weight: 700;
+	color: var(--fg-text);
+	overflow-wrap: anywhere;
+}
+
+.fg-route-summary-card-value.is-muted {
+	color: var(--fg-text-faint);
+	font-weight: 500;
+}
+
+.fg-route-summary-card-sub {
+	font-size: 0.74rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-route-notes-card {
+	display: flex;
+	align-items: flex-start;
+	gap: 12px;
+	background: var(--fg-route-orange-tint);
+	border-radius: 14px;
+	padding: 14px 18px;
+	margin-bottom: 20px;
+}
+
+.fg-route-notes-icon {
+	color: var(--fg-route-orange);
+	display: flex;
+	margin-top: 2px;
+}
+
+.fg-route-notes-text {
+	font-size: 0.88rem;
+	color: var(--fg-text);
+	margin-top: 2px;
+	overflow-wrap: anywhere;
+}
+
+.fg-route-detail-columns {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) 300px;
+	gap: 20px;
+	align-items: start;
+}
+
+.fg-route-detail-main {
+	min-width: 0;
+}
+
+.fg-route-detail-aside {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+	min-width: 0;
+}
+
+.fg-route-add-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	background: var(--fg-route-violet-tint);
+	color: var(--fg-route-violet);
+	border: none;
+	border-radius: 10px;
+	padding: 8px 16px;
+	font-weight: 700;
+	font-size: 0.82rem;
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.fg-route-add-btn:hover {
+	background: #e6ddfd;
+}
+
+.fg-route-aside-card {
+	border-radius: 16px;
+	padding: 18px 20px;
+}
+
+.fg-route-aside-card--blue {
+	background: var(--fg-primary-tint);
+}
+
+.fg-route-aside-card--green {
+	background: var(--fg-success-tint);
+}
+
+.fg-route-aside-card-title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 700;
+	font-size: 0.92rem;
+	color: var(--fg-text);
+	margin-bottom: 14px;
+}
+
+.fg-route-aside-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	font-size: 0.85rem;
+	color: var(--fg-text-muted);
+	padding: 8px 0;
+	border-bottom: 1px dashed rgba(16, 24, 40, 0.1);
+}
+
+.fg-route-aside-row:last-child {
+	border-bottom: none;
+	padding-bottom: 0;
+}
+
+.fg-route-aside-row strong {
+	font-size: 1.1rem;
+	color: var(--fg-text);
+}
+
+.fg-route-tip {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	font-size: 0.85rem;
+	color: var(--fg-text);
+	line-height: 1.4;
+	margin-bottom: 10px;
+}
+
+.fg-route-tip:last-child {
+	margin-bottom: 0;
+}
+
+.fg-route-tip .fg-icon {
+	color: var(--fg-success-dark);
+	margin-top: 2px;
+}
+
+/* Detalle/Borrador's own footer buttons -- softer than CREAR RECORRIDO's
+ * gradient CTA (Planificar is a real but secondary-weight action here,
+ * not the modal's single purpose). Cancelar recorrido is injected via
+ * dialog.add_custom_action() (Frappe's own footer extension point,
+ * frappe/public/js/frappe/ui/dialog.js) with css_class
+ * "fg-route-btn-cancel" -- the 3-class selector below is deliberately
+ * more specific than the plain ".fg-route-dialog .btn-secondary" rule
+ * above so it wins without needing !important. */
+.fg-recorridos-detail-dialog .btn-modal-primary,
+.fg-recorridos-detail-dialog .btn-primary {
+	background: var(--fg-route-violet-tint);
+	color: var(--fg-route-violet);
+	border: none;
+}
+
+.fg-recorridos-detail-dialog .btn-modal-primary:hover:not(.disabled),
+.fg-recorridos-detail-dialog .btn-primary:hover:not(.disabled) {
+	background: #e6ddfd;
+}
+
+.fg-recorridos-detail-dialog .btn-modal-secondary,
+.fg-recorridos-detail-dialog .btn-secondary {
+	background: var(--fg-card);
+	border: 1.5px solid var(--fg-border);
+	color: var(--fg-text);
+}
+
+.fg-recorridos-detail-dialog .custom-actions .fg-route-btn-cancel {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+	border: none;
+}
+
+.fg-recorridos-detail-dialog .custom-actions .fg-route-btn-cancel:hover {
+	background: #fbdada;
+}
+
+/* ------------------------------------------------------------------ */
+/* AGREGAR PEDIDOS sub-dialog (unchanged by this redesign)              */
+/* ------------------------------------------------------------------ */
+.fg-recorridos-add-dialog .modal-dialog {
+	max-width: 620px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive -- desktop first, then tablet (~860px/~834px iPad), then  */
+/* mobile (~640px/~390px), matching the breakpoints already approved    */
+/* for every other Page in this app. Touch targets stay >=44px          */
+/* (var(--fg-touch)) at every width. Modal content never overflows      */
+/* horizontally at any width.                                           */
+/* ------------------------------------------------------------------ */
+@media (max-width: 1024px) {
+	.fg-recorridos-route-cards {
+		grid-template-columns: repeat(2, 1fr);
+	}
+}
+
+@media (max-width: 860px) {
+	.fg-recorridos.fg-shell .fg-kpis--recorridos {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-recorridos-route-cards {
+		grid-template-columns: 1fr;
+	}
+
+	.fg-route-dialog .modal-dialog {
+		max-width: 94vw;
+	}
+
+	.fg-route-dialog .modal-content {
+		max-height: 94vh;
+	}
+
+	.fg-route-summary-grid {
+		grid-template-columns: repeat(3, 1fr);
+	}
+
+	.fg-route-detail-columns {
+		grid-template-columns: 1fr;
+	}
+
+	.fg-route-detail-aside {
+		flex-direction: row;
+		flex-wrap: wrap;
+	}
+
+	.fg-route-aside-card {
+		flex: 1 1 260px;
+	}
+}
+
+@media (max-width: 640px) {
+	.fg-recorridos.fg-shell .fg-kpis--recorridos {
+		grid-template-columns: 1fr 1fr;
+		gap: 10px;
+	}
+
+	.fg-recorridos-avail-card {
+		padding: 14px 16px;
+		flex-direction: row;
+	}
+
+	.fg-recorridos-route-card-actions {
+		flex-direction: column;
+	}
+
+	.fg-recorridos-route-card-actions .fg-btn {
+		width: 100%;
+	}
+
+	.fg-recorridos-selection-bar {
+		left: 12px;
+		right: 12px;
+		bottom: 12px;
+		transform: none;
+		max-width: none;
+		flex-direction: column;
+		align-items: stretch;
+		gap: 12px;
+	}
+
+	.fg-recorridos-selection-actions {
+		flex-direction: column;
+	}
+
+	.fg-recorridos-selection-actions .fg-btn {
+		width: 100%;
+		justify-content: center;
+	}
+
+	/* The modal can use almost the full viewport on mobile (brief's own
+	 * "El modal puede usar casi todo el viewport en mobile"). */
+	.fg-route-dialog .modal-dialog {
+		max-width: 100vw;
+		width: 100%;
+		margin: 6px auto;
+	}
+
+	.fg-route-dialog .modal-content {
+		max-height: 97vh;
+		border-radius: 14px;
+	}
+
+	.fg-route-dialog .modal-header,
+	.fg-route-dialog .modal-body,
+	.fg-route-dialog .modal-footer {
+		padding-left: 16px;
+		padding-right: 16px;
+	}
+
+	.fg-route-dialog-title-icon {
+		width: 44px;
+		height: 44px;
+		border-radius: 12px;
+	}
+
+	.fg-route-dialog-title-icon .fg-icon {
+		width: 20px;
+		height: 20px;
+	}
+
+	.fg-route-dialog-title-main,
+	.fg-recorridos-create-dialog .fg-route-dialog-title-main {
+		font-size: 1.15rem;
+	}
+
+	.fg-route-summary-grid {
+		grid-template-columns: 1fr 1fr;
+	}
+
+	.fg-route-card {
+		flex-wrap: wrap;
+	}
+
+	.fg-route-card-actions {
+		width: 100%;
+		justify-content: flex-end;
+		align-self: flex-start;
+	}
+
+	.fg-route-detail-aside {
+		flex-direction: column;
+	}
+
+	.fg-route-callout {
+		max-width: none;
+	}
+
+	.fg-route-dialog .modal-footer {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.fg-route-dialog .custom-actions,
+	.fg-route-dialog .standard-actions {
+		width: 100%;
+		justify-content: stretch;
+	}
+
+	.fg-route-dialog .custom-actions .btn,
+	.fg-route-dialog .standard-actions .btn {
+		flex: 1;
+		justify-content: center;
+	}
+
+	.fg-recorridos-create-dialog .btn-modal-primary,
+	.fg-recorridos-create-dialog .btn-primary {
+		min-width: 0;
+		max-width: none;
+	}
+}

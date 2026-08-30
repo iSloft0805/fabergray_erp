@@ -16,6 +16,8 @@ no accounting/stock/Delivery Note document is ever created."""
 import ast
 import inspect
 import threading
+from contextlib import contextmanager
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -31,6 +33,24 @@ _FORBIDDEN_CALLS = {
 	"frappe.get_all",
 	"frappe.set_user",
 }
+
+
+@contextmanager
+def _count_queries():
+	"""Same technique as api.jefe_bodega's own test suite
+	(test_jefe_bodega_visual_modules_api.py's own _count_queries()) --
+	wraps the real frappe.db.sql with a call counter, real execution
+	untouched, to prove a list endpoint's own query count does not grow
+	with the number of rows it returns."""
+	box = {"n": 0}
+	original = frappe.db.sql
+
+	def counting(*args, **kwargs):
+		box["n"] += 1
+		return original(*args, **kwargs)
+
+	with patch.object(frappe.db, "sql", side_effect=counting):
+		yield box
 
 
 def _dotted_name(node):
@@ -806,6 +826,8 @@ class TestRecorridosApi(IntegrationTestCase):
 			recorridos.get_available_orders,
 			recorridos.get_available_order_detail,
 			recorridos.get_route_detail,
+			recorridos.get_routes,
+			recorridos.get_routes_summary,
 			recorridos.create_route,
 			recorridos.update_route_stops,
 			recorridos.plan_route,
@@ -820,6 +842,215 @@ class TestRecorridosApi(IntegrationTestCase):
 		source = inspect.getsource(recorridos_module)
 		findings = _forbidden_findings(source)
 		self.assertEqual(findings, [], f"api/recorridos.py reaches a forbidden document/pattern: {findings}")
+
+	# =====================================================================
+	# Commit 24.2 -- get_available_orders() address preview
+	# =====================================================================
+
+	def test_available_orders_includes_address_preview(self):
+		customer = self.world.customer("FG242 Preview Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Preview 1", city="Manizales")
+		so, pl = self._facturado_pick_list(customer=customer)
+		with fx.as_user(self.recorrido_user):
+			result = recorridos.get_available_orders()
+		row = next(r for r in result["pick_lists"] if r["pick_list"] == pl.name)
+		self.assertIsNotNone(row["customer_address"])
+		self.assertIn("Manizales", row["address_display"])
+
+	def test_address_preview_helper_query_count_is_bounded_by_distinct_address(self):
+		"""_batch_resolve_address_previews() is the exact unit get_available_
+		orders() added for the address preview -- tested directly (not
+		through the whole endpoint) so this guardrail measures ONLY that
+		change, never the endpoint's own pre-existing, unrelated per-row
+		costs (root_commercial_name() per distinct Sales Order, active-
+		route counting, permission checks) that would otherwise make an
+		endpoint-level query budget fragile and unrelated to what this
+		test actually verifies. 5 repeats of the SAME customer (a
+		realistic "many Pick Lists, one repeat customer" shape) must cost
+		exactly one Customer query plus one get_address_display() call --
+		never five of either."""
+		customer = self.world.customer("FG242 Bounded Customer")
+		self._set_customer_primary_address(customer, address_line1="Calle Bounded 1", city="Pereira")
+
+		with _count_queries() as counted:
+			previews = recorridos._batch_resolve_address_previews([customer.name] * 5)
+
+		self.assertIsNotNone(previews[customer.name][0])
+		self.assertIn("Pereira", previews[customer.name][1])
+		self.assertLess(counted["n"], 5)
+
+	# =====================================================================
+	# Commit 24.2 -- get_routes()
+	# =====================================================================
+
+	def test_get_routes_requires_permission(self):
+		with fx.as_user(self.no_role_user):
+			with self.assertRaises(frappe.PermissionError):
+				recorridos.get_routes()
+
+	def test_get_routes_lists_created_routes(self):
+		so, pl = self._facturado_pick_list()
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+			result = recorridos.get_routes(status="Borrador")
+		self.assertIn(route["name"], [r["name"] for r in result["routes"]])
+
+	def test_get_routes_status_filter_accepts_list(self):
+		so1, pl1 = self._facturado_pick_list()
+		so2, pl2 = self._facturado_pick_list()
+		with fx.as_user(self.recorrido_user):
+			route_borrador = self._create_route(pick_lists=[pl1.name])
+			route_planificado = self._create_route(pick_lists=[pl2.name])
+			self._plan_route(route_planificado["name"])
+			result = recorridos.get_routes(status=["Borrador", "Planificado"])
+		names = [r["name"] for r in result["routes"]]
+		self.assertIn(route_borrador["name"], names)
+		self.assertIn(route_planificado["name"], names)
+
+	def test_get_routes_status_filter_excludes_other_statuses(self):
+		so, pl = self._facturado_pick_list()
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name])
+			self._cancel_route(route["name"])
+			result = recorridos.get_routes(status="Borrador")
+		self.assertNotIn(route["name"], [r["name"] for r in result["routes"]])
+
+	def test_get_routes_invalid_status_rejected(self):
+		with fx.as_user(self.recorrido_user):
+			with self.assertRaises(recorridos.RouteValidationError):
+				recorridos.get_routes(status="No Existe")
+
+	def test_get_routes_company_isolation(self):
+		so, pl = self._other_company_facturado_pick_list()
+		other_route = frappe.get_doc({"doctype": "Recorrido", "company": "_Test Company"})
+		other_route.insert(ignore_permissions=True)
+		self.world.track_existing("Recorrido", other_route.name)
+		with fx.as_user(self.recorrido_user):
+			result = recorridos.get_routes()
+		self.assertNotIn(other_route.name, [r["name"] for r in result["routes"]])
+
+	def test_get_routes_pagination(self):
+		pick_lists = [self._facturado_pick_list()[1] for _ in range(3)]
+		created = []
+		with fx.as_user(self.recorrido_user):
+			for pl in pick_lists:
+				created.append(self._create_route(pick_lists=[pl.name])["name"])
+			page1 = recorridos.get_routes(status="Borrador", start=0, page_length=2)
+			page2 = recorridos.get_routes(status="Borrador", start=2, page_length=2)
+		self.assertEqual(len(page1["routes"]), 2)
+		self.assertGreaterEqual(page1["total"], 3)
+		names_page1 = {r["name"] for r in page1["routes"]}
+		names_page2 = {r["name"] for r in page2["routes"]}
+		self.assertEqual(names_page1 & names_page2, set())
+
+	def test_get_routes_no_economic_values(self):
+		forbidden_keys = {"rate", "amount", "grand_total", "net_total", "price", "account", "outstanding_amount"}
+		so, pl = self._facturado_pick_list()
+		with fx.as_user(self.recorrido_user):
+			self._create_route(pick_lists=[pl.name])
+			result = recorridos.get_routes()
+		for row in result["routes"]:
+			self.assertFalse(forbidden_keys & set(row.keys()), row.keys())
+
+	def test_get_routes_stop_count_correct(self):
+		so1, pl1 = self._facturado_pick_list()
+		so2, pl2 = self._facturado_pick_list()
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl1.name, pl2.name])
+			result = recorridos.get_routes(status="Borrador")
+		row = next(r for r in result["routes"] if r["name"] == route["name"])
+		self.assertEqual(row["stop_count"], 2)
+
+	def _driver(self, full_name):
+		doc = frappe.get_doc({"doctype": "Driver", "naming_series": "HR-DRI-.YYYY.-", "full_name": full_name})
+		doc.insert(ignore_permissions=True)
+		self.world.track_existing("Driver", doc.name)
+		return doc
+
+	def test_get_routes_includes_driver_name(self):
+		so, pl = self._facturado_pick_list()
+		driver = self._driver("FG242 Carlos Perez")
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name], driver=driver.name)
+			result = recorridos.get_routes(status="Borrador")
+		row = next(r for r in result["routes"] if r["name"] == route["name"])
+		self.assertEqual(row["driver_name"], "FG242 Carlos Perez")
+
+	def test_get_route_detail_includes_driver_name(self):
+		so, pl = self._facturado_pick_list()
+		driver = self._driver("FG242 Ana Gomez")
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl.name], driver=driver.name)
+			detail = recorridos.get_route_detail(route["name"])
+		self.assertEqual(detail["driver_name"], "FG242 Ana Gomez")
+
+	def test_get_routes_query_count_is_bounded(self):
+		"""3 routes with 2 stops each on the same page -- stop_count for the
+		whole page must cost exactly one batched Recorrido Parada query,
+		never one query per route."""
+		pick_list_pairs = [
+			(self._facturado_pick_list()[1], self._facturado_pick_list()[1]) for _ in range(3)
+		]
+		with fx.as_user(self.recorrido_user):
+			for pl1, pl2 in pick_list_pairs:
+				self._create_route(pick_lists=[pl1.name, pl2.name])
+
+			with _count_queries() as counted:
+				result = recorridos.get_routes(status="Borrador", page_length=100)
+
+		self.assertGreaterEqual(len(result["routes"]), 3)
+		self.assertLess(counted["n"], 12)
+
+	# =====================================================================
+	# Commit 24.2 -- get_routes_summary()
+	# =====================================================================
+
+	def test_get_routes_summary_requires_permission(self):
+		with fx.as_user(self.no_role_user):
+			with self.assertRaises(frappe.PermissionError):
+				recorridos.get_routes_summary()
+
+	def test_get_routes_summary_counts_correct(self):
+		so1, pl1 = self._facturado_pick_list()
+		so2, pl2 = self._facturado_pick_list()
+		so3, pl3 = self._facturado_pick_list()
+		with fx.as_user(self.recorrido_user):
+			before = recorridos.get_routes_summary()
+
+			route_borrador = self._create_route(pick_lists=[pl1.name])
+			route_planificado = self._create_route(pick_lists=[pl2.name])
+			self._plan_route(route_planificado["name"])
+			available_before_third = recorridos.get_routes_summary()["available_orders"]
+			self._create_route(pick_lists=[pl3.name])
+
+			after = recorridos.get_routes_summary()
+
+		# route_borrador and the third route (pl3) both stay Borrador;
+		# route_planificado moved out of Borrador into Planificado.
+		self.assertEqual(after["borrador"], before["borrador"] + 2)
+		self.assertEqual(after["planificado"], before["planificado"] + 1)
+		self.assertEqual(available_before_third, after["available_orders"] + 1)
+
+	def test_get_routes_summary_company_isolation(self):
+		with fx.as_user(self.recorrido_user):
+			before = recorridos.get_routes_summary()
+
+		other_route = frappe.get_doc({"doctype": "Recorrido", "company": "_Test Company"})
+		other_route.insert(ignore_permissions=True)
+		self.world.track_existing("Recorrido", other_route.name)
+
+		with fx.as_user(self.recorrido_user):
+			after = recorridos.get_routes_summary()
+
+		# A Borrador Recorrido created for a DIFFERENT company must never
+		# inflate this site's own default-company "borrador" counter.
+		self.assertEqual(after["borrador"], before["borrador"])
+
+	def test_get_routes_summary_no_economic_values(self):
+		forbidden_keys = {"rate", "amount", "grand_total", "net_total", "price", "account", "outstanding_amount"}
+		with fx.as_user(self.recorrido_user):
+			summary = recorridos.get_routes_summary()
+		self.assertFalse(forbidden_keys & set(summary.keys()), summary.keys())
 
 	# =====================================================================
 	# 42. Concurrencia real -- doble asignación

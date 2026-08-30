@@ -117,6 +117,15 @@ from fabergray_erp.sales_order_naming import root_commercial_name
 #: rather than overloading this one.
 ACTIVE_ROUTE_STATUSES = ("Borrador", "Planificado", "En Ruta")
 
+#: Every status Recorrido.status can actually hold (its own DocType JSON
+#: Select options) -- the whitelist get_routes()'s own status filter
+#: validates against, Commit 24.2. Kept separate from ACTIVE_ROUTE_STATUSES
+#: above: that tuple means something specific ("still going to happen, so
+#: still holds its Pick Lists"), this one is just "a real status value",
+#: used by a completely different concern (listing/filtering, not
+#: eligibility).
+LISTABLE_ROUTE_STATUSES = ("Borrador", "Planificado", "En Ruta", "Completado", "Cancelado")
+
 
 class PickListNotEligibleError(frappe.ValidationError):
 	pass
@@ -400,6 +409,52 @@ def _commercial_name_cache():
 # ---------------------------------------------------------------------------
 
 
+def _batch_resolve_address_previews(customers):
+	"""Commit 24.2's own bounded address PREVIEW for a whole page of
+	get_available_orders() rows -- {customer: (customer_address,
+	address_display)}. Deliberately a preview shortcut, not the
+	authoritative resolution: reads Customer.customer_primary_address
+	directly rather than going through api.clientes._primary_address_name()
+	's own get_default_address() fallback (that fallback stays exactly
+	where Commit 24.1 already put it -- _resolve_pick_list_snapshot(), the
+	one place that produces the real, PERSISTED snapshot at
+	create_route()/update_route_stops() time, and get_available_order_detail(),
+	unchanged here). A customer with no customer_primary_address simply
+	shows no address preview in the list -- correctness never depends on
+	this shortcut, because the real snapshot is (re)computed properly the
+	moment a Pick List is actually turned into a stop.
+
+	Bounded to exactly one Customer query, plus one get_address_display()
+	call per DISTINCT address on the page -- never one query per Pick List
+	row, and never unbounded by how many Pick Lists exist in the system
+	(page_length is already capped at 100 by the caller). Repeat customers
+	on the same page (a frequent real case) cost nothing extra: this is
+	also why get_address_display() itself resolves via
+	frappe.get_cached_doc(), not a fresh read every call. See
+	test_get_available_orders_address_preview_query_count_is_bounded."""
+	customers = sorted({c for c in customers if c})
+	if not customers:
+		return {}
+
+	primary_address_by_customer = {
+		row.name: row.customer_primary_address
+		for row in frappe.get_list(
+			"Customer",
+			filters={"name": ["in", customers]},
+			fields=["name", "customer_primary_address"],
+		)
+		if row.customer_primary_address
+	}
+
+	display_by_address = {}
+	previews = {}
+	for customer, address_name in primary_address_by_customer.items():
+		if address_name not in display_by_address:
+			display_by_address[address_name] = get_address_display(address_name)
+		previews[customer] = (address_name, display_by_address[address_name])
+	return previews
+
+
 @frappe.whitelist()
 def get_available_orders(txt=None, start=0, page_length=20):
 	"""Paginated Pick Lists eligible for a NEW Recorrido: submitted,
@@ -410,15 +465,11 @@ def get_available_orders(txt=None, start=0, page_length=20):
 	same convention api.jefe_bodega already established, so there is no
 	parameter a caller could use to ask for another company's data at all.
 
-	Deliberately does NOT resolve address here (see
-	get_available_order_detail() for that): with up to 100 rows per page,
-	resolving Customer.customer_primary_address + rendering
-	get_address_display() for each would be a real per-row N+1 for data
-	the future "pedidos disponibles" list (24.2) mainly needs for
-	filtering/selection, not for a live address preview -- that happens
-	once, lazily, for one specific Pick List, via the detail endpoint
-	below (and again, permanently, as this Pick List's own snapshot the
-	moment it actually becomes a parada)."""
+	Commit 24.2 -- the Recorridos UI's own "pedidos disponibles" cards show
+	an address preview per row (see _batch_resolve_address_previews() right
+	above), so customer_address/address_display are now included here too,
+	resolved in a bounded, batched way for the current page only -- never
+	the per-row N+1 Commit 24.1 originally avoided by leaving this out."""
 	_require_login()
 	frappe.has_permission("Recorrido", "read", throw=True)
 	frappe.has_permission("Pick List", "read", throw=True)
@@ -468,10 +519,12 @@ def get_available_orders(txt=None, start=0, page_length=20):
 				sales_order_by_pl[row.parent] = row.sales_order
 
 	resolve_commercial_name = _commercial_name_cache()
+	address_previews = _batch_resolve_address_previews([pl.customer for pl in page_rows])
 
 	results = []
 	for pl in page_rows:
 		sales_order = sales_order_by_pl.get(pl.name)
+		customer_address, address_display = address_previews.get(pl.customer, (None, None))
 		results.append(
 			{
 				"pick_list": pl.name,
@@ -479,6 +532,8 @@ def get_available_orders(txt=None, start=0, page_length=20):
 				"commercial_name": resolve_commercial_name(sales_order),
 				"customer": pl.customer,
 				"customer_name": pl.customer_name,
+				"customer_address": customer_address,
+				"address_display": address_display,
 				"item_count": item_counts.get(pl.name, 0),
 				"total_qty": total_qtys.get(pl.name, 0.0),
 			}
@@ -557,6 +612,7 @@ def get_route_detail(route_name):
 		"company": route.company,
 		"route_date": route.route_date,
 		"status": route.status,
+		"driver_name": frappe.db.get_value("Driver", route.driver, "full_name") if route.driver else None,
 		"driver": route.driver,
 		"vehicle": route.vehicle,
 		"start_address": route.start_address,
@@ -564,6 +620,162 @@ def get_route_detail(route_name):
 		"created_by_user": route.created_by_user,
 		"total_stops": len(stops),
 		"stops": stops,
+	}
+
+
+# ---------------------------------------------------------------------------
+# Read: listado de Recorridos (pestañas "Recorridos" / "Historial", 24.2)
+# ---------------------------------------------------------------------------
+
+
+def _parse_status_filter(status):
+	"""get_routes()'s own status filter -- accepts a single status string OR
+	a JSON-array-of-strings (same client-shape convention as
+	_parse_pick_lists()'s `pick_lists` argument, so the "Recorridos" tab can
+	ask for ["Borrador", "Planificado", "En Ruta"] and "Historial" for
+	["Completado", "Cancelado"] in one call each, instead of the UI making
+	N separate requests and merging them itself). None/empty means "every
+	status". Rejects an unrecognized status explicitly rather than
+	silently ignoring it or matching nothing."""
+	if status in (None, ""):
+		return None
+	if isinstance(status, str) and status.strip().startswith("["):
+		status = frappe.parse_json(status)
+	if isinstance(status, str):
+		status = [status]
+	status = [s for s in (status or []) if s]
+	for s in status:
+		if s not in LISTABLE_ROUTE_STATUSES:
+			frappe.throw(_("Estado de recorrido inválido: {0}.").format(s), RouteValidationError)
+	return status or None
+
+
+@frappe.whitelist()
+def get_routes(status=None, start=0, page_length=20):
+	"""Paginated Recorrido listing for the "Recorridos" (Borrador/
+	Planificado/En Ruta) and "Historial" (Completado/Cancelado) tabs
+	(Commit 24.2) -- get_route_detail() alone cannot serve either tab
+	(it needs one already-known route_name, not "list routes matching a
+	status"), so this is a genuinely new capability, not a duplicate of an
+	existing one.
+
+	Company ALWAYS resolved server-side via get_default_company() -- never
+	accepted from the client, same convention as every other endpoint in
+	this module. Returns only name/route_date/status/driver/driver_name/
+	vehicle/created_by_user/creation/stop_count -- no economic value
+	anywhere. completed_count is deliberately NOT included: Recorrido
+	Parada.status only ever holds "Pendiente" in this and every prior
+	commit (no code path anywhere sets "Entregado"/"No Entregado" yet --
+	that is 24.6+ scope), so a "completed" count here would always read
+	zero and only mislead the UI; add it once delivery actually exists.
+
+	driver_name (Driver.full_name -- Driver's own autoname is a naming-
+	series code, e.g. "HR-DRI-2026-00001", never something fit to show a
+	user) and stop_count are each resolved via exactly one batched query
+	for the whole page -- never one query per route -- see
+	test_get_routes_query_count_is_bounded. Vehicle needs no such lookup:
+	its own autoname IS its license_plate (erpnext.setup.doctype.vehicle's
+	own `"autoname": "field:license_plate"`), already display-ready."""
+	_require_login()
+	frappe.has_permission("Recorrido", "read", throw=True)
+
+	company = get_default_company()
+	start = max(cint(start), 0)
+	page_length = min(max(cint(page_length) or 20, 1), 100)
+
+	filters = {"company": company}
+	statuses = _parse_status_filter(status)
+	if statuses:
+		filters["status"] = ["in", statuses]
+
+	page_rows = frappe.get_list(
+		"Recorrido",
+		filters=filters,
+		fields=["name", "route_date", "status", "driver", "vehicle", "created_by_user", "creation"],
+		order_by="creation desc",
+		limit_start=start,
+		limit_page_length=page_length,
+	)
+	total = len(frappe.get_list("Recorrido", filters=filters, pluck="name"))
+
+	names = [r.name for r in page_rows]
+	stop_counts = {}
+	if names:
+		for recorrido in frappe.get_list("Recorrido Parada", filters={"recorrido": ["in", names]}, pluck="recorrido"):
+			stop_counts[recorrido] = stop_counts.get(recorrido, 0) + 1
+
+	driver_names = {}
+	drivers = {r.driver for r in page_rows if r.driver}
+	if drivers:
+		driver_names = {
+			row.name: row.full_name
+			for row in frappe.get_list("Driver", filters={"name": ["in", list(drivers)]}, fields=["name", "full_name"])
+		}
+
+	routes = [
+		{
+			"name": r.name,
+			"route_date": r.route_date,
+			"status": r.status,
+			"driver": r.driver,
+			"driver_name": driver_names.get(r.driver),
+			"vehicle": r.vehicle,
+			"created_by_user": r.created_by_user,
+			"creation": r.creation,
+			"stop_count": stop_counts.get(r.name, 0),
+		}
+		for r in page_rows
+	]
+
+	return {"routes": routes, "total": total}
+
+
+@frappe.whitelist()
+def get_routes_summary():
+	"""Header counters for the Recorridos page (Commit 24.2): pedidos
+	disponibles + one count per ACTIVE route status (Borrador/Planificado/
+	En Ruta) -- exactly the four KPI cards the brief's own header design
+	asks for, nothing else. Company ALWAYS resolved server-side.
+
+	Deliberately its own tiny endpoint rather than folding these counts
+	into get_available_orders()/get_routes(): those two already return
+	full paginated ROWS for their own tabs, and a caller only wanting the
+	header counters (e.g. on first page load, before either tab is even
+	open) would otherwise have to pay for a full page of pick_list/route
+	rows just to get four integers, or the UI would have to derive the
+	counts itself by re-implementing the SAME eligibility filter
+	get_available_orders() already encapsulates -- exactly the backend-
+	logic duplication this commit is told to avoid. The "available
+	orders" count below reuses _eligible_pick_list_filters()/
+	_pick_lists_in_active_routes(), the same two building blocks
+	get_available_orders() itself uses, so there is exactly one place that
+	defines "what counts as an available order".
+
+	Four small COUNT-shaped queries total (one per status plus one for
+	available orders) -- cost is bounded by a constant (the number of
+	statuses), never by how many Recorridos or Pick Lists exist."""
+	_require_login()
+	frappe.has_permission("Recorrido", "read", throw=True)
+	frappe.has_permission("Pick List", "read", throw=True)
+
+	company = get_default_company()
+
+	assigned = _pick_lists_in_active_routes()
+	filters = _eligible_pick_list_filters(company)
+	if assigned:
+		filters = filters + [["name", "not in", list(assigned)]]
+	available_orders = len(frappe.get_list("Pick List", filters=filters, pluck="name"))
+
+	route_counts = {
+		s: len(frappe.get_list("Recorrido", filters={"company": company, "status": s}, pluck="name"))
+		for s in ACTIVE_ROUTE_STATUSES
+	}
+
+	return {
+		"available_orders": available_orders,
+		"borrador": route_counts["Borrador"],
+		"planificado": route_counts["Planificado"],
+		"en_ruta": route_counts["En Ruta"],
 	}
 
 
