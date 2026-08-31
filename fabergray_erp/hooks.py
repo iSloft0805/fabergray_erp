@@ -170,10 +170,17 @@ boot_session = "fabergray_erp.boot.set_home_page"
 # -----------
 # Permissions evaluated in scripted ways
 
-# permission_query_conditions = {
-# 	"Event": "frappe.desk.doctype.event.event.get_permission_query_conditions",
-# }
-#
+# Commit 25.1 -- "el rol controla el área, no el owner": role-level Custom
+# DocPerm on Sales Order/Quotation for Vendedora is now shared (if_owner=0),
+# so Company isolation has to be enforced here instead -- see
+# fabergray_erp/permission_conditions.py's own module docstring for why a
+# list-level hook alone is not enough and api/ventas.py|cotizaciones.py's
+# own assert_same_company() calls cover the single-document gap.
+permission_query_conditions = {
+	"Sales Order": "fabergray_erp.permission_conditions.sales_order_permission_query_conditions",
+	"Quotation": "fabergray_erp.permission_conditions.quotation_permission_query_conditions",
+}
+
 # has_permission = {
 # 	"Event": "frappe.desk.doctype.event.event.has_permission",
 # }
@@ -309,6 +316,21 @@ fixtures = [
 		# Whether to restore the other four roles is a separate product
 		# decision, flagged in this commit's own report, not resolved
 		# here.
+		# Commit 25.1 -- "Sales Order"/"Quotation" added. Exact same latent
+		# gap, only now actually noticed empirically rather than assumed:
+		# a Sales Order Custom DocPerm exists since Commit 18.1
+		# (Facturación/Bodega/Jefe de Bodega/Vendedora), Quotation's since
+		# Commit 20.1 (Vendedora) -- neither ever had its own System
+		# Manager row, so a real (non-Administrator) System Manager test
+		# user genuinely could not read either doctype through this app's
+		# own permission model until this commit, confirmed live while
+		# writing test_administrator_and_system_manager_see_every_company_
+		# sales_order (test_ventas_permissions.py): frappe.has_permission()
+		# for a fresh System-Manager-only user returned False before this
+		# row was added. ventas.json/cotizaciones.json's own Page.roles
+		# have listed "System Manager" since Commit 18.3/20.5 -- this
+		# closes the gap those Page grants always implied but never
+		# actually backed with a real Custom DocPerm row.
 		"dt": "Custom DocPerm",
 		"prefix": "system_manager",
 		"filters": [
@@ -325,6 +347,8 @@ fixtures = [
 					"Warehouse",
 					"Stock Entry",
 					"Address",
+					"Sales Order",
+					"Quotation",
 				],
 			],
 		],

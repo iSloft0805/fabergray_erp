@@ -13,7 +13,8 @@ frappe.pages["cotizaciones"].on_page_load = function (wrapper) {
 };
 
 // All server communication in this file goes through fabergray_erp.api.cotizaciones.*
-// (Quotation reads/writes -- if_owner=1, Commit 20.1) and fabergray_erp.api.ventas.
+// (Quotation reads/writes -- shared across Company since Commit 25.1, no longer
+// if_owner-scoped) and fabergray_erp.api.ventas.
 // search_customers/search_items (Commit 20.5's own instruction: reuse those two
 // verbatim, they are generic and already whitelisted -- never duplicated here).
 // No inventory field is ever requested or rendered (no qty_disponible/Bin/Pick
@@ -233,7 +234,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 
 		return `
 			<div class="fg-section-head">
-				<div class="fg-section-title">${__("Mis cotizaciones")}</div>
+				<div class="fg-section-title">${__("Cotizaciones")}</div>
 			</div>
 			${chip}
 			<div class="fg-quotation-list">${cards}</div>

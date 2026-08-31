@@ -7,8 +7,12 @@ through `frappe.get_list`/`frappe.get_doc()` + `check_permission()`, never
 `frappe.get_all` and never `ignore_permissions=True` -- Vendedora always
 operates with her own real, restricted permissions (Commit 18.1: read on
 Customer/Item/Address/Contact, `select` on Account, create/read/write/
-submit on Sales Order scoped `if_owner=1`, nothing on Pick List or
-Reporte de Faltante). The one narrow, documented exception approved in
+submit on Sales Order; Commit 25.1 dropped the original `if_owner=1`
+scoping -- "el rol controla el área, no el owner" -- so this is now
+shared across every Vendedora of the same Company, Company isolation
+enforced by `fabergray_erp/permission_conditions.py` instead), nothing on
+Pick List or Reporte de Faltante. The one narrow, documented exception
+approved in
 Commit 18.1 -- `ignore_permissions=True`/`via_fulfillment_engine=True`
 inside `fulfillment/pick_list_service.py`, `shortage_service.py`,
 `cancellation_service.py`, and `api/bodega.py._insert_shortage_report()`
@@ -37,6 +41,7 @@ from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
 from fabergray_erp.api.bodega import _require_login
 from fabergray_erp.fulfillment.modification_service import modification_blockers_for
+from fabergray_erp.permission_conditions import assert_same_company
 from fabergray_erp.sales_order_naming import root_commercial_name
 
 # No native default exists for Sales Order.delivery_date -- confirmed by
@@ -58,22 +63,48 @@ _ALLOWED_ITEM_FIELDS = {"item_code", "qty"}
 
 def _validate_and_build_item_rows(items, company, delivery_date):
     """The one place a Sales Order Item row list is built from
-    client-supplied data -- shared by `create_and_submit_sales_order()`
-    and `update_draft_sales_order()` (Commit 18.5), extracted so both
-    entry points that accept an `items` payload from Vendedora enforce
-    the exact same allowlist/validation, never two parallel copies of
-    the same security boundary. Behavior is byte-for-byte identical to
-    what `create_and_submit_sales_order()` already had since Commit 18.2
-    -- this refactor changes nothing about what is accepted or rejected,
-    only where the code lives.
+    client-supplied data -- shared by `create_and_submit_sales_order()`,
+    `update_draft_sales_order()` (Commit 18.5) and
+    `modify_submitted_sales_order()`, extracted so every entry point that
+    accepts an `items` payload from Vendedora enforces the exact same
+    allowlist/validation, never two parallel copies of the same security
+    boundary.
 
     Rejects any line carrying a key outside `_ALLOWED_ITEM_FIELDS`
     (`rate`, `price_list_rate`, `discount_percentage`, `discount_amount`,
     `amount`, `net_rate`, `net_amount`, `margin_rate_or_amount`,
     `margin_type`, or anything else, present or future) -- never
-    silently dropped. Warehouse is resolved server-side per item
-    (`_default_warehouse_for_item()`); `delivery_date` is the caller's
-    single, already-resolved value, applied uniformly to every line.
+    silently dropped. `delivery_date` is the caller's single,
+    already-resolved value, applied uniformly to every line.
+
+    Commit 25.2 -- "no duplicar la resolución nativa de warehouse": no
+    `warehouse` key is ever added to a row here, on purpose. Confirmed
+    live, during this exact commit's own audit, that Frappe's own child
+    row `.get("warehouse")` returns `None` for a key genuinely never set
+    (not `""`) -- exactly the condition `AccountsController.
+    set_missing_item_details()` checks (`item.get(fieldname) is None`)
+    before auto-filling a field from `get_item_details()`'s own response.
+    So omitting the key here is not "doing nothing" -- it is the
+    documented, correct way to hand the decision to ERPNext's own
+    `Sales Order.validate()` pipeline (`set_missing_item_details()` ->
+    `get_item_details()` -> `get_item_warehouse_()`), which already
+    resolves, in this exact order and entirely inside `apps/erpnext`,
+    never duplicated here: Item Default -> Item Group Default -> Brand
+    Default -> `Stock Settings.default_warehouse` (only if that
+    warehouse's own `company` matches this Sales Order's `company` --
+    confirmed live by this commit's own audit, including the negative
+    case: a `Stock Settings.default_warehouse` belonging to a DIFFERENT
+    company is correctly ignored). If none of those resolve anything,
+    `Sales Order.validate_warehouse()` itself raises ERPNext's own
+    `WarehouseRequired` ("Source warehouse required for stock item
+    {item}") -- this module no longer raises a custom message for that
+    case; see this commit's own report for the full precedence audit.
+
+    `company` is still accepted as a parameter (kept for every existing
+    caller's own call shape) but is no longer used inside this function
+    -- ERPNext's own pipeline resolves company-scoped defaults itself
+    from the Sales Order's own `company` field, already set by the
+    caller before `.insert()`/`.save()` runs.
     """
     items = frappe.parse_json(items) if isinstance(items, str) else items
     if not items:
@@ -101,15 +132,10 @@ def _validate_and_build_item_rows(items, company, delivery_date):
         if qty <= 0:
             frappe.throw(_("La cantidad debe ser mayor a cero para {0}.").format(item_code))
 
-        warehouse = _default_warehouse_for_item(item_code, company)
-        if not warehouse:
-            frappe.throw(_("El producto {0} no tiene una bodega por defecto configurada.").format(item_code))
-
         so_items.append(
             {
                 "item_code": item_code,
                 "qty": qty,
-                "warehouse": warehouse,
                 "delivery_date": delivery_date,
             }
         )
@@ -118,15 +144,28 @@ def _validate_and_build_item_rows(items, company, delivery_date):
 
 
 def _default_warehouse_for_item(item_code, company):
-    """The one place `create_and_submit_sales_order()` and `get_item_info()`
-    both resolve which warehouse a line uses -- Vendedora never picks one
-    herself (Commit 18's approved design: "La vendedora no debe poder
-    modificar configuración... de stock"). Reads the native `Item Default`
-    child table (Item.item_defaults) for the resolved company -- the same
-    metadata ERPNext's own `get_item_details()` consults for its own
-    per-item warehouse default -- not a new concept invented here.
-    `frappe.db.get_value` is a raw, single-value read (not `get_all`), the
-    same kind already used throughout this app's Fulfillment Engine."""
+    """Commit 25.2 -- narrowed to exactly one caller: `get_item_info()`'s
+    own `qty_disponible` preview, informational only. NOT used to build
+    Sales Order Item rows anymore (`_validate_and_build_item_rows()`
+    leaves `warehouse` unset on purpose -- see its own docstring) -- this
+    function never raises for a missing default, it simply returns
+    `None`, and `get_item_info()` already renders that as "no disponible"
+    without blocking anything.
+
+    Deliberately reads ONLY the native `Item Default` child table
+    (`Item.item_defaults`) for the resolved company -- NOT the full
+    Item Group Default / Brand Default / Stock Settings.default_warehouse
+    chain ERPNext itself applies during `Sales Order.insert()` (see
+    `_validate_and_build_item_rows()`'s own docstring for why that chain
+    is deliberately never replicated here): this is a cheap, best-effort
+    preview shown before any Sales Order exists, not the authoritative
+    resolution, so a slightly more conservative preview (occasionally
+    showing "no disponible" for a product whose warehouse would in fact
+    resolve at insert time via Item Group/Brand/Stock Settings) is an
+    accepted, documented trade-off rather than a second, duplicated copy
+    of ERPNext's own precedence logic. `frappe.db.get_value` is a raw,
+    single-value read (not `get_all`), the same kind already used
+    throughout this app's Fulfillment Engine."""
     return frappe.db.get_value("Item Default", {"parent": item_code, "company": company}, "default_warehouse")
 
 
@@ -194,7 +233,14 @@ def get_item_info(item_code, customer=None, qty=None):
     api/bodega.py's own `qty_disponible` and the Fulfillment Engine's
     analyzer already read Bin availability through -- one source of
     truth for "how much is physically there", not a second one invented
-    for this Page.
+    for this Page. `warehouse` here comes from `_default_warehouse_for_item()`
+    -- Item Default ONLY, not the fuller Item Group/Brand/Stock Settings
+    chain ERPNext itself applies at `Sales Order.insert()` time (Commit
+    25.2) -- so this preview can show "no disponible" for a product whose
+    warehouse would in fact resolve once she actually confirms the order;
+    an accepted, documented trade-off (see `_default_warehouse_for_item()`'s
+    own docstring) rather than duplicating ERPNext's precedence logic just
+    for a pre-submit preview.
     """
     _require_login()
 
@@ -218,13 +264,20 @@ def get_item_info(item_code, customer=None, qty=None):
 
 @frappe.whitelist()
 def get_my_orders(limit=50):
-    """Vendedora's own Sales Orders, most recent first -- operational
-    fields only (number, customer, dates, status, line/unit counts,
-    observations), never a total or a price. Scoped to her own orders
-    exclusively through the native `if_owner=1` Custom DocPerm (Commit
-    18.1) -- `frappe.get_list()` applies that automatically; no manual
-    `owner` filter is required for correctness, though one is added below
-    anyway for defensive clarity. `frappe.get_all()` is never used here.
+    """All of Fabrigray's Sales Orders (Commit 25.1: "el rol controla el
+    área, no el owner" -- if_owner dropped from Sales Order/Vendedora's
+    Custom DocPerm), most recent first -- operational fields only
+    (number, customer, dates, status, line/unit counts, observations),
+    never a total or a price. Every Vendedora sees every order of this
+    site's own Company, regardless of who created it -- `owner` is no
+    longer a visibility filter anywhere in this function, only ever a
+    display/audit field elsewhere. Company isolation is enforced
+    centrally by `fabergray_erp.permission_conditions.
+    sales_order_permission_query_conditions()` (hooks.py's own
+    `permission_query_conditions`), applied automatically by
+    `frappe.get_list()` below -- never re-derived here, never trusting a
+    `company` value from the client. `frappe.get_all()` is never used
+    here.
 
     Per-order line/unit counts are read by loading each of her own,
     already-authorized Sales Orders individually
@@ -268,7 +321,6 @@ def get_my_orders(limit=50):
 
     names = frappe.get_list(
         "Sales Order",
-        filters={"owner": frappe.session.user},
         fields=["name"],
         order_by="transaction_date desc, creation desc",
         limit_page_length=0,
@@ -309,12 +361,14 @@ def get_my_orders(limit=50):
 
 @frappe.whitelist()
 def get_order_detail(name):
-    """Line-level detail for one of Vendedora's own Sales Orders -- the
-    "VER PEDIDO" view in Page Ventas (Commit 18.4). Same permission model
-    as every other read in this module: `get_doc()` + `check_permission
-    ("read")`, which is where if_owner=1 (Commit 18.1) is actually
-    enforced -- a second Vendedora's own order raises `PermissionError`
-    here exactly like it does everywhere else in this module.
+    """Line-level detail for any Sales Order of this Company -- the "VER
+    PEDIDO" view in Page Ventas (Commit 18.4). `check_permission("read")`
+    now only enforces the role-level grant (Commit 25.1 -- if_owner=0,
+    Vendedora reads any Sales Order of her Company); `assert_same_company()`
+    right after it is what actually keeps a Vendedora from reading another
+    Company's order by name -- `check_permission()` alone no longer does,
+    since the Custom DocPerm grant carries no Company concept of its own
+    (see `fabergray_erp/permission_conditions.py`'s own module docstring).
 
     The response is built field by field, never `so.as_dict()` or
     `row.as_dict()` (both of which carry every economic field on the
@@ -329,6 +383,7 @@ def get_order_detail(name):
 
     so = frappe.get_doc("Sales Order", name)
     so.check_permission("read")
+    assert_same_company(so)
 
     return {
         "name": so.name,
@@ -357,29 +412,28 @@ def get_order_detail(name):
 def get_sales_summary():
     """KPI counts for the Page Ventas dashboard header -- derived
     exclusively from Sales Order/Sales Order Item's own native fields,
-    scoped to Vendedora's own orders via `if_owner=1`
-    (`frappe.get_list()`, never `get_all()`). Deliberately only the four
-    states directly derivable from `Sales Order.status`/`transaction_date`
-    (confirmed native values: Draft, On Hold, To Pay, To Deliver and
-    Bill, To Bill, To Deliver, Completed, Cancelled, Closed) -- no
-    "Alistamiento iniciado" or similar experimental bucket yet, and no
-    bucket that would require Pick List/Reporte de Faltante access
-    (Commit 18's approved Option B)."""
+    scoped to this site's own Company (Commit 25.1: no longer to
+    Vendedora's own orders -- if_owner dropped from the Custom DocPerm).
+    Company isolation comes from `frappe.get_list()`'s own
+    `permission_query_conditions` (see `permission_conditions.py`), never
+    a manual filter here; `frappe.get_all()` is never used. Deliberately
+    only the four states directly derivable from `Sales Order.status`/
+    `transaction_date` (confirmed native values: Draft, On Hold, To Pay,
+    To Deliver and Bill, To Bill, To Deliver, Completed, Cancelled,
+    Closed) -- no "Alistamiento iniciado" or similar experimental bucket
+    yet, and no bucket that would require Pick List/Reporte de Faltante
+    access (Commit 18's approved Option B)."""
     _require_login()
     frappe.has_permission("Sales Order", "read", throw=True)
 
-    base_filters = {"owner": frappe.session.user}
-
-    pedidos_hoy = frappe.get_list(
-        "Sales Order", filters={**base_filters, "transaction_date": nowdate()}, pluck="name"
-    )
+    pedidos_hoy = frappe.get_list("Sales Order", filters={"transaction_date": nowdate()}, pluck="name")
     pendientes = frappe.get_list(
         "Sales Order",
-        filters={**base_filters, "status": ["in", ["To Deliver and Bill", "To Deliver"]]},
+        filters={"status": ["in", ["To Deliver and Bill", "To Deliver"]]},
         pluck="name",
     )
-    entregados = frappe.get_list("Sales Order", filters={**base_filters, "status": "Completed"}, pluck="name")
-    cancelados = frappe.get_list("Sales Order", filters={**base_filters, "status": "Cancelled"}, pluck="name")
+    entregados = frappe.get_list("Sales Order", filters={"status": "Completed"}, pluck="name")
+    cancelados = frappe.get_list("Sales Order", filters={"status": "Cancelled"}, pluck="name")
 
     return {
         "pedidos_hoy": len(pedidos_hoy),
@@ -412,12 +466,14 @@ def create_and_submit_sales_order(customer, items, observations=None):
     else, present or future) makes this function raise immediately,
     before any Sales Order is even constructed -- never silently
     dropped. The Sales Order Item rows built from the surviving fields
-    carry `item_code`/`qty`/`warehouse`/`delivery_date` only; ERPNext's
-    own `AccountsController.validate()`
-    (`set_missing_values()` then `calculate_taxes_and_totals()`) resolves
-    every price/discount/tax field itself, unconditionally, the moment
-    `.insert()` runs -- there is no pricing logic in this function to
-    duplicate or get wrong.
+    carry `item_code`/`qty`/`delivery_date` only -- `warehouse` is
+    deliberately absent, see `_validate_and_build_item_rows()`'s own
+    docstring (Commit 25.2); ERPNext's own `AccountsController.validate()`
+    (`set_missing_item_details()` then `calculate_taxes_and_totals()`)
+    resolves both warehouse and every price/discount/tax field itself,
+    unconditionally, the moment `.insert()` runs -- there is no pricing
+    or warehouse-resolution logic in this function to duplicate or get
+    wrong.
 
     `observations`, if given, is stored in `Sales Order.fg_observations` --
     a Custom Field (fixtures/custom_field.json), not `add_comment()`.
@@ -427,16 +483,21 @@ def create_and_submit_sales_order(customer, items, observations=None):
     so *writing* the observation never had a problem -- but *reading* it
     back in `get_my_orders()` does, because the base `Comment` doctype's
     own native permission model only grants `read` to `System Manager`/
-    `Website Manager`, which Vendedora is neither. Rather than requesting
-    a new Comment permission for her (out of scope for the if_owner=1
-    Sales Order grant already approved in Commit 18.1), `fg_observations`
-    is read and written through the exact same if_owner=1 Sales Order
-    permission she already has -- no new permission of any kind.
+    `Website Manager`, which Vendedora is neither. `fg_observations` is
+    read and written through the same Sales Order permission she already
+    has (role+Company-scoped since Commit 25.1) -- no new permission of
+    any kind.
 
-    Warehouse is resolved server-side per item
-    (`_default_warehouse_for_item()`) -- Vendedora never chooses one,
-    matching the approved design that she cannot touch stock
-    configuration.
+    Warehouse is deliberately NEVER set here (neither per item nor via
+    `set_warehouse`) -- Commit 25.2: ERPNext's own `Sales Order.insert()`
+    pipeline resolves it, per line, through its own native precedence
+    (Item Default -> Item Group Default -> Brand Default -> `Stock
+    Settings.default_warehouse`, Company-checked); see
+    `_validate_and_build_item_rows()`'s own docstring for the full audit.
+    Vendedora still never chooses one herself either way, matching the
+    approved design that she cannot touch stock configuration -- she
+    simply no longer has to have one pre-configured for the order to go
+    through.
 
     Returns `{"name": "SAL-ORD-..."}` only -- no total, no price, nothing
     the Fulfillment Engine produced (Pick List/Reporte de Faltante
@@ -458,7 +519,6 @@ def create_and_submit_sales_order(customer, items, observations=None):
             "company": company,
             "transaction_date": nowdate(),
             "delivery_date": delivery_date,
-            "set_warehouse": so_items[0]["warehouse"],
             "items": so_items,
         }
     )
@@ -477,10 +537,9 @@ def get_editable_order(name):
     `get_order_detail()`'s own exact response shape verbatim (same
     allowlist, same field-by-field construction, same static guardrail
     in `test_regression.py`), since editing reuses the identical "Nuevo
-    Pedido" screen just prefilled. The one thing added on top: only a
-    Draft order can be prefilled for editing here -- `check_permission
-    ("read")` (if_owner=1, Commit 18.1) is where ownership is actually
-    enforced, exactly like every other read in this module; the
+    Pedido" screen just prefilled. `check_permission("read")` +
+    `assert_same_company()` (Commit 25.1) are where access is actually
+    enforced -- role + same Company, no longer ownership; the
     `docstatus` check is the read-side half of the same "Draft only"
     boundary `update_draft_sales_order()` enforces independently on the
     write side below.
@@ -489,6 +548,7 @@ def get_editable_order(name):
 
     so = frappe.get_doc("Sales Order", name)
     so.check_permission("read")
+    assert_same_company(so)
 
     if so.docstatus != 0:
         frappe.throw(_("Solo se pueden editar pedidos en borrador."))
@@ -512,13 +572,12 @@ def update_draft_sales_order(name, customer, items, observations=None):
     `create_and_submit_sales_order()`'s own `.submit()` call (Commit 16's
     `on_submit` hook), never reached from here.
 
-    `check_permission("write")` is where if_owner=1 (Commit 18.1) is
-    actually enforced -- a second Vendedora's own order raises
-    `PermissionError` here exactly like `get_order_detail()`/
-    `get_my_orders()` already do for read. `docstatus == 0` is required
-    explicitly, throwing a clear, specific message -- ERPNext's own
-    docstatus-transition guard would eventually reject writing to a
-    submitted document too, but only after doing more work first.
+    `check_permission("write")` + `assert_same_company()` (Commit 25.1)
+    are where access is actually enforced -- role + same Company, no
+    longer ownership. `docstatus == 0` is required explicitly, throwing
+    a clear, specific message -- ERPNext's own docstatus-transition
+    guard would eventually reject writing to a submitted document too,
+    but only after doing more work first.
 
     Returns `{"name": "SAL-ORD-..."}` only -- no economic field, no
     Fulfillment Engine artifact name, matching every other write in this
@@ -528,6 +587,7 @@ def update_draft_sales_order(name, customer, items, observations=None):
 
     so = frappe.get_doc("Sales Order", name)
     so.check_permission("write")
+    assert_same_company(so)
 
     if so.docstatus != 0:
         frappe.throw(_("Solo se pueden editar pedidos en borrador."))
@@ -540,33 +600,32 @@ def update_draft_sales_order(name, customer, items, observations=None):
     so.set("items", [])
     for row in so_items:
         so.append("items", row)
-    so.set_warehouse = so_items[0]["warehouse"]
     if observations is not None:
         so.fg_observations = observations
 
-    so.save()  # no ignore_permissions -- her real if_owner=1 write permission already covers this
+    so.save()  # no ignore_permissions -- her real role+Company write permission already covers this
 
     return {"name": so.name}
 
 
 @frappe.whitelist()
 def delete_draft_sales_order(name):
-    """Deletes one of Vendedora's own Draft Sales Orders (Commit 18.5).
+    """Deletes a Draft Sales Order of this Company (Commit 18.5; role +
+    Company since Commit 25.1, no longer ownership).
 
-    `check_permission("delete")` is where if_owner=1 -- now including
-    `delete=1`, the one new grant this commit adds to the existing
-    Custom DocPerm row (Commit 18.1's own row, not a second one) -- is
-    actually enforced; a second Vendedora's own order raises
-    `PermissionError` exactly like every other function in this module.
-    `docstatus == 0` is required explicitly, matching the native rule
-    that a submitted document can never be deleted (Frappe's own
-    `check_permission_and_not_submitted()` would reject it too, but this
-    throws a specific, clear message first).
+    `check_permission("delete")` + `assert_same_company()` are where
+    access is actually enforced -- `delete=1` on Vendedora's Custom
+    DocPerm row grants the base right, `assert_same_company()` keeps it
+    scoped to this Company. `docstatus == 0` is required explicitly,
+    matching the native rule that a submitted document can never be
+    deleted (Frappe's own `check_permission_and_not_submitted()` would
+    reject it too, but this throws a specific, clear message first).
     """
     _require_login()
 
     so = frappe.get_doc("Sales Order", name)
     so.check_permission("delete")
+    assert_same_company(so)
 
     if so.docstatus != 0:
         frappe.throw(_("Solo se pueden eliminar pedidos en borrador."))
@@ -578,12 +637,11 @@ def delete_draft_sales_order(name):
 
 @frappe.whitelist()
 def cancel_sales_order(name):
-    """Cancels one of Vendedora's own submitted Sales Orders (Commit
-    18.5).
+    """Cancels a submitted Sales Order of this Company (Commit 18.5;
+    role + Company since Commit 25.1, no longer ownership).
 
-    `check_permission("cancel")` is where if_owner=1 -- now including
-    `cancel=1`, the other new grant this commit adds to the same
-    existing row -- is actually enforced. `so.cancel()` is called with
+    `check_permission("cancel")` + `assert_same_company()` are where
+    access is actually enforced. `so.cancel()` is called with
     no bypass of any kind: ERPNext's own native back-link protection (a
     submitted Pick List/Material Request/Purchase Order still
     referencing this order, Commits 17/19.3) runs exactly as it does for
@@ -606,6 +664,7 @@ def cancel_sales_order(name):
 
     so = frappe.get_doc("Sales Order", name)
     so.check_permission("cancel")
+    assert_same_company(so)
 
     if so.docstatus != 1:
         frappe.throw(_("Solo se pueden cancelar pedidos sometidos."))
@@ -625,14 +684,15 @@ def get_modification_status(name):
 
     `check_permission("cancel")` -- not "read" -- because that is the
     exact grant `modify_submitted_sales_order()` itself requires (cancel+
-    amend starts with `so.cancel()`); using the same permission here means
-    this pre-check can never say "yes" for an order the real operation
-    would then reject on ownership grounds alone.
+    amend starts with `so.cancel()`); using the same permission +
+    `assert_same_company()` here means this pre-check can never say
+    "yes" for an order the real operation would then reject.
     """
     _require_login()
 
     so = frappe.get_doc("Sales Order", name)
     so.check_permission("cancel")
+    assert_same_company(so)
 
     if so.docstatus != 1:
         return {"modifiable": False, "blockers": ["not_submitted"]}
@@ -655,6 +715,7 @@ def get_order_for_modification(name):
 
     so = frappe.get_doc("Sales Order", name)
     so.check_permission("cancel")
+    assert_same_company(so)
 
     if so.docstatus != 1:
         frappe.throw(_("Solo se pueden modificar pedidos sometidos."))
@@ -692,9 +753,10 @@ def modify_submitted_sales_order(name, customer, items, observations=None):
     `process_sales_order()` fresh, exactly like `create_and_submit_sales_
     order()` -- never called directly here).
 
-    `check_permission("cancel")` is where if_owner=1 is enforced -- the
-    exact same grant `cancel_sales_order()` already relies on, no new
-    Custom DocPerm needed. The authoritative gate is
+    `check_permission("cancel")` + `assert_same_company()` are where
+    access is enforced -- the exact same grant `cancel_sales_order()`
+    already relies on, no new Custom DocPerm needed. The authoritative
+    gate is
     `modification_blockers_for()`, re-derived here (never trusted from
     `get_modification_status()`/`get_order_for_modification()`, both of
     which the client may have called any amount of time before this
@@ -719,6 +781,7 @@ def modify_submitted_sales_order(name, customer, items, observations=None):
 
     so = frappe.get_doc("Sales Order", name)
     so.check_permission("cancel")
+    assert_same_company(so)
 
     if so.docstatus != 1:
         frappe.throw(_("Solo se pueden modificar pedidos sometidos."))
@@ -751,7 +814,6 @@ def modify_submitted_sales_order(name, customer, items, observations=None):
     amended.set("items", [])
     for row in so_items:
         amended.append("items", row)
-    amended.set_warehouse = so_items[0]["warehouse"]
     if observations is not None:
         amended.fg_observations = observations
 

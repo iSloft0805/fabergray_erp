@@ -328,23 +328,36 @@ class TestSalesOrderModification(IntegrationTestCase):
 	# Permissions
 	# =====================================================================
 
-	def test_another_vendedora_cannot_modify_it(self):
+	def test_another_vendedora_can_modify_it_when_nothing_blocks(self):
+		"""Commit 25.1: "el rol controla el área, no el owner" -- a second
+		Vendedora of the same Company can now modify a submitted Sales
+		Order she did not create, exactly like the owner could (was
+		assertRaises(PermissionError) on all three calls pre-25.1). Still
+		state-gated, unchanged by this commit: see
+		test_ventas_permissions.py's own test_submitted_sales_order_not_
+		editable_by_anyone_regardless_of_owner for the case where a real
+		modification_blockers_for() hit rejects BOTH the owner and a
+		second Vendedora alike."""
 		wh = self.world.warehouse("FG18-5b OtherVendedora")
 		item = self.world.item("FG18-5b-OTHER-ITEM", default_warehouse=wh.name)
 		self.world.stock_up_real(item.name, wh.name, 10)
 		so_name = self._submit_order(item, 4)
 
 		with fx.as_user(self.vendedora_b):
-			with self.assertRaises(frappe.PermissionError):
-				ventas.get_modification_status(so_name)
-			with self.assertRaises(frappe.PermissionError):
-				ventas.get_order_for_modification(so_name)
-			with self.assertRaises(frappe.PermissionError):
-				ventas.modify_submitted_sales_order(
-					name=so_name, customer=self.customer.name, items=[{"item_code": item.name, "qty": 9}]
-				)
+			status = ventas.get_modification_status(so_name)
+			self.assertTrue(status["modifiable"])
+			prefill = ventas.get_order_for_modification(so_name)
+			self.assertEqual(prefill["name"], so_name)
+			result = ventas.modify_submitted_sales_order(
+				name=so_name, customer=self.customer.name, items=[{"item_code": item.name, "qty": 9}]
+			)
+		self.world.track_existing("Sales Order", result["name"])
+		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
-		self.assertEqual(frappe.db.get_value("Sales Order", so_name, "docstatus"), 1)
+		amended = frappe.get_doc("Sales Order", result["name"])
+		self.assertEqual(amended.docstatus, 1)
+		self.assertEqual(amended.items[0].qty, 9)
+		self.assertEqual(frappe.db.get_value("Sales Order", so_name, "docstatus"), 2)  # original now cancelled
 
 	# =====================================================================
 	# Commercial identity across amendments

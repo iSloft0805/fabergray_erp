@@ -212,7 +212,7 @@ fabergray_erp.Ventas = class Ventas {
 
 		return `
 			<div class="fg-section-head">
-				<div class="fg-section-title">${__("Mis pedidos")}</div>
+				<div class="fg-section-title">${__("Pedidos")}</div>
 			</div>
 			${chip}
 			<div class="fg-order-list">${cards}</div>

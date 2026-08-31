@@ -124,18 +124,28 @@ class TestCotizacionesApi(IntegrationTestCase):
 		self.assertEqual(summary["aprobadas"], 0)  # no conversion phase yet -- always 0 until built
 		self.assertGreaterEqual(summary["vencidas"], 1)
 
-	def test_get_quotation_summary_respects_if_owner(self):
+	def test_get_quotation_summary_reflects_every_vendedoras_quotations(self):
+		"""Commit 25.1: "el rol controla el área, no el owner" --
+		get_quotation_summary() is company-wide, not per-owner (was
+		assertEqual(summary_b[...], 0) pre-25.1: A's Quotation now counts
+		in B's own summary too)."""
+		with fx.as_user(self.vendedora_b):
+			before_b = cotizaciones.get_quotation_summary()
+
 		with fx.as_user(self.vendedora_a):
 			self._raw_quotation(self.customer.name, self.item.name, submit=True)
 
 		with fx.as_user(self.vendedora_b):
-			summary_b = cotizaciones.get_quotation_summary()
-		self.assertEqual(summary_b["cotizaciones_hoy"], 0)
-		self.assertEqual(summary_b["pendientes"], 0)
+			after_b = cotizaciones.get_quotation_summary()
+		self.assertEqual(after_b["cotizaciones_hoy"], before_b["cotizaciones_hoy"] + 1)
+		self.assertEqual(after_b["pendientes"], before_b["pendientes"] + 1)
 
 	# -- get_my_quotations ----------------------------------------------------
 
-	def test_vendedora_only_gets_her_own_quotations(self):
+	def test_vendedora_sees_every_company_quotation_including_others(self):
+		"""Commit 25.1: get_my_quotations() shows every Quotation of this
+		Company, regardless of who created it (was assertNotIn on the
+		other Vendedora's quotation pre-25.1)."""
 		with fx.as_user(self.vendedora_a):
 			qtn_a = self._raw_quotation(self.customer.name, self.item.name, terms="Entrega en 5 días")
 
@@ -146,7 +156,7 @@ class TestCotizacionesApi(IntegrationTestCase):
 			mine = cotizaciones.get_my_quotations()
 		names = [q["name"] for q in mine]
 		self.assertIn(qtn_a.name, names)
-		self.assertNotIn(qtn_b.name, names)
+		self.assertIn(qtn_b.name, names)
 
 	def test_get_my_quotations_response_never_contains_economic_data(self):
 		with fx.as_user(self.vendedora_a):
@@ -205,13 +215,15 @@ class TestCotizacionesApi(IntegrationTestCase):
 			self.assertTrue(set(row.keys()).issubset(allowed_item))
 			self.assertFalse(_ECONOMIC_KEYS & set(row.keys()))
 
-	def test_get_quotation_detail_enforces_if_owner(self):
+	def test_get_quotation_detail_shared_across_vendedoras(self):
+		"""Commit 25.1: get_quotation_detail() is readable by any Vendedora
+		of the same Company (was assertRaises(PermissionError) pre-25.1)."""
 		with fx.as_user(self.vendedora_a):
 			qtn_a = self._raw_quotation(self.customer.name, self.item.name)
 
 		with fx.as_user(self.vendedora_b):
-			with self.assertRaises(frappe.PermissionError):
-				cotizaciones.get_quotation_detail(qtn_a.name)
+			detail = cotizaciones.get_quotation_detail(qtn_a.name)
+		self.assertEqual(detail["name"], qtn_a.name)
 
 
 # Every field create_and_submit_quotation() must reject if a line tries to
@@ -292,7 +304,9 @@ class TestCreateAndSubmitQuotation(IntegrationTestCase):
 		self.assertEqual(qtn.items[0].qty, 3)
 		self.assertEqual(qtn.terms, "Válida por 15 días")
 
-	def test_another_vendedora_cannot_read_it_afterward(self):
+	def test_another_vendedora_can_read_it_afterward(self):
+		"""Commit 25.1: shared visibility (was assertRaises(PermissionError)
+		pre-25.1)."""
 		with fx.as_user(self.vendedora_a):
 			result = cotizaciones.create_and_submit_quotation(
 				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
@@ -300,8 +314,8 @@ class TestCreateAndSubmitQuotation(IntegrationTestCase):
 		self.world.track_existing("Quotation", result["name"])
 
 		with fx.as_user(self.vendedora_b):
-			with self.assertRaises(frappe.PermissionError):
-				cotizaciones.get_quotation_detail(result["name"])
+			detail = cotizaciones.get_quotation_detail(result["name"])
+		self.assertEqual(detail["name"], result["name"])
 
 	# -- Inventario: stock 0 nunca bloquea --------------------------------------
 
@@ -451,15 +465,20 @@ class TestUpdateDraftQuotation(IntegrationTestCase):
 		self.assertEqual(editable["name"], qtn.name)
 		self.assertEqual(editable["status"], "Draft")
 
-	def test_another_vendedora_cannot_read_it_for_editing(self):
+	def test_another_vendedora_can_read_and_edit_it_while_draft(self):
+		"""Commit 25.1: a Draft Quotation is editable by any Vendedora of
+		the same Company, not just its creator (was assertRaises
+		(PermissionError) on both calls pre-25.1)."""
 		qtn = self._draft_quotation(self.vendedora_a)
 		with fx.as_user(self.vendedora_b):
-			with self.assertRaises(frappe.PermissionError):
-				cotizaciones.get_editable_quotation(qtn.name)
-			with self.assertRaises(frappe.PermissionError):
-				cotizaciones.update_draft_quotation(
-					name=qtn.name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
-				)
+			editable = cotizaciones.get_editable_quotation(qtn.name)
+			self.assertEqual(editable["name"], qtn.name)
+			result = cotizaciones.update_draft_quotation(
+				name=qtn.name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 2}]
+			)
+		self.assertEqual(result["name"], qtn.name)
+		qtn.reload()
+		self.assertEqual(qtn.items[0].qty, 2)
 
 	# -- Ediciones permitidas ---------------------------------------------------
 

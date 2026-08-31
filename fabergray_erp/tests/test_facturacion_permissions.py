@@ -248,8 +248,13 @@ class TestFacturacionPermissions(IntegrationTestCase):
 		# Spot checks, not a full re-run of every other role's suite --
 		# those have their own dedicated test files.
 		self.assertTrue(frappe.db.exists("Custom DocPerm", {"parent": "Pick List", "role": "Bodega", "write": 1}))
+		# Commit 25.1 -- "el rol controla el área, no el owner" flipped
+		# Sales Order/Vendedora's if_owner from 1 to 0; still the same one
+		# Custom DocPerm row (create/read/write/submit/cancel/delete), just
+		# no longer owner-scoped -- see test_ventas_permissions.py's own
+		# suite for the full before/after story.
 		self.assertTrue(
-			frappe.db.exists("Custom DocPerm", {"parent": "Sales Order", "role": "Vendedora", "if_owner": 1})
+			frappe.db.exists("Custom DocPerm", {"parent": "Sales Order", "role": "Vendedora", "if_owner": 0})
 		)
 		self.assertFalse(frappe.db.exists("Custom DocPerm", {"parent": "Sales Invoice", "role": "Vendedora"}))
 		self.assertFalse(frappe.db.exists("Custom DocPerm", {"parent": "Sales Invoice", "role": "Bodega"}))

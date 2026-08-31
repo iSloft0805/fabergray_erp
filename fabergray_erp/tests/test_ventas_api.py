@@ -1,10 +1,14 @@
 # -*- coding: utf-8 -*-
 """Commit 18.2 -- api/ventas.py: the six endpoints behind the future Page
-Ventas. Vendedora always operates under her own real session and real,
-if_owner-scoped permissions (Commit 18.1) -- every test here proves that
-directly (frappe.get_list, never frappe.get_all/ignore_permissions/
-frappe.set_user inside api/ventas.py itself -- see test_regression.py's
-structural guardrails for the static half of that proof).
+Ventas. Vendedora always operates under her own real session and real
+permissions (Commit 18.1; Commit 25.1 dropped the original if_owner=1
+scoping -- "el rol controla el área, no el owner", so every Vendedora now
+shares every Sales Order of this site's own Company, Company isolation
+enforced by fabergray_erp/permission_conditions.py instead) -- every test
+here proves that directly (frappe.get_list, never frappe.get_all/
+ignore_permissions/frappe.set_user inside api/ventas.py itself -- see
+test_regression.py's structural guardrails for the static half of that
+proof).
 
 Central theme, tested from several angles: Vendedora never sees or sends
 a price, discount, tax or total, yet the Sales Orders she submits still
@@ -210,7 +214,11 @@ class TestVentasApi(IntegrationTestCase):
 
 	# -- get_my_orders / get_sales_summary: if_owner isolation --------------
 
-	def test_vendedora_only_gets_her_own_orders(self):
+	def test_vendedora_sees_every_company_order_including_others(self):
+		"""Commit 25.1: "el rol controla el área, no el owner" -- get_my_
+		orders() is no longer scoped to the caller's own orders; both
+		Vendedoras see BOTH orders (was assertNotIn on the other one's
+		order, pre-25.1)."""
 		with fx.as_user(self.vendedora_a):
 			result_a = ventas.create_and_submit_sales_order(
 				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
@@ -229,13 +237,13 @@ class TestVentasApi(IntegrationTestCase):
 			orders_a = ventas.get_my_orders()
 		names_a = [o["name"] for o in orders_a]
 		self.assertIn(result_a["name"], names_a)
-		self.assertNotIn(result_b["name"], names_a)
+		self.assertIn(result_b["name"], names_a)
 
 		with fx.as_user(self.vendedora_b):
 			orders_b = ventas.get_my_orders()
 		names_b = [o["name"] for o in orders_b]
 		self.assertIn(result_b["name"], names_b)
-		self.assertNotIn(result_a["name"], names_b)
+		self.assertIn(result_a["name"], names_b)
 
 	def test_order_responses_never_contain_economic_data(self):
 		with fx.as_user(self.vendedora_a):
@@ -291,7 +299,10 @@ class TestVentasApi(IntegrationTestCase):
 			self.assertEqual(set(row.keys()), {"item_code", "item_name", "qty", "stock_uom"})
 			self.assertFalse(_ECONOMIC_KEYS & set(row.keys()))
 
-	def test_another_vendedora_cannot_read_order_detail(self):
+	def test_another_vendedora_can_read_order_detail(self):
+		"""Commit 25.1: get_order_detail() is now readable by any Vendedora
+		of the same Company, not just the order's own creator (was
+		assertRaises(PermissionError) pre-25.1)."""
 		with fx.as_user(self.vendedora_a):
 			result = ventas.create_and_submit_sales_order(
 				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
@@ -300,15 +311,16 @@ class TestVentasApi(IntegrationTestCase):
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
 		with fx.as_user(self.vendedora_b):
-			with self.assertRaises(frappe.PermissionError):
-				ventas.get_order_detail(result["name"])
+			detail = ventas.get_order_detail(result["name"])
+		self.assertEqual(detail["name"], result["name"])
 
-	def test_sales_summary_respects_if_owner(self):
-		"""Each Vendedora's `pedidos_hoy` moves by exactly the orders *she*
-		submits, regardless of what the other one does in between --
-		relative before/after diffs on both sides, deliberately not an
-		absolute count, since this class-level TestWorld may already carry
-		state from other test methods run earlier (see fixtures.py's own
+	def test_sales_summary_reflects_every_vendedoras_orders(self):
+		"""Commit 25.1: get_sales_summary() is company-wide, not per-
+		owner -- BOTH Vendedoras' `pedidos_hoy` move by +1 when A submits
+		one order (was "only A moves, B untouched" pre-25.1). Relative
+		before/after diffs on both sides, deliberately not an absolute
+		count, since this class-level TestWorld may already carry state
+		from other test methods run earlier (see fixtures.py's own
 		docstring on why IntegrationTestCase's rollback isn't relied on
 		here)."""
 		with fx.as_user(self.vendedora_a):
@@ -329,7 +341,7 @@ class TestVentasApi(IntegrationTestCase):
 			after_b = ventas.get_sales_summary()["pedidos_hoy"]
 
 		self.assertEqual(after_a, before_a + 1)
-		self.assertEqual(after_b, before_b)  # B's own count is untouched by A's order
+		self.assertEqual(after_b, before_b + 1)  # shared: B sees A's new order too
 
 	# -- E2E: full stock / partial stock / zero stock, through the real hook -
 
@@ -493,7 +505,10 @@ class TestVentasApi(IntegrationTestCase):
 			self.assertFalse(frappe.has_permission("Material Request", "create"))
 			self.assertFalse(frappe.has_permission("Material Request", "write", doc=mr_name))
 
-	def test_another_vendedora_cannot_read_or_modify_the_created_sales_order(self):
+	def test_another_vendedora_can_read_the_created_sales_order(self):
+		"""Commit 25.1: read/write are role+Company-scoped, not owner-
+		scoped -- both has_permission() and her own get_list() now agree
+		the order is visible (was assertFalse/empty-list pre-25.1)."""
 		with fx.as_user(self.vendedora_a):
 			result = ventas.create_and_submit_sales_order(
 				customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
@@ -502,10 +517,10 @@ class TestVentasApi(IntegrationTestCase):
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
 		with fx.as_user(self.vendedora_b):
-			self.assertFalse(frappe.has_permission("Sales Order", "read", doc=result["name"]))
-			self.assertFalse(frappe.has_permission("Sales Order", "write", doc=result["name"]))
+			self.assertTrue(frappe.has_permission("Sales Order", "read", doc=result["name"]))
+			self.assertTrue(frappe.has_permission("Sales Order", "write", doc=result["name"]))
 			self.assertEqual(
-				frappe.get_list("Sales Order", filters={"name": result["name"]}, pluck="name"), []
+				frappe.get_list("Sales Order", filters={"name": result["name"]}, pluck="name"), [result["name"]]
 			)
 
 	# =====================================================================
@@ -572,16 +587,22 @@ class TestVentasApi(IntegrationTestCase):
 		self.assertEqual(so.items[0].qty, 9)
 		self.assertEqual(so.fg_observations, "Pedido editado")
 
-	def test_another_vendedora_cannot_edit_it(self):
+	def test_another_vendedora_can_edit_it_while_draft(self):
+		"""Commit 25.1: a Draft Sales Order is editable by any Vendedora
+		of the same Company, not just its creator -- docstatus/estado
+		still governs (see test_editing_a_submitted_order_fails right
+		below, unchanged by this commit), owner no longer does."""
 		so = self._draft_so(self.vendedora_a)
 
 		with fx.as_user(self.vendedora_b):
-			with self.assertRaises(frappe.PermissionError):
-				ventas.get_editable_order(so.name)
-			with self.assertRaises(frappe.PermissionError):
-				ventas.update_draft_sales_order(
-					name=so.name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
-				)
+			editable = ventas.get_editable_order(so.name)
+			self.assertEqual(editable["name"], so.name)
+			result = ventas.update_draft_sales_order(
+				name=so.name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 2}]
+			)
+		self.assertEqual(result["name"], so.name)
+		so.reload()
+		self.assertEqual(so.items[0].qty, 2)
 
 	def test_editing_a_submitted_order_fails(self):
 		with fx.as_user(self.vendedora_a):
@@ -634,12 +655,17 @@ class TestVentasApi(IntegrationTestCase):
 		self.assertEqual(result["name"], so.name)
 		self.assertFalse(frappe.db.exists("Sales Order", so.name))
 
-	def test_another_vendedora_cannot_delete_it(self):
+	def test_another_vendedora_can_delete_it_while_draft(self):
+		"""Commit 25.1: `delete=1` on the Custom DocPerm row carries the
+		same if_owner=0 as read/write/create/cancel/submit -- Frappe's own
+		permission model has no per-ptype if_owner override on a single
+		row, so this follows the identical role+Company+Draft-state rule
+		as edit (was assertRaises(PermissionError) pre-25.1)."""
 		so = self._draft_so(self.vendedora_a)
 		with fx.as_user(self.vendedora_b):
-			with self.assertRaises(frappe.PermissionError):
-				ventas.delete_draft_sales_order(so.name)
-		self.assertTrue(frappe.db.exists("Sales Order", so.name))
+			result = ventas.delete_draft_sales_order(so.name)
+		self.assertEqual(result["name"], so.name)
+		self.assertFalse(frappe.db.exists("Sales Order", so.name))
 
 	def test_submitted_order_cannot_be_deleted(self):
 		with fx.as_user(self.vendedora_a):
@@ -673,7 +699,14 @@ class TestVentasApi(IntegrationTestCase):
 		self.assertEqual(cancel_result["name"], result["name"])
 		self.assertEqual(frappe.db.get_value("Sales Order", result["name"], "docstatus"), 2)
 
-	def test_another_vendedora_cannot_cancel_it(self):
+	def test_another_vendedora_can_cancel_it_when_erpnext_allows(self):
+		"""Commit 25.1: cancelling a submitted Sales Order is now
+		role+Company-gated, not owner-gated -- section 1's own core
+		example ("Vendedora B debe poder ver/gestionar PEDIDO-001").
+		ERPNext's own native back-link protection (Pick List/Material
+		Request/etc.) still applies unmodified either way -- unrelated to
+		who is cancelling, see test_cancellation_blocked_by_submitted_
+		document_preserves_native_block below, unchanged by this commit."""
 		wh = self.world.warehouse("FG18-5 Cancel Blocked Other")
 		item = self.world.item("FG18-5-CANCEL-BLOCKED-OTHER-ITEM", default_warehouse=wh.name)
 		self.world.stock_up_real(item.name, wh.name, 10)
@@ -686,9 +719,9 @@ class TestVentasApi(IntegrationTestCase):
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
 		with fx.as_user(self.vendedora_b):
-			with self.assertRaises(frappe.PermissionError):
-				ventas.cancel_sales_order(result["name"])
-		self.assertEqual(frappe.db.get_value("Sales Order", result["name"], "docstatus"), 1)
+			cancel_result = ventas.cancel_sales_order(result["name"])
+		self.assertEqual(cancel_result["name"], result["name"])
+		self.assertEqual(frappe.db.get_value("Sales Order", result["name"], "docstatus"), 2)
 
 	def test_cancel_triggers_real_cleanup(self):
 		wh = self.world.warehouse("FG18-5 Cleanup")

@@ -13,13 +13,24 @@ beyond that one row. Every test below exists to prove that the existing
 Customer/Item/Address/Contact (read) and Account (select) grants from
 Commit 18.1 are sufficient for Quotation too, with live evidence -- not
 assumed from code reading alone.
+
+Commit 25.1 -- "el rol controla el área, no el owner": Quotation/Vendedora's
+Custom DocPerm dropped `if_owner` from 1 to 0, mirroring the identical
+change to Sales Order. The "if_owner isolation" tests below are inverted
+accordingly (now proving SHARED access), and the same three new kinds of
+check added to test_ventas_permissions.py are mirrored here: Company
+isolation, "no role means no access even knowing the name", and
+Administrator/System Manager still working (a dedicated Quotation/System
+Manager Custom DocPerm row was added this commit too --
+fixtures/system_manager_custom_docperm.json -- the exact same latent gap
+already documented there for Sales Order).
 """
 
 from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
-
+from fabergray_erp.api import cotizaciones as cotizaciones_api
 from fabergray_erp.tests import fixtures as fx
 
 EXTRA_TEST_RECORD_DEPENDENCIES = []
@@ -70,11 +81,15 @@ class TestCotizacionesPermissions(IntegrationTestCase):
 		self.assertEqual(qtn.docstatus, 1)
 		self.assertEqual(qtn.owner, self.vendedora_a)
 
-	# -- Aislamiento if_owner entre dos Vendedoras distintas ---------------------
+	# -- Visibilidad compartida entre dos Vendedoras distintas (Commit 25.1) -------
 
-	def test_vendedora_cannot_read_another_vendedoras_quotation(self):
-		item = self.world.item("FG20-ISOLATION-ITEM")
-		customer = self.world.customer("FG20 Isolation Customer")
+	def test_vendedora_can_read_another_vendedoras_quotation(self):
+		"""Commit 25.1: a second Vendedora of the same Company can now
+		read the first one's Quotation, through has_permission(), a
+		direct check_permission(), her own get_list(), AND the real
+		api.cotizaciones.get_quotation_detail() the Page actually calls."""
+		item = self.world.item("FG25-QTN-SHARED-READ-ITEM")
+		customer = self.world.customer("FG25 Quotation Shared Read Customer")
 
 		with fx.as_user(self.vendedora_a):
 			qtn_a = self._raw_quotation(customer.name, item.name)
@@ -82,22 +97,106 @@ class TestCotizacionesPermissions(IntegrationTestCase):
 			self.world.track_existing("Quotation", qtn_a.name)
 
 		with fx.as_user(self.vendedora_b):
+			self.assertTrue(frappe.has_permission("Quotation", "read", doc=qtn_a.name))
+			frappe.get_doc("Quotation", qtn_a.name).check_permission("read")  # must not raise
+			self.assertEqual(frappe.get_list("Quotation", filters={"name": qtn_a.name}, pluck="name"), [qtn_a.name])
+			detail = cotizaciones_api.get_quotation_detail(qtn_a.name)
+			self.assertEqual(detail["name"], qtn_a.name)
+
+	def test_vendedora_can_write_another_vendedoras_draft_quotation(self):
+		"""Commit 25.1: write follows the same rule -- a second Vendedora
+		can edit a DRAFT Quotation she did not create, through both the
+		permission primitive and the real api.cotizaciones.
+		update_draft_quotation() the "Editar cotización" screen calls."""
+		item = self.world.item("FG25-QTN-SHARED-WRITE-ITEM")
+		customer = self.world.customer("FG25 Quotation Shared Write Customer")
+
+		with fx.as_user(self.vendedora_a):
+			qtn_a = self._raw_quotation(customer.name, item.name)
+			qtn_a.insert()  # left in Draft -- never submitted
+			self.world.track_existing("Quotation", qtn_a.name)
+
+		with fx.as_user(self.vendedora_b):
+			self.assertTrue(frappe.has_permission("Quotation", "write", doc=qtn_a.name))
+			result = cotizaciones_api.update_draft_quotation(
+				qtn_a.name, customer.name, [{"item_code": item.name, "qty": 4}], terms="Editado por B"
+			)
+			self.assertEqual(result["name"], qtn_a.name)
+
+		qtn_a.reload()
+		self.assertEqual(qtn_a.terms, "Editado por B")
+
+	def test_vendedora_cannot_see_quotation_from_another_company(self):
+		"""Company isolation (Commit 25.1, brief section 6) -- mirrors
+		test_ventas_permissions.py's identical Sales Order test. Bare
+		has_permission()/check_permission() deliberately NOT asserted here
+		either -- see that test's own in-line comment for why (Company is
+		not part of the raw Frappe permission primitive at all; it is
+		enforced at the application layer, in get_list()'s own
+		permission_query_conditions hook and in
+		api.cotizaciones.get_quotation_detail()'s own assert_same_company()
+		call)."""
+		other_company_customer = self.world.customer("FG25 Quotation Other Company Customer")
+		other_company_item = self.world.item("FG25-QTN-OTHER-COMPANY-ITEM")
+		other_company_qtn = frappe.get_doc(
+			{
+				"doctype": "Quotation",
+				"quotation_to": "Customer",
+				"party_name": other_company_customer.name,
+				"company": "_Test Company",
+				"currency": "INR",  # _Test Company's own currency -- avoids needing a COP->INR Currency Exchange rate
+				"items": [{"item_code": other_company_item.name, "qty": 1}],
+			}
+		)
+		other_company_qtn.insert()
+		self.world.track_existing("Quotation", other_company_qtn.name)
+
+		with fx.as_user(self.vendedora_a):
+			self.assertEqual(
+				frappe.get_list("Quotation", filters={"name": other_company_qtn.name}, pluck="name"), []
+			)
+			with self.assertRaises(frappe.PermissionError):
+				cotizaciones_api.get_quotation_detail(other_company_qtn.name)
+
+	def test_user_without_vendedora_role_has_no_quotation_access_by_knowing_the_name(self):
+		"""Mirrors test_ventas_permissions.py's identical Sales Order test
+		-- shared visibility WITHIN the role is not open access to anyone
+		who merely knows a document's name."""
+		item = self.world.item("FG25-QTN-NOROLE-GUARD-ITEM")
+		customer = self.world.customer("FG25 Quotation NoRole Guard Customer")
+
+		with fx.as_user(self.vendedora_a):
+			qtn_a = self._raw_quotation(customer.name, item.name)
+			qtn_a.insert()
+			self.world.track_existing("Quotation", qtn_a.name)
+
+		no_role_user = self.world.user("fg25-qtn-norole@example.com", [])
+		with fx.as_user(no_role_user):
 			self.assertFalse(frappe.has_permission("Quotation", "read", doc=qtn_a.name))
 			with self.assertRaises(frappe.PermissionError):
 				frappe.get_doc("Quotation", qtn_a.name).check_permission("read")
-			self.assertEqual(frappe.get_list("Quotation", filters={"name": qtn_a.name}, pluck="name"), [])
+			with self.assertRaises(frappe.PermissionError):
+				cotizaciones_api.get_quotation_detail(qtn_a.name)
 
-	def test_vendedora_cannot_write_another_vendedoras_quotation(self):
-		item = self.world.item("FG20-ISOLATIONWRITE-ITEM")
-		customer = self.world.customer("FG20 IsolationWrite Customer")
+	def test_administrator_and_system_manager_see_every_company_quotation(self):
+		"""Mirrors test_ventas_permissions.py's identical Sales Order test."""
+		item = self.world.item("FG25-QTN-ADMIN-SEES-ALL-ITEM")
+		customer = self.world.customer("FG25 Quotation Admin Sees All Customer")
 
 		with fx.as_user(self.vendedora_a):
 			qtn_a = self._raw_quotation(customer.name, item.name)
 			qtn_a.insert()
 			self.world.track_existing("Quotation", qtn_a.name)
 
-		with fx.as_user(self.vendedora_b):
-			self.assertFalse(frappe.has_permission("Quotation", "write", doc=qtn_a.name))
+		# Administrator -- the ambient IntegrationTestCase user outside any `as_user` block.
+		self.assertTrue(frappe.has_permission("Quotation", "read", doc=qtn_a.name))
+		self.assertIn(qtn_a.name, frappe.get_list("Quotation", filters={"name": qtn_a.name}, pluck="name"))
+
+		sysmgr_user = self.world.user("fg25-qtn-sysmgr@example.com", ["System Manager"])
+		with fx.as_user(sysmgr_user):
+			self.assertTrue(frappe.has_permission("Quotation", "read", doc=qtn_a.name))
+			detail = cotizaciones_api.get_quotation_detail(qtn_a.name)
+			self.assertEqual(detail["name"], qtn_a.name)
 
 	# -- Account: confirmado en vivo, no asumido ----------------------------------
 

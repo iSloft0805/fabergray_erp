@@ -8,10 +8,13 @@ every write (`create_and_submit_quotation()`, Commit 20.3;
 never `frappe.get_all()`, never `frappe.set_user()`, never
 `ignore_permissions=True`, never `db_set`/`frappe.db.set_value` to skip a
 validation. Vendedora always operates with her own real, restricted
-`if_owner=1` permission on Quotation (Commit 20.1). No Pick List/Reporte
-de Faltante/Fulfillment Engine/Sales Order/Material Request involvement
-at all -- this module has nothing to bypass a permission for, unlike
-api/ventas.py.
+permission on Quotation (Commit 20.1); Commit 25.1 dropped the original
+`if_owner=1` scoping -- "el rol controla el área, no el owner" -- so this
+is now shared across every Vendedora of the same Company, Company
+isolation enforced by `fabergray_erp/permission_conditions.py` instead.
+No Pick List/Reporte de Faltante/Fulfillment Engine/Sales Order/Material
+Request involvement at all -- this module has nothing to bypass a
+permission for, unlike api/ventas.py.
 
 `search_customers()`/`search_items()` are NOT duplicated here -- both are
 already generic, carry nothing Sales-Order-specific, and are already
@@ -40,6 +43,7 @@ from frappe import _
 from frappe.utils import cint, flt, nowdate
 
 from fabergray_erp.api.bodega import _require_login
+from fabergray_erp.permission_conditions import assert_same_company
 
 # The only two fields a Quotation Item line may carry in from the client,
 # enforced by `_validate_and_build_quotation_item_rows()` below (Commit
@@ -82,8 +86,11 @@ def get_item_info(item_code):
 def get_quotation_summary():
     """KPI counts for the Page Cotizaciones dashboard header -- derived
     exclusively from `Quotation.status`/`transaction_date`'s own native
-    values, scoped to Vendedora's own quotations via `if_owner=1`
-    (`frappe.get_list()`, never `get_all()`).
+    values, scoped to this site's own Company (Commit 25.1: no longer to
+    Vendedora's own quotations -- if_owner dropped from the Custom
+    DocPerm). Company isolation comes from `frappe.get_list()`'s own
+    `permission_query_conditions` (see `permission_conditions.py`), never
+    a manual filter here; `frappe.get_all()` is never used.
 
     Native `status` values (`quotation.json`): Draft, Open, Replied,
     Partially Ordered, Ordered, Lost, Cancelled, Expired.
@@ -104,16 +111,12 @@ def get_quotation_summary():
     _require_login()
     frappe.has_permission("Quotation", "read", throw=True)
 
-    base_filters = {"owner": frappe.session.user}
-
-    cotizaciones_hoy = frappe.get_list(
-        "Quotation", filters={**base_filters, "transaction_date": nowdate()}, pluck="name"
-    )
-    pendientes = frappe.get_list("Quotation", filters={**base_filters, "status": "Open"}, pluck="name")
+    cotizaciones_hoy = frappe.get_list("Quotation", filters={"transaction_date": nowdate()}, pluck="name")
+    pendientes = frappe.get_list("Quotation", filters={"status": "Open"}, pluck="name")
     aprobadas = frappe.get_list(
-        "Quotation", filters={**base_filters, "status": ["in", ["Ordered", "Partially Ordered"]]}, pluck="name"
+        "Quotation", filters={"status": ["in", ["Ordered", "Partially Ordered"]]}, pluck="name"
     )
-    vencidas = frappe.get_list("Quotation", filters={**base_filters, "status": "Expired"}, pluck="name")
+    vencidas = frappe.get_list("Quotation", filters={"status": "Expired"}, pluck="name")
 
     return {
         "cotizaciones_hoy": len(cotizaciones_hoy),
@@ -125,13 +128,15 @@ def get_quotation_summary():
 
 @frappe.whitelist()
 def get_my_quotations(limit=50):
-    """Vendedora's own Quotations, most recent first -- operational fields
-    only (number, customer, dates, status, line/unit counts, terms),
-    never a rate/amount/total. Scoped to her own quotations exclusively
-    through the native `if_owner=1` Custom DocPerm (Commit 20.1) --
-    `frappe.get_list()` applies that automatically; an explicit `owner`
-    filter is added below anyway for defensive clarity, same convention
-    as `api/ventas.py.get_my_orders()`. `frappe.get_all()` is never used
+    """All of Fabrigray's Quotations (Commit 25.1: if_owner dropped from
+    Quotation/Vendedora's Custom DocPerm), most recent first --
+    operational fields only (number, customer, dates, status, line/unit
+    counts, terms), never a rate/amount/total. Every Vendedora sees every
+    quotation of this site's own Company, regardless of who created it.
+    Company isolation is enforced centrally by `fabergray_erp.
+    permission_conditions.quotation_permission_query_conditions()`
+    (hooks.py's own `permission_query_conditions`), applied automatically
+    by `frappe.get_list()` below. `frappe.get_all()` is never used
     here.
 
     Per-quotation line/unit counts are read by loading each of her own,
@@ -161,7 +166,6 @@ def get_my_quotations(limit=50):
 
     names = frappe.get_list(
         "Quotation",
-        filters={"owner": frappe.session.user},
         fields=["name"],
         order_by="transaction_date desc, creation desc",
         limit_page_length=0,
@@ -196,13 +200,12 @@ def get_my_quotations(limit=50):
 
 @frappe.whitelist()
 def get_quotation_detail(name):
-    """Line-level detail for one of Vendedora's own Quotations -- the "VER
-    COTIZACIÓN" view in the future Page Cotizaciones. Same permission
-    model as every other read in this module: `get_doc()` +
-    `check_permission("read")`, which is where `if_owner=1` (Commit 20.1)
-    is actually enforced -- a different Vendedora's own quotation raises
-    `PermissionError` here exactly like it does everywhere else in this
-    module.
+    """Line-level detail for any Quotation of this Company -- the "VER
+    COTIZACIÓN" view in the future Page Cotizaciones. `check_permission
+    ("read")` now only enforces the role-level grant (Commit 25.1 --
+    if_owner=0); `assert_same_company()` right after it is what actually
+    keeps a Vendedora from reading another Company's quotation by name --
+    see `fabergray_erp/permission_conditions.py`'s own module docstring.
 
     The response is built field by field, never `qtn.as_dict()` or
     `row.as_dict()` (both of which carry every economic field on the
@@ -215,6 +218,7 @@ def get_quotation_detail(name):
 
     qtn = frappe.get_doc("Quotation", name)
     qtn.check_permission("read")
+    assert_same_company(qtn)
 
     return {
         "name": qtn.name,
@@ -368,18 +372,18 @@ def get_editable_quotation(name):
     reuses `get_quotation_detail()`'s own exact response shape verbatim
     (same allowlist, same field-by-field construction, same static
     guardrail in `test_regression.py`), since editing reuses the
-    identical "Nueva Cotización" screen just prefilled. The one thing
-    added on top: only a Draft quotation can be prefilled for editing
-    here -- `check_permission("read")` (if_owner=1, Commit 20.1) is where
-    ownership is actually enforced, exactly like every other read in this
-    module; the `docstatus` check is the read-side half of the same
-    "Draft only" boundary `update_draft_quotation()` enforces
-    independently on the write side below.
+    identical "Nueva Cotización" screen just prefilled. `check_permission
+    ("read")` + `assert_same_company()` (Commit 25.1) are where access is
+    actually enforced -- role + same Company, no longer ownership; the
+    `docstatus` check is the read-side half of the same "Draft only"
+    boundary `update_draft_quotation()` enforces independently on the
+    write side below.
     """
     _require_login()
 
     qtn = frappe.get_doc("Quotation", name)
     qtn.check_permission("read")
+    assert_same_company(qtn)
 
     if qtn.docstatus != 0:
         frappe.throw(_("Solo se pueden editar cotizaciones en borrador."))
@@ -408,11 +412,10 @@ def update_draft_quotation(name, customer, items, valid_till=None, terms=None):
     reads or writes a price field, and the response below never returns
     one either.
 
-    `check_permission("write")` is where if_owner=1 (Commit 20.1) is
-    actually enforced -- a different Vendedora's own quotation raises
-    `PermissionError` here exactly like `get_quotation_detail()`/
-    `get_my_quotations()` already do for read. `docstatus == 0` is
-    required explicitly, throwing a clear, specific message -- ERPNext's
+    `check_permission("write")` + `assert_same_company()` (Commit 25.1)
+    are where access is actually enforced -- role + same Company, no
+    longer ownership. `docstatus == 0` is required explicitly, throwing
+    a clear, specific message -- ERPNext's
     own docstatus-transition guard would eventually reject writing to a
     submitted document too, but only after doing more work first, and
     with a more generic message.
@@ -434,6 +437,7 @@ def update_draft_quotation(name, customer, items, valid_till=None, terms=None):
 
     qtn = frappe.get_doc("Quotation", name)
     qtn.check_permission("write")
+    assert_same_company(qtn)
 
     if qtn.docstatus != 0:
         frappe.throw(_("Solo se pueden editar cotizaciones en borrador."))
@@ -449,6 +453,6 @@ def update_draft_quotation(name, customer, items, valid_till=None, terms=None):
     if terms is not None:
         qtn.terms = terms
 
-    qtn.save()  # no ignore_permissions -- her real if_owner=1 write permission already covers this
+    qtn.save()  # no ignore_permissions -- her real role+Company write permission already covers this
 
     return {"name": qtn.name}
