@@ -59,6 +59,28 @@ def _lock_manual_picking(pick_list_doc):
 		pick_list_doc.pick_manually = 1
 
 
+def _batch_item_names(item_codes):
+	"""Commit 25.3 -- one batched `frappe.get_list("Item", ...)` call for
+	every distinct `item_code` in `item_codes`, never one query per row.
+	Reporte de Faltante does not store `item_name`, only `item_code` --
+	this is the FALLBACK source (see `get_shortages()`'s own docstring)
+	used only when a report has no linked Pick List to read the name
+	from, exactly the case a shortage the Fulfillment Engine detects at
+	`actual_qty=0` produces (no Pick List is ever created for that line,
+	Commit 25.x's own audit). `frappe.get_list` (never `get_all`) so
+	`Item`'s own read permission still applies -- Bodega/Jefe de
+	Bodega/Facturación/System Manager all hold `read=1` on Item (Custom
+	DocPerm), so this never raises for any role that can reach a
+	shortage list in the first place."""
+	codes = sorted({c for c in item_codes if c})
+	if not codes:
+		return {}
+	return {
+		row.name: row.item_name
+		for row in frappe.get_list("Item", filters={"name": ["in", codes]}, fields=["name", "item_name"])
+	}
+
+
 def _get_shortage_report_rows(pick_list_item_names, statuses=None):
 	"""Return the set of Pick List Item row names that already have a linked
 	Reporte de Faltante (optionally filtered by status). Uses frappe.get_list so
@@ -605,16 +627,26 @@ def get_shortages(status=None):
 	already scopes Pick List/get_queue() scopes this list too, with no
 	extra filtering written here.
 
-	item_name is resolved by reading the linked Pick List (a child-table
-	lookup, exempt from its own permission model, after check_permission
-	("read") on that specific Pick List) -- never by querying the Item
-	doctype directly for a bare item_code, exactly like jefe_bodega.py's
-	version does it. Bodega's own read permission on Item (granted
-	alongside get_inventory() below) is unused here on purpose: resolving
-	item_name via the already-authorized Pick List keeps this endpoint
-	working the same way even for a report whose Pick List still exists
-	but whose item happens to sit outside whatever Item-level visibility
-	rules a future change might add.
+	item_name is resolved by reading the linked Pick List first (a
+	child-table lookup, exempt from its own permission model, after
+	check_permission("read") on that specific Pick List) -- exactly like
+	jefe_bodega.py's version does it, and still the PRIMARY source: it
+	keeps working for a report whose Pick List still exists even if the
+	item happens to sit outside whatever Item-level visibility rules a
+	future change might add.
+
+	Commit 25.3 -- FALLBACK added: a report the Fulfillment Engine
+	created at `actual_qty=0` never has a Pick List at all (confirmed
+	live, Commit 25.x's own audit -- `create_pick_list_for_available_
+	stock()` returns `None` before building anything when nothing is
+	theoretically available), so the Pick-List-only lookup always fell
+	through to the bare `item_code` for exactly those reports -- the root
+	cause of "Faltante 0002" instead of the real product name. Bodega's
+	own read permission on Item (granted alongside get_inventory()
+	below) was deliberately left unused for this originally; it is now
+	used, but only as a SECOND source, batched once for the whole page
+	via `_batch_item_names()` (never one query per row) -- the Pick List
+	path above still wins whenever it has an answer.
 	"""
 	_require_login()
 	frappe.has_permission("Reporte de Faltante", "read", throw=True)
@@ -665,6 +697,8 @@ def get_shortages(status=None):
 			commercial_name_cache[sales_order] = root_commercial_name(sales_order)
 		return commercial_name_cache[sales_order]
 
+	item_name_by_code = _batch_item_names([r.item_code for r in reports])
+
 	for report in reports:
 		item_name = None
 		if report.pick_list and report.pick_list_item:
@@ -676,11 +710,11 @@ def get_shortages(status=None):
 			except frappe.PermissionError:
 				# Report references a Pick List this user can no longer read
 				# (e.g. outside their Warehouse User Permission any more).
-				# Fall back to the report's own item_code rather than
-				# failing the whole list or reading Item data instead.
+				# Fall through to the batched Item lookup below rather than
+				# failing the whole list.
 				item_name = None
 
-		report["item_name"] = item_name or report.item_code
+		report["item_name"] = item_name or item_name_by_code.get(report.item_code) or report.item_code
 		report["reported_by_fullname"] = frappe.utils.get_fullname(report.reported_by)
 		report["commercial_name"] = _commercial_name(report.sales_order)
 

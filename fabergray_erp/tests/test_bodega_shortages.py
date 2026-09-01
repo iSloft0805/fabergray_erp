@@ -144,3 +144,44 @@ class TestBodegaShortages(IntegrationTestCase):
 		self.assertIsNotNone(found)
 		self.assertEqual(found["item_name"], frappe.db.get_value("Item", self.item.name, "item_name"))
 		self.assertIsNone(found["commercial_name"])
+
+	def test_item_name_resolved_via_item_when_no_pick_list_and_names_differ(self):
+		"""Commit 25.3 -- the actual production bug ("Faltante 0002" instead
+		of the real product name): every other fixture in this file uses
+		`self.world.item()`, whose own factory always sets `item_name =
+		item_code` (fixtures.py:106) -- which makes `test_report_without_
+		pick_list_still_returned` above pass EVEN ON THE OLD, BUGGY CODE,
+		since item_code and item_name are identical strings there and the
+		assertion can't tell a correct Item-based resolution apart from an
+		incorrect fallback to the bare code. This test uses a real,
+		DISTINCT item_name (matching production, e.g. item_code "0002" /
+		item_name "Cabo mecha trapero") specifically so a regression back to
+		"falls back to item_code silently" fails loudly instead of by
+		coincidence."""
+		item = frappe.get_doc(
+			{
+				"doctype": "Item",
+				"item_code": "FG8-SHORT-NAMED-ITEM",
+				"item_name": "Nombre real y distinto del código",
+				"item_group": fx._ITEM_GROUP,
+				"stock_uom": fx.UOM,
+				"is_stock_item": 1,
+				"is_sales_item": 1,
+			}
+		)
+		item.insert()
+		self.world.track_existing("Item", item.name)
+
+		report = self.world.shortage_report(
+			item_code=item.name,
+			warehouse=self.wh_a.name,
+			qty_solicitada=5,
+			qty_disponible=0,
+			detected_by="Fulfillment Engine",
+		)
+		with fx.as_user(self.bodega_user):
+			reports = bodega.get_shortages()
+		found = next((r for r in reports if r["name"] == report.name), None)
+		self.assertIsNotNone(found)
+		self.assertEqual(found["item_name"], "Nombre real y distinto del código")
+		self.assertNotEqual(found["item_name"], item.item_code)

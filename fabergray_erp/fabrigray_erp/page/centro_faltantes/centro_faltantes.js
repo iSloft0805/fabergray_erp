@@ -205,6 +205,7 @@ fabergray_erp.CentroFaltantes = class CentroFaltantes {
 					<span class="fg-status-pill fg-status-pill--${status_meta.mod}">${status_meta.label}</span>
 				</div>
 				<div class="fg-cf-card-title">${frappe.utils.escape_html(r.item_name)}</div>
+				<div class="fg-cf-card-meta">${__("Código")}: ${frappe.utils.escape_html(r.item_code || "—")}</div>
 				<div class="fg-cf-card-meta">${pedido}</div>
 				<div class="fg-cf-card-meta">${__("Almacén")}: ${frappe.utils.escape_html(r.warehouse || "—")}</div>
 				<div class="fg-cf-card-qty">
@@ -322,6 +323,7 @@ fabergray_erp.CentroFaltantes = class CentroFaltantes {
 					fieldname: "info_html",
 					options: `
 						<div class="fg-cf-dialog-info">
+							${cf_row(__("Código"), status.item_code)}
 							${cf_row(__("Almacén"), status.warehouse)}
 							${cf_row(__("Pendiente"), format_qty(status.remaining_qty))}
 						</div>

@@ -911,6 +911,9 @@ fabergray_erp.Bodega = class Bodega {
 					</div>
 				</div>
 				<div class="fg-shortages-card-meta-block">
+					<div class="fg-shortages-card-meta">${icon("hash", "fg-icon-sm")} ${__(
+			"Código"
+		)}: ${frappe.utils.escape_html(r.item_code || "—")}</div>
 					<div class="fg-shortages-card-meta">${icon("clipboard-list", "fg-icon-sm")} ${__(
 			"Motivo"
 		)}: ${frappe.utils.escape_html(r.shortage_reason || "—")}</div>

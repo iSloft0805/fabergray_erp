@@ -64,6 +64,7 @@ from erpnext.setup.doctype.item_group.item_group import get_item_group_defaults
 
 from fabergray_erp.api.bodega import (
 	OPEN_SHORTAGE_STATUSES,
+	_batch_item_names,
 	_open_shortage_pick_lists,
 	_pick_list_bucket,
 	_require_login,
@@ -251,42 +252,63 @@ def get_open_shortage_reports():
 	)
 
 	pick_list_cache = {}
+	item_name_by_code = _batch_item_names([r.item_code for r in reports])
 	for report in reports:
 		report["item_name"] = _resolve_item_name(
-			report.pick_list, report.pick_list_item, report.item_code, pick_list_cache
+			report.pick_list, report.pick_list_item, report.item_code, pick_list_cache, item_name_by_code
 		)
 		report["reported_by_fullname"] = frappe.utils.get_fullname(report.reported_by)
 
 	return reports
 
 
-def _resolve_item_name(pick_list, pick_list_item, item_code, pick_list_cache=None):
-	"""Reporte de Faltante does not store item_name, only item_code. Rather
-	than querying the Item doctype (Jefe de Bodega has no permission on
-	Item) or using frappe.get_all on the Pick List Item child table
-	(forbidden by policy for this API), the item name is read off the
-	linked Pick List document itself -- after confirming read access to
-	that specific Pick List -- exactly the same pattern _get_pick_list_row()
-	already uses in api/bodega.py. `pick_list_cache` (optional, a plain
-	dict) lets a caller iterating many reports load the same Pick List only
-	once; get_shortage_purchase_status() below (a single report) omits it."""
-	if not (pick_list and pick_list_item):
-		return item_code
+def _resolve_item_name(pick_list, pick_list_item, item_code, pick_list_cache=None, item_name_by_code=None):
+	"""Reporte de Faltante does not store item_name, only item_code. The
+	item name is read PRIMARILY off the linked Pick List document itself
+	(after confirming read access to that specific Pick List -- exactly
+	the same pattern _get_pick_list_row() already uses in api/bodega.py)
+	-- never frappe.get_all on the Pick List Item child table (forbidden
+	by policy for this API). `pick_list_cache` (optional, a plain dict)
+	lets a caller iterating many reports load the same Pick List only
+	once; get_shortage_purchase_status()/receive_shortage_purchase()
+	below (single-report callers) omit it.
 
-	cache = pick_list_cache if pick_list_cache is not None else {}
-	try:
-		if pick_list not in cache:
-			doc = frappe.get_doc("Pick List", pick_list)
-			doc.check_permission("read")
-			cache[pick_list] = doc
-		rows = cache[pick_list].get("locations", {"name": pick_list_item})
-		return rows[0].item_name if rows else item_code
-	except frappe.PermissionError:
-		# Report references a Pick List this user can no longer read (e.g.
-		# outside their Warehouse User Permission). Fall back to item_code
-		# rather than failing the whole call or fetching Item data without
-		# permission.
-		return item_code
+	Commit 25.3 -- FALLBACK added: a report the Fulfillment Engine
+	creates at `actual_qty=0` never has a Pick List at all (confirmed
+	live -- create_pick_list_for_available_stock() returns None before
+	building anything when nothing is theoretically available), so this
+	always fell through to the bare item_code for exactly those reports
+	-- the root cause of "Faltante 0002" instead of the real product
+	name. Item now has read=1 for every role that reaches this function
+	(Jefe de Bodega/Facturación/System Manager, Custom DocPerm as of a
+	later commit than the one that first wrote this docstring) -- no
+	longer the permission gap the original comment assumed. `item_name_
+	by_code`, if given, must already be a fully-resolved dict (built via
+	_batch_item_names() ONCE for the whole page by the caller -- never a
+	query issued from inside this function, so iterating many reports
+	never becomes N+1); when omitted (the two single-report callers), a
+	single frappe.db.get_value() read is used instead. item_code remains
+	the final, last-resort fallback if the Item itself cannot be found
+	either -- this function never raises."""
+	if pick_list and pick_list_item:
+		cache = pick_list_cache if pick_list_cache is not None else {}
+		try:
+			if pick_list not in cache:
+				doc = frappe.get_doc("Pick List", pick_list)
+				doc.check_permission("read")
+				cache[pick_list] = doc
+			rows = cache[pick_list].get("locations", {"name": pick_list_item})
+			if rows:
+				return rows[0].item_name
+		except frappe.PermissionError:
+			# Report references a Pick List this user can no longer read
+			# (e.g. outside their Warehouse User Permission). Fall through
+			# to the Item-based lookup below rather than failing the call.
+			pass
+
+	if item_name_by_code is not None:
+		return item_name_by_code.get(item_code) or item_code
+	return frappe.db.get_value("Item", item_code, "item_name") or item_code
 
 
 @frappe.whitelist()
@@ -1044,6 +1066,7 @@ def get_shortage_center(status=None, txt=None, start=0, page_length=20):
 	received_by_report = _bulk_received_qty(names) if frappe.has_permission("Stock Entry", "read") else {}
 
 	pick_list_cache = {}
+	item_name_by_code = _batch_item_names([r.item_code for r in rows])
 	results = []
 	for r in rows:
 		received_qty = received_by_report.get(r.name, 0.0)
@@ -1052,7 +1075,9 @@ def get_shortage_center(status=None, txt=None, start=0, page_length=20):
 			{
 				"name": r.name,
 				"item_code": r.item_code,
-				"item_name": _resolve_item_name(r.pick_list, r.pick_list_item, r.item_code, pick_list_cache),
+				"item_name": _resolve_item_name(
+					r.pick_list, r.pick_list_item, r.item_code, pick_list_cache, item_name_by_code
+				),
 				"warehouse": r.warehouse,
 				"sales_order": r.sales_order,
 				"qty_solicitada": r.qty_solicitada,

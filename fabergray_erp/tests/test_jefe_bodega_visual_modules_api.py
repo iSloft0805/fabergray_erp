@@ -320,6 +320,38 @@ class TestShortageCenterApi(IntegrationTestCase):
 			with self.assertRaises(frappe.PermissionError):
 				api.get_shortage_center_summary()
 
+	def test_item_name_resolved_via_item_when_no_pick_list_and_names_differ(self):
+		"""Commit 25.3 -- get_shortage_center() (Centro de Faltantes) must
+		show the real product name, not item_code, for a report with no
+		linked Pick List (this class's own `_shortage()` helper never sets
+		one -- exactly the shape an actual_qty=0 Fulfillment Engine
+		shortage has). Every other item in this class comes from
+		self.world.item(), whose factory always sets item_name=item_code
+		(fixtures.py) -- insufficient to catch this bug (see the mirror
+		test in test_bodega_shortages.py for the full explanation), so this
+		item is built directly with a genuinely distinct item_name."""
+		item = frappe.get_doc(
+			{
+				"doctype": "Item",
+				"item_code": "FG229-CF-NAMED-ITEM",
+				"item_name": "Nombre real y distinto del código",
+				"item_group": fx._ITEM_GROUP,
+				"stock_uom": fx.UOM,
+				"is_stock_item": 1,
+				"is_sales_item": 1,
+			}
+		)
+		item.insert()
+		self.world.track_existing("Item", item.name)
+
+		report = self._shortage(item.name)
+		with fx.as_user(self.jefe):
+			res = api.get_shortage_center(page_length=100)
+		row = next(r for r in res["reports"] if r["name"] == report.name)
+		self.assertEqual(row["item_code"], item.name)
+		self.assertEqual(row["item_name"], "Nombre real y distinto del código")
+		self.assertNotEqual(row["item_name"], item.item_code)
+
 	# -- No N+1 ---------------------------------------------------------------
 
 	def test_shortage_center_query_count_is_bounded(self):
