@@ -51,11 +51,20 @@ Bloqueos conocidos y NO resueltos silenciosamente aquí (ver auditoría de
 Fase 2 -- fabergray.local, Excel real: Ciudad es 100% IDs numéricos de
 Access, no nombres reales; País está 100% vacío):
     - Address.city y Address.country son REQUERIDOS nativamente
-      (Address.json, reqd=1). Si no hay nombre de ciudad resoluble
-      (Excel.Ciudad ya es un nombre real, o aparece en `city_id_map`) o
-      no hay país (Excel.País, o `country_fallback` explícito), ese
-      Address NO se crea -- se cuenta como bloqueado, nunca se inventa
-      un valor.
+      (Address.json, reqd=1, sin tocar -- una relajación vía Property
+      Setter se probó en un intento anterior de Fase 2B y fue revertida
+      por decisión explícita: no se quiere city vacío). Sin un nombre de
+      ciudad resoluble (Excel.Ciudad ya es un nombre real, o aparece en
+      `city_id_map`, o hay un `city_fallback` explícito) o sin país
+      (Excel.País, o `country_fallback` explícito), ese Address NO se
+      crea -- se cuenta como bloqueado (`addresses_blocked_missing_city`/
+      `addresses_blocked_missing_country`), nunca se inventa un valor
+      por decisión propia de este módulo. `city_fallback`/
+      `country_fallback` son exactamente eso -- un valor que el
+      LLAMADOR aprueba explícitamente para esta migración puntual
+      (p.ej. `city_fallback="Bucaramanga"`, `country_fallback="Colombia"`
+      mientras no exista una tabla real IdCiudad->nombre), nunca
+      inferidos ni asumidos por defecto aquí.
 """
 
 import re
@@ -256,18 +265,27 @@ def find_matching_address(customer_name, address_line1, cache):
     return None
 
 
-def resolve_city(row, city_id_map):
-    """None si no hay un nombre de ciudad resoluble -- nunca inventa uno.
-    Un valor ya no-numérico en Excel.Ciudad se usa tal cual (es un nombre
-    real). Un valor numérico (ID de Access) solo se resuelve si aparece en
-    `city_id_map` (tabla de equivalencias aprobada, opcional)."""
+def resolve_city(row, city_id_map, city_fallback=None):
+    """Orden estricto (aprobado explícitamente, nunca fuzzy):
+    A. Un valor ya no-numérico en Excel.Ciudad se usa tal cual (es un
+       nombre real) -- `city_fallback` ni se considera en este caso.
+    B. Un valor numérico (ID de Access) se resuelve si aparece en
+       `city_id_map` (tabla de equivalencias aprobada, opcional).
+    C. Si Excel.Ciudad está vacía, o es un ID numérico SIN entrada en
+       `city_id_map`: se usa `city_fallback` -- solo si el llamador lo
+       pasó explícitamente (nunca asumido por este módulo, nunca
+       inferido desde barrio/teléfono/dirección/nombre del cliente).
+    D. Si tampoco hay `city_fallback`: None -- comportamiento seguro,
+       nunca se inventa un valor y el Address correspondiente no se
+       crea (ver _create_address()/addresses_blocked_missing_city)."""
     raw = norm(row.get("Ciudad"))
-    if not raw:
-        return None
-    if not is_numeric_city_value(raw):
+    if raw and not is_numeric_city_value(raw):
         return raw
-    city_id_map = city_id_map or {}
-    return city_id_map.get(normalize_id_value(raw))
+    if raw:
+        mapped = (city_id_map or {}).get(normalize_id_value(raw))
+        if mapped:
+            return mapped
+    return city_fallback
 
 
 def resolve_country(row, country_fallback):
@@ -440,7 +458,10 @@ def audit_customer_contacts(excel_path):
     return migrate_customer_contacts(excel_path, dry_run=True)
 
 
-def _dry_run_report(rows, by_access_id, by_tax_id, country_fallback, city_id_map, migrate_addresses=True, migrate_contacts=True):
+def _dry_run_report(
+    rows, by_access_id, by_tax_id, country_fallback, city_id_map,
+    migrate_addresses=True, migrate_contacts=True, city_fallback=None,
+):
     report = {
         "excel_rows": len(rows),
         "customers_matched_by_access_id": 0,
@@ -528,12 +549,12 @@ def _dry_run_report(rows, by_access_id, by_tax_id, country_fallback, city_id_map
                     report["addresses_duplicate_in_excel"] += 1
                 else:
                     claimed_addresses.add(claim_key)
-                    city = resolve_city(row, city_id_map)
                     country = resolve_country(row, country_fallback)
-                    if not city:
-                        report["addresses_blocked_missing_city"] += 1
-                    elif not country:
+                    city = resolve_city(row, city_id_map, city_fallback)
+                    if not country:
                         report["addresses_blocked_missing_country"] += 1
+                    elif not city:
+                        report["addresses_blocked_missing_city"] += 1
                     else:
                         report["addresses_would_create"] += 1
 
@@ -577,11 +598,28 @@ def _dry_run_report(rows, by_access_id, by_tax_id, country_fallback, city_id_map
 # ---------------------------------------------------------------------------
 
 
-def _create_address(customer, row, country_fallback, city_id_map):
-    city = resolve_city(row, city_id_map)
+def _create_address(customer, row, country_fallback, city_id_map, city_fallback=None):
+    """Devuelve (doc, outcome) con outcome en {"created",
+    "blocked_missing_city", "blocked_missing_country"}.
+
+    Address.city SIGUE siendo obligatorio nativamente (Meta sin tocar --
+    la relajación vía Property Setter que se probó en un intento anterior
+    de Fase 2B fue revertida por decisión explícita: no queremos city
+    vacío). Sin un nombre de ciudad resoluble (ver resolve_city() -- ni
+    mapping en city_id_map ni city_fallback explícito), el Address NO se
+    crea -- se cuenta como bloqueado, nunca se inventa un valor por
+    defecto propio de esta función.
+
+    country también sigue siendo obligatorio -- sin uno resoluble
+    (Excel.País vacío y sin country_fallback explícito), el Address
+    tampoco se crea."""
     country = resolve_country(row, country_fallback)
-    if not city or not country:
-        return None, "blocked_missing_city" if not city else "blocked_missing_country"
+    if not country:
+        return None, "blocked_missing_country"
+
+    city = resolve_city(row, city_id_map, city_fallback)
+    if not city:
+        return None, "blocked_missing_city"
 
     doc = frappe.new_doc("Address")
     doc.address_title = address_title_for(row, customer)
@@ -655,6 +693,7 @@ def _migrate_real(
     log,
     migrate_addresses=True,
     migrate_contacts=True,
+    city_fallback=None,
 ):
     from frappe.database import savepoint
 
@@ -702,7 +741,9 @@ def _migrate_real(
                 else:
                     with savepoint(catch=Exception):
                         try:
-                            doc, outcome = _create_address(customer, row, country_fallback, city_id_map)
+                            doc, outcome = _create_address(
+                                customer, row, country_fallback, city_id_map, city_fallback
+                            )
                             if outcome == "created":
                                 counters["addresses_created"] += 1
                                 address_cache.setdefault(customer.name, []).append(
@@ -787,6 +828,7 @@ def migrate_customer_contacts(
     dry_run=True,
     country_fallback=None,
     city_id_map=None,
+    city_fallback=None,
     migrate_addresses=True,
     migrate_contacts=True,
     commit_every=250,
@@ -809,11 +851,25 @@ def migrate_customer_contacts(
     completo (_create_address()/_maybe_set_primary_address()) nunca se
     alcanza; ningún Address se crea o modifica, ningún Dynamic Link de
     Address se crea, customer_primary_address nunca se toca, y
-    `country_fallback`/`city_id_map` no se leen en absoluto (no son
-    requeridos). Cuando migrate_addresses=True, `country_fallback`/
-    `city_id_map` deben pasarse explícitamente -- nunca se asumen; sin
-    ellos, cualquier fila con país vacío o ciudad no resoluble
-    simplemente no crea ese Address (contado, nunca inventado).
+    `country_fallback`/`city_id_map`/`city_fallback` no se leen en
+    absoluto (no son requeridos). Simétricamente, apagar
+    `migrate_contacts` es la misma garantía dura para Contact/Contact
+    Phone/Contact Email/Dynamic Link(Contact)/customer_primary_contact --
+    ninguno se toca.
+
+    Address.city/Address.country SIGUEN siendo obligatorios nativamente
+    (Meta sin tocar -- una relajación vía Property Setter se probó y fue
+    revertida por decisión explícita: no se quiere city vacío). Cuando
+    migrate_addresses=True, resolve_city()/resolve_country() deciden en
+    orden estricto, nunca fuzzy:
+        ciudad: nombre real en Excel.Ciudad > city_id_map (ID numérico
+                mapeado) > city_fallback explícito > bloqueado
+                (addresses_blocked_missing_city)
+        país:   Excel.País > country_fallback explícito > bloqueado
+                (addresses_blocked_missing_country)
+    Ninguno de los tres (`country_fallback`/`city_id_map`/
+    `city_fallback`) se asume nunca por este módulo -- deben pasarse
+    explícitamente.
 
     Nunca crea ni modifica un Customer -- todo Customer objetivo ya debe
     existir con access_id_cliente (Fase 1)."""
@@ -824,6 +880,7 @@ def migrate_customer_contacts(
         return _dry_run_report(
             rows, by_access_id, by_tax_id, country_fallback, city_id_map,
             migrate_addresses=migrate_addresses, migrate_contacts=migrate_contacts,
+            city_fallback=city_fallback,
         )
 
     def log(msg):
@@ -832,7 +889,7 @@ def migrate_customer_contacts(
     log(f"=== INICIO Fase 2 (Address/Contact) === filas={len(rows)} migrate_addresses={migrate_addresses} migrate_contacts={migrate_contacts}")
     counters, errors = _migrate_real(
         rows, by_access_id, by_tax_id, country_fallback, city_id_map, commit_every, progress_every, log,
-        migrate_addresses=migrate_addresses, migrate_contacts=migrate_contacts,
+        migrate_addresses=migrate_addresses, migrate_contacts=migrate_contacts, city_fallback=city_fallback,
     )
     log(f"=== Fase 2 terminada === {counters}")
     return {"counters": counters, "errors": errors}

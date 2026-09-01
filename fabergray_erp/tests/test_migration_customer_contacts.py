@@ -172,6 +172,9 @@ class TestMigrationCustomerContacts(IntegrationTestCase):
         self.assertIsNone(existing_for_b)  # cust_a's address must never satisfy cust_b's lookup
 
     def test_numeric_city_value_is_never_invented(self):
+        """Un ID numérico de Access ('49') nunca se guarda como si fuera
+        un nombre de ciudad real -- sin city_id_map ni city_fallback, el
+        Address queda bloqueado (nunca "49" en Address.city)."""
         cust = self._customer("FG256 Ciudad Numerica", access_id="9205")
         row = _row(IdCliente=9205, Dirección="Calle Falsa 123", Ciudad="49", País=COUNTRY)
 
@@ -186,6 +189,14 @@ class TestMigrationCustomerContacts(IntegrationTestCase):
         # An approved equivalence table resolves it correctly -- still never guessed on its own.
         resolved = cc.resolve_city(row, city_id_map={"49": "Bogotá"})
         self.assertEqual(resolved, "Bogotá")
+
+        row_mapped = _row(IdCliente=9205, Dirección="Otra direccion", Ciudad="49", País=COUNTRY)
+        doc_mapped, outcome_mapped = cc._create_address(
+            cust, row_mapped, country_fallback=None, city_id_map={"49": "Bogotá"}
+        )
+        self.world.track_existing("Address", doc_mapped.name)
+        self.assertEqual(outcome_mapped, "created")
+        self.assertEqual(doc_mapped.city, "Bogotá")
 
     def test_country_never_invented_without_explicit_fallback(self):
         cust = self._customer("FG256 Pais Vacio", access_id="9206")
@@ -587,3 +598,175 @@ class TestMigrationCustomerContacts(IntegrationTestCase):
         self.assertEqual(counters["invalid_phones_skipped"], 1)
         self.assertIsNone(cc.existing_contact_name_for_customer(cust.name))
         self.assertIsNone(frappe.db.get_value("Customer", cust.name, "customer_primary_contact"))
+
+    # -- Fase 2B (corregida): Address.city/country siguen requeridos ------------
+    # nativamente; sin city_id_map, se usa city_fallback -- nunca vacío, nunca
+    # el ID numérico crudo.
+
+    def test_address_city_reqd_was_never_left_relaxed(self):
+        """Chequeo de infraestructura inverso al de un intento anterior:
+        Address.city debe seguir siendo obligatorio a nivel de Meta --
+        un intento previo de relajarlo vía Property Setter fue revertido
+        por decisión explícita (no se quiere city vacío)."""
+        frappe.clear_cache(doctype="Address")
+        meta = frappe.get_meta("Address")
+        self.assertEqual(meta.get_field("city").reqd, 1)
+        self.assertEqual(meta.get_field("country").reqd, 1)
+
+    def test_numeric_city_without_mapping_blocked_without_fallback(self):
+        cust = self._customer("FG256 CiudadNumericaSinFallback", access_id="9901")
+        row = _row(IdCliente=9901, Dirección="Calle Sin Fallback 1", Ciudad="73", País=COUNTRY)
+
+        doc, outcome = cc._create_address(
+            cust, row, country_fallback=None, city_id_map=None, city_fallback=None
+        )
+        self.assertIsNone(doc)
+        self.assertEqual(outcome, "blocked_missing_city")
+        self.assertEqual(frappe.get_all("Address", filters={"city": "73"}), [])
+
+    def test_numeric_city_without_mapping_uses_city_fallback(self):
+        """El caso real aprobado: sin city_id_map, con city_fallback --
+        Address.city = city_fallback (nunca el ID numérico crudo)."""
+        cust = self._customer("FG256 CiudadConFallback", access_id="9902")
+        row = _row(IdCliente=9902, Dirección="Calle Con Fallback 1", Ciudad="49", País=COUNTRY)
+
+        doc, outcome = cc._create_address(
+            cust, row, country_fallback=None, city_id_map=None, city_fallback="Bucaramanga"
+        )
+        self.assertIsNotNone(doc)
+        self.world.track_existing("Address", doc.name)
+        self.assertEqual(outcome, "created")
+        self.assertEqual(doc.city, "Bucaramanga")
+        self.assertNotEqual(doc.city, "49")
+
+    def test_city_id_map_wins_over_city_fallback_when_both_given(self):
+        cust = self._customer("FG256 MapGanaSobreFallback", access_id="9903")
+        row = _row(IdCliente=9903, Dirección="Calle Map Gana 1", Ciudad="49", País=COUNTRY)
+
+        doc, outcome = cc._create_address(
+            cust, row, country_fallback=None, city_id_map={"49": "Bogotá"}, city_fallback="Bucaramanga"
+        )
+        self.assertIsNotNone(doc)
+        self.world.track_existing("Address", doc.name)
+        self.assertEqual(outcome, "created")
+        self.assertEqual(doc.city, "Bogotá")  # el mapping real gana, no el fallback genérico
+
+    def test_empty_city_without_fallback_still_blocks(self):
+        cust = self._customer("FG256 CiudadVaciaSinFallback", access_id="9904")
+        row = _row(IdCliente=9904, Dirección="Calle Vacia 1", Ciudad=None, País=COUNTRY)
+
+        doc, outcome = cc._create_address(
+            cust, row, country_fallback=None, city_id_map=None, city_fallback=None
+        )
+        self.assertIsNone(doc)
+        self.assertEqual(outcome, "blocked_missing_city")
+
+    def test_dry_run_reports_addresses_blocked_missing_city_without_fallback(self):
+        cust = self._customer("FG256 DryRunBloqueado", access_id="9905")
+        row = _row(IdCliente=9905, Dirección="Calle Dry Run 1", Ciudad="73", País=COUNTRY)
+
+        report = cc._dry_run_report(
+            [row], *cc.load_customer_index(), country_fallback=None, city_id_map=None, city_fallback=None
+        )
+        self.assertEqual(report["addresses_would_create"], 0)
+        self.assertEqual(report["addresses_blocked_missing_city"], 1)
+
+    def test_dry_run_reports_addresses_would_create_with_city_fallback(self):
+        cust = self._customer("FG256 DryRunConFallback", access_id="9906")
+        row = _row(IdCliente=9906, Dirección="Calle Dry Run 2", Ciudad="73", País=COUNTRY)
+
+        report = cc._dry_run_report(
+            [row], *cc.load_customer_index(),
+            country_fallback=None, city_id_map=None, city_fallback="Bucaramanga",
+        )
+        self.assertEqual(report["addresses_would_create"], 1)
+        self.assertEqual(report["addresses_blocked_missing_city"], 0)
+
+    def test_migrate_addresses_true_uses_city_and_country_fallback_via_real_run(self):
+        """Prueba de extremo a extremo con _migrate_real() (no solo
+        _create_address() directamente), reflejando exactamente lo que la
+        migración real aprobada ejecutaría: city_id_map=None,
+        city_fallback="Bucaramanga", country_fallback="Colombia"."""
+        cust = self._customer("FG256 RealRunConFallback", access_id="9907")
+        row = _row(
+            IdCliente=9907,
+            **{"Nombre contacto": "Diana"},
+            Dirección="Calle Real Run 1",
+            Ciudad="8",
+            País=None,
+            Telefono1="7999999",
+        )
+
+        by_access_id, by_tax_id = cc.load_customer_index()
+        counters, errors = cc._migrate_real(
+            [row], by_access_id, by_tax_id,
+            country_fallback="Colombia", city_id_map=None,
+            commit_every=10, progress_every=10, log=lambda msg: None,
+            migrate_addresses=True, migrate_contacts=True, city_fallback="Bucaramanga",
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(counters["addresses_created"], 1)
+        self.assertEqual(counters["addresses_blocked_missing_city"], 0)
+        self.assertEqual(counters["addresses_blocked_missing_country"], 0)
+        self.assertEqual(counters["contacts_created"], 1)
+
+        addresses = cc.existing_addresses_for_customer(cust.name)
+        self.assertEqual(len(addresses), 1)
+        self.world.track_existing("Address", addresses[0].name)
+        address_doc = frappe.get_doc("Address", addresses[0].name)
+        self.assertEqual(address_doc.city, "Bucaramanga")
+        self.assertEqual(address_doc.country, "Colombia")
+        self.assertEqual(
+            frappe.db.get_value("Customer", cust.name, "customer_primary_address"), addresses[0].name
+        )
+
+        contact_name = cc.existing_contact_name_for_customer(cust.name)
+        self.world.track_existing("Contact", contact_name)
+
+    def test_migrate_addresses_true_contacts_false_never_touches_contact(self):
+        """Sección 6: aislamiento total -- migrate_addresses=True,
+        migrate_contacts=False. Los 4057 Contacts ya migrados en Fase 2A
+        no deben tocarse; ninguna fila crea Contact/Contact Phone/Contact
+        Email/Dynamic Link(Contact)/customer_primary_contact nuevos."""
+        cust = self._customer("FG256 SoloDireccion", access_id="9908")
+        row = _row(
+            IdCliente=9908,
+            **{"Nombre contacto": "Deberia Ignorarse"},
+            Dirección="Calle Solo Direccion 1",
+            Ciudad="8",
+            País=None,
+            Telefono1="7888888",
+            **{"Dirección correo": "deberia@ignorarse.com"},
+        )
+
+        contacts_before = frappe.db.count("Contact")
+        phones_before = frappe.db.count("Contact Phone")
+        emails_before = frappe.db.count("Contact Email")
+        contact_links_before = frappe.db.count(
+            "Dynamic Link", {"parenttype": "Contact", "link_doctype": "Customer"}
+        )
+
+        by_access_id, by_tax_id = cc.load_customer_index()
+        counters, errors = cc._migrate_real(
+            [row], by_access_id, by_tax_id,
+            country_fallback="Colombia", city_id_map=None,
+            commit_every=10, progress_every=10, log=lambda msg: None,
+            migrate_addresses=True, migrate_contacts=False, city_fallback="Bucaramanga",
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(counters["addresses_created"], 1)
+        self.assertEqual(counters["contacts_created"], 0)
+
+        addresses = cc.existing_addresses_for_customer(cust.name)
+        self.assertEqual(len(addresses), 1)
+        self.world.track_existing("Address", addresses[0].name)
+
+        self.assertIsNone(cc.existing_contact_name_for_customer(cust.name))
+        self.assertIsNone(frappe.db.get_value("Customer", cust.name, "customer_primary_contact"))
+        self.assertEqual(frappe.db.count("Contact"), contacts_before)
+        self.assertEqual(frappe.db.count("Contact Phone"), phones_before)
+        self.assertEqual(frappe.db.count("Contact Email"), emails_before)
+        self.assertEqual(
+            frappe.db.count("Dynamic Link", {"parenttype": "Contact", "link_doctype": "Customer"}),
+            contact_links_before,
+        )
