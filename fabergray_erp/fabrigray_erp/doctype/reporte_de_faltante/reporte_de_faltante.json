@@ -81,11 +81,13 @@
    "options": "Pick List"
   },
   {
+   "description": "Commit 25.5 -- unique=1 (a real MariaDB unique index, NULLs excluded from the constraint by native MariaDB semantics, confirmed live): at most one Reporte de Faltante may ever exist for the same Pick List Item row, at the database level, not just app-side. This is the operational identity api.bodega.report_shortage() dedupes on -- the single most specific, already-stable key this app has for one physical picking attempt (see report_shortage()'s own docstring for the full audit). A Fulfillment-Engine-detected report (never sets this field) is entirely unaffected -- multiple NULLs never collide under a MariaDB unique index.",
    "fieldname": "pick_list_item",
    "fieldtype": "Data",
    "hidden": 1,
    "label": "Fila de Pick List (ref)",
-   "read_only": 1
+   "read_only": 1,
+   "unique": 1
   },
   {
    "fieldname": "section_break_qty",

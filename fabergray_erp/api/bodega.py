@@ -481,6 +481,32 @@ def set_picked_qty(name, row_name, qty):
 	return {"row_name": row_name, "picked_qty": updated_row.picked_qty}
 
 
+def _existing_shortage_report_for_row(row_name):
+	"""The one Reporte de Faltante already filed for this exact Pick List
+	Item row, if any -- ANY status (Abierto/En Proceso/Resuelto), not just
+	open ones. Commit 25.5's own audit (see report_shortage()'s docstring)
+	found every existing consumer of "has this row been reported"
+	(_get_shortage_report_rows(), used by both get_pick_list()'s
+	has_shortage_report and finish_picking()'s undisclosed-shortfall
+	check) already treats a Resuelto report as still counting -- there is
+	no code path anywhere in this app that expects or needs a second
+	report on the same row after the first resolves. So this check is
+	status-blind on purpose, matching that already-established model, not
+	a new, narrower rule invented for this commit.
+
+	frappe.get_list (not get_all): report_shortage()'s own caller already
+	has Reporte de Faltante read (Bodega's Custom DocPerm grants
+	create/read/write), so this stays permission-scoped like every other
+	read in this module."""
+	names = frappe.get_list(
+		"Reporte de Faltante",
+		filters={"pick_list_item": row_name},
+		fields=["name", "qty_solicitada", "qty_disponible", "qty_faltante", "status"],
+		limit=1,
+	)
+	return names[0] if names else None
+
+
 @frappe.whitelist()
 def report_shortage(pick_list, row_name, qty_disponible, shortage_reason, resolution_note=None):
 	"""Report a physical shortage found while picking (detected_by="Bodega").
@@ -490,6 +516,44 @@ def report_shortage(pick_list, row_name, qty_disponible, shortage_reason, resolu
 	shortage_reason's "required" rule lives in the doctype itself (Commit 2),
 	not duplicated here. Only ever creates one Reporte de Faltante; never
 	touches Stock Ledger, Bin or any inventory record.
+
+	Commit 25.5 -- idempotent by construction, not just by convention: the
+	operational identity this dedupes on is `pick_list_item` (this exact
+	Pick List Item row's own `name`) -- the most specific, already-stable
+	key this app has for one physical picking attempt (Pick List rows
+	never get silently rebuilt out from under a caller once
+	`pick_manually=1` is set, see `_lock_manual_picking()`'s own
+	docstring). Deliberately NOT item_code+warehouse (would block
+	legitimate, unrelated shortages for the same product on a different
+	order/Pick List) and NOT sales_order_item alone (a re-picked/amended
+	order gets its own new Pick List Item row and its own new report,
+	correctly, by design -- see test_sales_order_modification.py).
+
+	Two layers, both required, neither one alone sufficient:
+	1. A cheap pre-check (`_existing_shortage_report_for_row()`) so the
+	   overwhelmingly common case -- a UI double-click, or a human simply
+	   repeating the action -- returns the existing report immediately,
+	   without ever attempting a second insert or touching the DB's own
+	   constraint machinery.
+	2. `pick_list_item` also carries a real MariaDB UNIQUE INDEX
+	   (reporte_de_faltante.json, `"unique": 1`, confirmed live to exclude
+	   NULL from the constraint -- a Fulfillment-Engine report, which
+	   never sets this field, is entirely unaffected) -- the actual
+	   atomicity guarantee for two genuinely concurrent requests that both
+	   pass the pre-check before either commits. The second `insert()` to
+	   reach the database raises `frappe.UniqueValidationError`; caught
+	   below, re-reads whichever report won the race, and returns it the
+	   exact same way a sequential duplicate would have been returned.
+	   No `SELECT ... FOR UPDATE` needed -- the constraint itself is the
+	   lock, scoped no more broadly than the one row it actually protects.
+
+	A second call is never a silent no-op: the response always carries
+	`already_exists` so the caller (bodega.js) can tell a genuinely new
+	report apart from a repeat that returned an existing one -- including
+	when the repeat's own `qty_disponible` differs from the original.
+	Never overwrites `qty_solicitada`/`qty_disponible`/`qty_faltante` on
+	an existing report to match a later, different call's input -- the
+	existing report's own numbers are always what comes back.
 	"""
 	_require_login()
 
@@ -505,15 +569,44 @@ def report_shortage(pick_list, row_name, qty_disponible, shortage_reason, resolu
 	if qty_disponible < 0:
 		frappe.throw(_("La cantidad disponible no puede ser negativa."))
 
-	report_name = _create_shortage_report(
-		pick_list_doc=pl,
-		row=row,
-		qty_disponible=qty_disponible,
-		shortage_reason=shortage_reason,
-		detected_by="Bodega",
-		resolution_note=resolution_note,
-	)
-	return {"name": report_name}
+	existing = _existing_shortage_report_for_row(row_name)
+	if existing:
+		return {
+			"name": existing.name,
+			"already_exists": True,
+			"qty_faltante": existing.qty_faltante,
+			"status": existing.status,
+		}
+
+	try:
+		report_name = _create_shortage_report(
+			pick_list_doc=pl,
+			row=row,
+			qty_disponible=qty_disponible,
+			shortage_reason=shortage_reason,
+			detected_by="Bodega",
+			resolution_note=resolution_note,
+		)
+	except frappe.UniqueValidationError:
+		# Genuine race: another request for this exact row won the insert
+		# between our own pre-check above and this one. Not an error from
+		# the caller's point of view -- resolve it exactly like a
+		# sequential repeat would have been resolved.
+		existing = _existing_shortage_report_for_row(row_name)
+		return {
+			"name": existing.name,
+			"already_exists": True,
+			"qty_faltante": existing.qty_faltante,
+			"status": existing.status,
+		}
+
+	report = frappe.get_doc("Reporte de Faltante", report_name)
+	return {
+		"name": report_name,
+		"already_exists": False,
+		"qty_faltante": report.qty_faltante,
+		"status": report.status,
+	}
 
 
 @frappe.whitelist()

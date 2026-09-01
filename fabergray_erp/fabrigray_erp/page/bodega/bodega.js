@@ -1637,6 +1637,12 @@ fabergray_erp.Bodega = class Bodega {
 				],
 				primary_action_label: __("REPORTAR FALTANTE"),
 				primary_action: (values) => {
+					// Commit 25.5: disabled synchronously, before the request even
+					// starts, so a fast double-click/double-tap on this same button
+					// can never fire report_shortage() twice from the UI side --
+					// the real guarantee is still the backend's own idempotency
+					// (report_shortage() itself, api/bodega.py), this is only the
+					// first, cheapest line of defense.
 					dialog.disable_primary_action();
 					this.call("report_shortage", {
 						pick_list: this.state.pick_list,
@@ -1645,9 +1651,20 @@ fabergray_erp.Bodega = class Bodega {
 						shortage_reason: values.shortage_reason,
 						resolution_note: values.resolution_note,
 					})
-						.then(() => {
+						.then((result) => {
 							dialog.hide();
-							frappe.show_alert({ message: "✓ " + __("Faltante reportado"), indicator: "green" });
+							if (result && result.already_exists) {
+								frappe.show_alert({
+									message:
+										"ℹ " +
+										__("Ya existía un reporte de faltante para esta línea (faltante: {0}).", [
+											format_qty(result.qty_faltante),
+										]),
+									indicator: "orange",
+								});
+							} else {
+								frappe.show_alert({ message: "✓ " + __("Faltante reportado"), indicator: "green" });
+							}
 							this.last_changed_row = row_name;
 							this.load_detail(this.state.pick_list);
 						})
