@@ -61,6 +61,10 @@ DEFAULT_DELIVERY_LEAD_DAYS = 7
 _ALLOWED_ITEM_FIELDS = {"item_code", "qty"}
 
 
+class SalesOrderAlreadyCancelledError(frappe.ValidationError):
+    pass
+
+
 def _validate_and_build_item_rows(items, company, delivery_date):
     """The one place a Sales Order Item row list is built from
     client-supplied data -- shared by `create_and_submit_sales_order()`,
@@ -526,9 +530,144 @@ def create_and_submit_sales_order(customer, items, observations=None):
         so.fg_observations = observations
 
     so.insert()
-    so.submit()  # triggers on_submit -> process_sales_order() -- never called directly here
+    so.submit()  # triggers on_submit -> process_sales_order_for_confirmation() (Commit 25.4)
 
     return {"name": so.name}
+
+
+@frappe.whitelist()
+def create_draft_sales_order(customer, items, observations=None):
+    """Commit 25.4 -- the new "Nuevo Pedido" entry point: builds the exact
+    same Sales Order `create_and_submit_sales_order()` above builds
+    (same allowlist, same `_validate_and_build_item_rows()`, same
+    server-side warehouse resolution, Commit 25.2) but deliberately
+    never calls `.submit()` -- the order is left in Borrador
+    (`docstatus=0`), editable via `get_editable_order()`/`update_draft_
+    sales_order()` (already existing, Commit 18.5, previously only
+    reachable for a Draft created some other way -- now the real,
+    ordinary path every new order takes) until the Vendedora explicitly
+    calls `confirm_order()` below.
+
+    `create_and_submit_sales_order()` itself is untouched, still valid,
+    still callable -- this is a new, separate entry point, not a
+    behavior change to that one (kept for any caller that genuinely
+    wants create+submit in one shot).
+
+    Returns `{"name": "PEDIDO-...", "docstatus": 0}` -- no economic
+    field, matching every other write in this module.
+    """
+    _require_login()
+    frappe.has_permission("Sales Order", "create", throw=True)
+
+    company = frappe.defaults.get_global_default("company")
+    delivery_date = add_days(nowdate(), DEFAULT_DELIVERY_LEAD_DAYS)
+    so_items = _validate_and_build_item_rows(items, company, delivery_date)
+
+    so = frappe.get_doc(
+        {
+            "doctype": "Sales Order",
+            "customer": customer,
+            "company": company,
+            "transaction_date": nowdate(),
+            "delivery_date": delivery_date,
+            "items": so_items,
+        }
+    )
+    if observations:
+        so.fg_observations = observations
+
+    so.insert()  # stays Borrador -- docstatus=0, never submitted here
+
+    return {"name": so.name, "docstatus": so.docstatus}
+
+
+@frappe.whitelist()
+def confirm_order(name):
+    """Commit 25.4 -- "Confirmar pedido": the ONE transition from
+    Borrador (`docstatus=0`) to Confirmado (`docstatus=1`) a Vendedora
+    ever performs herself. `check_permission("submit")` is where access
+    is actually enforced -- Vendedora already holds `submit=1` on her
+    Sales Order Custom DocPerm (Commit 18.1), System Manager holds full
+    access (Commit 25.1's own System Manager grant) -- no new
+    permission of any kind was added for this. `assert_same_company()`
+    (Commit 25.1) keeps it scoped to this Company, same as every other
+    single-document function in this module.
+
+    Idempotent by construction, per the approved contract:
+    - `docstatus == 0` (Borrador): validate, then `.submit()` for real
+      -- `docstatus` goes 0 -> 1. Validates customer/at-least-one-line/
+      qty>0 explicitly here (defensive: every write path that can
+      produce or edit a Draft --
+      `create_draft_sales_order()`/`update_draft_sales_order()` --
+      already enforces the same allowlist/qty>0 rule, so this should
+      never actually fire in practice, but "revisión final" before an
+      irreversible transition is re-derived here rather than trusted
+      stale, the same standing convention `plan_route()`/
+      `modify_submitted_sales_order()` already establish elsewhere in
+      this app). Deliberately NEVER checks stock/availability -- see
+      this commit's own brief, "NO validar existencia/disponibilidad
+      de stock" -- Sales Order represents commercial demand, not a
+      physical stock movement.
+    - `docstatus == 1` (already Confirmado): returns success
+      immediately, `status: "already_confirmed"` -- never calls
+      `.submit()` again, so a second click (or a genuine network retry)
+      can never trigger `on_submit` twice, which is what actually
+      guarantees no duplicate Pick List/Reporte de Faltante/any other
+      derived document -- `.submit()` itself is the one and only thing
+      that can create one, and it is never reached on this branch.
+    - `docstatus == 2` (Cancelado): rejected outright with a specific,
+      functional message -- `SalesOrderAlreadyCancelledError`, never a
+      generic native error.
+
+    Concurrency note (not solved by a custom lock, deliberately, same
+    reasoning this app's Fulfillment Engine already documents for its
+    own residual races): two genuinely concurrent `confirm_order()`
+    calls for the same still-Borrador order could both read
+    `docstatus == 0` before either commits, but Frappe's own
+    `Document.submit()` already carries its native optimistic-
+    concurrency check (`modified` timestamp comparison) -- the second
+    call to actually reach `.submit()` fails with Frappe's own
+    `TimestampMismatchError` rather than silently succeeding a second
+    time, so no duplicate submit (and therefore no duplicate derived
+    document) can occur either way; it simply fails loudly instead of
+    responding "already_confirmed" for that specific race window.
+
+    Never sets `warehouse`, resolves pricing, or touches any economic
+    field -- exactly like `create_and_submit_sales_order()`, ERPNext's
+    own native pipeline does all of that during `.submit()`. Triggers
+    `on_submit` -> `process_sales_order_for_confirmation()` (Commit
+    25.4) -- the Pick List Bodega needs, never a Reporte de Faltante or
+    Material Request created automatically; see that function's own
+    docstring for the full reasoning.
+
+    Returns `{"name": "PEDIDO-...", "docstatus": 0 or 1, "status":
+    "confirmed" | "already_confirmed"}` -- no economic field.
+    """
+    _require_login()
+
+    so = frappe.get_doc("Sales Order", name)
+    so.check_permission("submit")
+    assert_same_company(so)
+
+    if so.docstatus == 2:
+        frappe.throw(
+            _("Este pedido está cancelado y no puede confirmarse."), SalesOrderAlreadyCancelledError
+        )
+
+    if so.docstatus == 1:
+        return {"name": so.name, "docstatus": 1, "status": "already_confirmed"}
+
+    if not so.customer:
+        frappe.throw(_("El pedido debe tener un cliente."))
+    if not so.items:
+        frappe.throw(_("El pedido debe tener al menos un producto."))
+    for row in so.items:
+        if flt(row.qty) <= 0:
+            frappe.throw(_("La cantidad debe ser mayor a cero para {0}.").format(row.item_code))
+
+    so.submit()  # triggers on_submit -> process_sales_order_for_confirmation() (Commit 25.4)
+
+    return {"name": so.name, "docstatus": 1, "status": "confirmed"}
 
 
 @frappe.whitelist()
@@ -750,8 +889,9 @@ def modify_submitted_sales_order(name, customer, items, observations=None):
     the new customer/items/observations are applied via the exact same
     `_validate_and_build_item_rows()` allowlist every other write in this
     module uses -> `.insert()` + `.submit()` (triggers `on_submit` ->
-    `process_sales_order()` fresh, exactly like `create_and_submit_sales_
-    order()` -- never called directly here).
+    `process_sales_order_for_confirmation()` fresh, Commit 25.4, exactly
+    like `create_and_submit_sales_order()`/`confirm_order()` -- never
+    called directly here).
 
     `check_permission("cancel")` + `assert_same_company()` are where
     access is enforced -- the exact same grant `cancel_sales_order()`
@@ -818,6 +958,6 @@ def modify_submitted_sales_order(name, customer, items, observations=None):
         amended.fg_observations = observations
 
     amended.insert()
-    amended.submit()  # triggers on_submit -> process_sales_order() -- never called directly here
+    amended.submit()  # triggers on_submit -> process_sales_order_for_confirmation() (Commit 25.4)
 
     return {"name": amended.name, "commercial_name": commercial_name}

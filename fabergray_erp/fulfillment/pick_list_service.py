@@ -348,3 +348,117 @@ def create_pick_list_for_available_stock(sales_order):
         return None
 
     return pick_list
+
+
+def create_pick_list_for_full_demand(sales_order):
+    """Commit 25.4 -- "Ventas no decide faltantes. El stock teórico no
+    decide el faltante definitivo." A SEPARATE function from
+    `create_pick_list_for_available_stock()` above, on purpose -- that
+    one is UNCHANGED, still fully valid, still fully tested, still the
+    right tool for whoever explicitly wants "only what is theoretically
+    available" semantics (still used by `fulfillment.engine.
+    process_sales_order()`, which this commit stops wiring to `Sales
+    Order.on_submit()` but does not delete or modify). This function is
+    the new one wired to that hook instead (via `fulfillment.engine.
+    process_sales_order_for_confirmation()`): Bodega must receive the
+    Sales Order's FULL requested demand, one Pick List Item row per
+    line, regardless of `Bin.actual_qty` -- a genuinely zero-stock line
+    must never be silently absent from Bodega's own view. Only a line's
+    own already-claimed-by-THIS-Sales-Order's-own-prior-open-Pick-List
+    quantity is subtracted (the same idempotency rule Commit 13 already
+    established, reused verbatim via `_qty_already_claimed_by_open_
+    pick_lists_for_so_item()` above) -- `qty_available_for_pick` is
+    never consulted here at all.
+
+    Reuses `_create_pick_list_ignoring_permissions()` (Commit 18.1's own
+    ERPNext-mapping adapter, unchanged) for the native, non-negotiable
+    part: whatever real stock genuinely exists still gets ERPNext's own
+    proper batch/serial/location suggestion, not reinvented here. Then
+    tops up any line the native mapper's own `set_item_locations()`
+    dropped or under-filled with one plain row of its own -- confirmed
+    live, during this commit's own audit, reading
+    `erpnext/stock/doctype/pick_list/pick_list.py` directly:
+    `get_items_with_location_and_quantity()`'s own `while remaining_
+    stock_qty > 0 and available_locations:` loop never executes even
+    once when `available_locations` is empty (a genuinely zero-stock
+    item), so that function returns `[]` and the row is dropped from
+    `self.locations` entirely during `set_item_locations()`'s own
+    reset-and-rebuild -- this is the real "native Pick List limitation"
+    this commit's own brief asked to identify, not a permission or
+    validation error of any kind.
+
+    `pick_list.pick_manually = 1` is set before the very first
+    `.insert()` specifically so the native `before_save()` -> `self.
+    set_item_locations()` call (which unconditionally re-derives every
+    row whose `picked_qty` is still 0 -- confirmed live in the same
+    file) never wipes the manually-added top-up rows back out the
+    moment the document is actually saved. Same guard `api.bodega.
+    _lock_manual_picking()` already establishes for a later write path
+    in this app -- reused here, not invented. Because of this, the
+    concurrency self-correction `create_pick_list_for_available_stock()`
+    relies on (re-checking `pick_list.get("locations")` after insert,
+    since a concurrent claim could rebuild it away) does not apply here
+    -- there is no native rebuild left to race against once `pick_
+    manually=1` is set, by design.
+
+    Never returns None just because theoretical stock is zero
+    everywhere -- only when every line's own `qty_still_needed` is
+    already 0 (fully delivered, or fully claimed by this exact Sales
+    Order's own prior open Pick List already), matching Commit 13's own
+    idempotency guarantee for the genuinely-nothing-left case.
+
+    Creates no Reporte de Faltante, no Material Request, and changes no
+    Sales Order field -- exactly like `create_pick_list_for_available_
+    stock()`, this only ever inserts one Pick List (or nothing)."""
+    so_name = sales_order.name if hasattr(sales_order, "doctype") else sales_order
+
+    analysis = analyze_sales_order(sales_order)
+
+    needed_by_so_item = {}
+    for line in analysis["lines"]:
+        already_claimed = _qty_already_claimed_by_open_pick_lists_for_so_item(line["sales_order_item"])
+        qty_still_needed = max(flt(line["qty_remaining"]) - already_claimed, 0.0)
+        needed_by_so_item[line["sales_order_item"]] = (qty_still_needed, line)
+
+    if not any(qty > 0 for qty, _line in needed_by_so_item.values()):
+        return None
+
+    pick_list = _create_pick_list_ignoring_permissions(so_name)
+    pick_list.pick_manually = 1  # stop before_save()'s native rebuild from dropping the top-up rows below
+
+    for sales_order_item, (qty_needed, line) in needed_by_so_item.items():
+        if qty_needed <= 0:
+            continue
+        existing = sum(
+            flt(row.stock_qty) for row in pick_list.get("locations") if row.sales_order_item == sales_order_item
+        )
+        shortfall = qty_needed - existing
+        if shortfall <= 0:
+            continue
+        stock_uom = frappe.get_cached_value("Item", line["item_code"], "stock_uom")
+        pick_list.append(
+            "locations",
+            {
+                "item_code": line["item_code"],
+                "warehouse": line["warehouse"],
+                "sales_order": so_name,
+                "sales_order_item": sales_order_item,
+                "qty": shortfall,
+                "stock_qty": shortfall,
+                "conversion_factor": 1,
+                "uom": stock_uom,
+                "picked_qty": 0,
+            },
+        )
+
+    if not pick_list.get("locations"):
+        return None
+
+    # Same ignore_permissions=True reasoning as create_pick_list_for_
+    # available_stock() above: this runs inside whatever session actually
+    # submitted the Sales Order (a Vendedora, granted zero Pick List
+    # permission of her own by design), as a consequence of her own
+    # already-authorized submit -- frappe.session.user is never touched.
+    pick_list.insert(ignore_permissions=True)
+
+    return pick_list

@@ -57,8 +57,8 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, nowdate
 
 from fabergray_erp.api import bodega as bodega_api
-from fabergray_erp.api import jefe_bodega as jefe_bodega_api
 from fabergray_erp.api import ventas as ventas_api
+from fabergray_erp.api.bodega import _insert_shortage_report
 from fabergray_erp.fulfillment import cancellation_service, pick_list_service, shortage_service
 from fabergray_erp.tests import fixtures as fx
 
@@ -427,19 +427,20 @@ class TestVendedoraPermissions(IntegrationTestCase):
 		- Vendedora submits her own Sales Order (create+submit succeed
 		  under her own, permission-restricted session -- no PermissionError,
 		  no frappe.set_user anywhere);
-		- the Fulfillment Engine creates a Pick List (for the available
-		  portion) and a Reporte de Faltante (for the shortfall) correctly
-		  -- real quantities, not just "no exception";
+		- the Fulfillment Engine creates a Pick List for the FULL demand
+		  (Commit 25.4 -- "Ventas no decide faltantes": no automatic
+		  Reporte de Faltante, regardless of real stock) -- real
+		  quantities, not just "no exception";
 		- Sales Order.owner == the real Vendedora (session was never
-		  swapped, so is the Pick List's/report's owner);
+		  swapped, so is the Pick List's owner);
 		- she can still read her own Sales Order;
 		- a different Vendedora CAN now read it too (Commit 25.1's own
 		  shared visibility -- was the opposite pre-25.1);
 		- the Pick List appears correctly in get_queue() for Bodega;
-		- the Reporte de Faltante appears correctly for Jefe de Bodega via
-		  get_open_shortage_reports();
-		- she personally still cannot read either the Pick List or the
-		  Reporte de Faltante the Engine created on her own order's behalf.
+		- she personally still cannot read either the Pick List or a
+		  Reporte de Faltante built directly (Commit 25.4: no longer the
+		  Engine's own, but the elevation/visibility boundary this test
+		  exists for is unrelated to who created the report).
 		"""
 		wh = self.world.warehouse("FG18 E2E")
 		item = self.world.item("FG18-E2E-ITEM", default_material_request_type="Purchase")
@@ -448,7 +449,6 @@ class TestVendedoraPermissions(IntegrationTestCase):
 
 		bodega_user = self.world.user("fg18-e2e-bodega@example.com", ["Bodega"])
 		self.world.warehouse_user_permission(bodega_user, wh.name)
-		jefe_user = self.world.user("fg18-e2e-jefe@example.com", ["Jefe de Bodega"])
 
 		with fx.as_user(self.vendedora_a):
 			so = self._raw_sales_order(customer.name, item.name, wh.name, qty=8)
@@ -474,32 +474,39 @@ class TestVendedoraPermissions(IntegrationTestCase):
 		)
 		self.assertEqual(len(pick_lists), 1)
 		pl = frappe.get_doc("Pick List", pick_lists[0])
-		self.assertEqual(pl.get("locations")[0].stock_qty, 3.0)
+		self.assertEqual(sum(row.stock_qty for row in pl.get("locations")), 8.0)  # full demand, not capped at 3
 		self.assertEqual(pl.owner, self.vendedora_a)  # created under her own session
 
-		reports = frappe.get_all("Reporte de Faltante", filters={"sales_order": so.name}, pluck="name")
-		self.assertEqual(len(reports), 1)
-		report = frappe.get_doc("Reporte de Faltante", reports[0])
-		self.assertEqual(report.qty_faltante, 5.0)
-		self.assertEqual(report.detected_by, "Fulfillment Engine")
-		self.assertEqual(report.shortage_reason, "Compra pendiente")
-		self.assertEqual(report.owner, self.vendedora_a)
+		self.assertEqual(frappe.db.count("Reporte de Faltante", {"sales_order": so.name}), 0)  # Commit 25.4
 
 		with fx.as_user(bodega_user):
 			queue = bodega_api.get_queue()
 		self.assertIn(pl.name, [p["name"] for p in queue["pendientes"]])
 
-		with fx.as_user(jefe_user):
-			open_reports = jefe_bodega_api.get_open_shortage_reports()
-		self.assertIn(report.name, [r["name"] for r in open_reports])
+		# Commit 25.4: her submit itself no longer creates any Reporte de
+		# Faltante -- build one directly (e.g. as Bodega would while
+		# picking, or Jefe reprocessing) purely to prove the permission
+		# boundary below is unaffected by who created it.
+		report_name = _insert_shortage_report(
+			item_code=item.name,
+			warehouse=wh.name,
+			sales_order=so.name,
+			sales_order_item=so.items[0].name,
+			qty_solicitada=8,
+			qty_disponible=3,
+			detected_by="Fulfillment Engine",
+			shortage_reason="Compra pendiente",
+			via_fulfillment_engine=True,
+		)
+		self.world.track_existing("Reporte de Faltante", report_name)
 
 		with fx.as_user(self.vendedora_a):
 			self.assertFalse(frappe.has_permission("Pick List", "read", doc=pl.name))
 			with self.assertRaises(frappe.PermissionError):
 				frappe.get_doc("Pick List", pl.name).check_permission("read")
-			self.assertFalse(frappe.has_permission("Reporte de Faltante", "read", doc=report.name))
+			self.assertFalse(frappe.has_permission("Reporte de Faltante", "read", doc=report_name))
 			with self.assertRaises(frappe.PermissionError):
-				frappe.get_doc("Reporte de Faltante", report.name).check_permission("read")
+				frappe.get_doc("Reporte de Faltante", report_name).check_permission("read")
 
 	# -- La frontera compartida sigue exigiendo permisos reales por defecto ------
 
@@ -558,7 +565,10 @@ class TestVendedoraPermissions(IntegrationTestCase):
 		elevation didn't quietly change transaction semantics --
 		ignore_permissions only skips a permission check, it has nothing
 		to do with commit/rollback, but this is proven here rather than
-		assumed."""
+		assumed. Commit 25.4: patches create_pick_list_for_full_demand()
+		instead of sync_shortage_reports_for_sales_order() -- the latter
+		is no longer called by the real on_submit hook at all (see
+		fulfillment/engine.py's process_sales_order_for_confirmation())."""
 		from unittest.mock import patch
 
 		wh = self.world.warehouse("FG18 Rollback")
@@ -590,7 +600,7 @@ class TestVendedoraPermissions(IntegrationTestCase):
 		frappe.db.commit()  # fixtures + draft SO survive the rollback below
 
 		with patch(
-			"fabergray_erp.fulfillment.engine.sync_shortage_reports_for_sales_order",
+			"fabergray_erp.fulfillment.engine.create_pick_list_for_full_demand",
 			side_effect=RuntimeError("Commit 18.1 intentional failure"),
 		):
 			with self.assertRaises(RuntimeError):

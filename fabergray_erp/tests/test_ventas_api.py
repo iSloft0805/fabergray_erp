@@ -18,11 +18,10 @@ correctly trigger the Commit 15/16/18.1 Fulfillment Engine end to end.
 
 import frappe
 from frappe.tests import IntegrationTestCase
-from frappe.utils import flt
 
 from fabergray_erp.api import bodega as bodega_api
-from fabergray_erp.api import jefe_bodega as jefe_bodega_api
 from fabergray_erp.api import ventas
+from fabergray_erp.api.bodega import _insert_shortage_report
 from fabergray_erp.tests import fixtures as fx
 
 EXTRA_TEST_RECORD_DEPENDENCIES = []
@@ -78,6 +77,63 @@ class TestVentasApi(IntegrationTestCase):
 
 		cls.vendedora_a = cls.world.user("fg18-2-vendedora-a@example.com", ["Vendedora"])
 		cls.vendedora_b = cls.world.user("fg18-2-vendedora-b@example.com", ["Vendedora"])
+
+	def _insert_engine_report(self, so_name, sales_order_item_name, item_code, warehouse, qty_solicitada, qty_disponible, shortage_reason):
+		"""Commit 25.4: the real on_submit hook (create_and_submit_sales_order()
+		still submits immediately, so it still fires) no longer creates any
+		Reporte de Faltante automatically -- only a full-demand Pick List
+		(create_pick_list_for_full_demand()). Several tests below exist
+		specifically to prove permission/cleanup behaviour around an
+		already-existing, Fulfillment-Engine-detected report, so they build
+		one directly through the single approved insert path
+		(_insert_shortage_report(), api/bodega.py) instead of relying on the
+		submit itself to produce it -- exactly the same reasoning applied in
+		test_sales_order_cancel.py."""
+		report_name = _insert_shortage_report(
+			item_code=item_code,
+			warehouse=warehouse,
+			sales_order=so_name,
+			sales_order_item=sales_order_item_name,
+			qty_solicitada=qty_solicitada,
+			qty_disponible=qty_disponible,
+			detected_by="Fulfillment Engine",
+			shortage_reason=shortage_reason,
+			via_fulfillment_engine=True,
+		)
+		self.world.track_existing("Reporte de Faltante", report_name)
+		return report_name
+
+	def _insert_engine_material_request(self, so_name, sales_order_item_name, item_code, warehouse, qty):
+		"""Same reasoning as _insert_engine_report() above, for the
+		Engine-created draft Material Request purchase_service.py used to
+		produce automatically pre-Commit-25.4 (fg_created_by_fulfillment_
+		engine=1) -- built directly since sync_material_requests_for_sales_
+		order() is no longer wired to the hook either. Only used by
+		permission-boundary tests below, where the document's owner is
+		irrelevant (Vendedora's denial on Material Request is a flat,
+		role-based "by design" rule, not owner-scoped)."""
+		mr = frappe.get_doc(
+			{
+				"doctype": "Material Request",
+				"material_request_type": "Purchase",
+				"company": fx.COMPANY,
+				"transaction_date": frappe.utils.nowdate(),
+				"fg_created_by_fulfillment_engine": 1,
+				"items": [
+					{
+						"item_code": item_code,
+						"qty": qty,
+						"warehouse": warehouse,
+						"schedule_date": frappe.utils.add_days(frappe.utils.nowdate(), 7),
+						"sales_order": so_name,
+						"sales_order_item": sales_order_item_name,
+					}
+				],
+			}
+		)
+		mr.insert(ignore_permissions=True)
+		self.world.track_existing("Material Request", mr.name)
+		return mr.name
 
 	# -- search_customers ----------------------------------------------------
 
@@ -373,14 +429,16 @@ class TestVentasApi(IntegrationTestCase):
 			queue = bodega_api.get_queue()
 		self.assertIn(pick_lists[0], [p["name"] for p in queue["pendientes"]])
 
-	def test_e2e_partial_stock_creates_pick_list_and_shortage_report(self):
+	def test_e2e_partial_stock_creates_full_demand_pick_list_no_automatic_shortage(self):
+		"""Commit 25.4: "Ventas no decide faltantes" -- her submit must
+		queue the FULL 10 requested to Bodega, not the 3 theoretically
+		available, and must never auto-create a Reporte de Faltante just
+		because ERPNext's Bin currently shows less than requested."""
 		wh = self.world.warehouse("FG18-2 E2E Partial")
 		item = self.world.item(
 			"FG18-2-E2E-PARTIAL-ITEM", default_material_request_type="Purchase", default_warehouse=wh.name
 		)
 		self.world.stock_up_real(item.name, wh.name, 3)
-
-		jefe_user = self.world.user("fg18-2-jefe-partial@example.com", ["Jefe de Bodega"])
 
 		with fx.as_user(self.vendedora_a):
 			result = ventas.create_and_submit_sales_order(
@@ -389,23 +447,27 @@ class TestVentasApi(IntegrationTestCase):
 		self.world.track_existing("Sales Order", result["name"])
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
-		reports = frappe.get_all("Reporte de Faltante", filters={"sales_order": result["name"]}, pluck="name")
-		self.assertEqual(len(reports), 1)
-		report = frappe.get_doc("Reporte de Faltante", reports[0])
-		self.assertEqual(report.qty_faltante, 7.0)
-		self.assertEqual(report.shortage_reason, "Compra pendiente")
+		pick_lists = frappe.get_all(
+			"Pick List Item", filters={"sales_order": result["name"], "docstatus": ["!=", 2]}, pluck="parent", distinct=True
+		)
+		self.assertEqual(len(pick_lists), 1)
+		rows = frappe.get_doc("Pick List", pick_lists[0]).get("locations")
+		self.assertEqual(sum(row.stock_qty for row in rows), 10.0)  # full demand, not capped at 3
 
-		with fx.as_user(jefe_user):
-			open_reports = jefe_bodega_api.get_open_shortage_reports()
-		self.assertIn(report.name, [r["name"] for r in open_reports])
+		self.assertEqual(frappe.db.count("Reporte de Faltante", {"sales_order": result["name"]}), 0)
 
-	def test_e2e_zero_stock_creates_correct_shortage_report(self):
+	def test_e2e_zero_stock_creates_full_demand_pick_list_no_automatic_shortage(self):
+		"""Commit 25.4: zero real stock must not stop Bodega from seeing
+		the line at all -- the whole point of test case D from the user's
+		own spec ("found > ERP-stock -> no faltante even though ERP said
+		less" generalises here to "ERP says zero, Bodega still gets asked
+		to try")."""
 		wh = self.world.warehouse("FG18-2 E2E Zero")
 		item = self.world.item(
 			"FG18-2-E2E-ZERO-ITEM", default_material_request_type="Manufacture", default_warehouse=wh.name
 		)
 		raw_material = self.world.item("FG18-2-E2E-ZERO-RAW")
-		self.world.bom_for(item.name, raw_material.name)  # needed so the route resolves to "Fabricación pendiente" and not "Configuración incompleta"
+		self.world.bom_for(item.name, raw_material.name)
 
 		with fx.as_user(self.vendedora_a):
 			result = ventas.create_and_submit_sales_order(
@@ -415,15 +477,13 @@ class TestVentasApi(IntegrationTestCase):
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
 		pick_lists = frappe.get_all(
-			"Pick List Item", filters={"sales_order": result["name"]}, pluck="parent", distinct=True
+			"Pick List Item", filters={"sales_order": result["name"], "docstatus": ["!=", 2]}, pluck="parent", distinct=True
 		)
-		self.assertEqual(len(pick_lists), 0)
+		self.assertEqual(len(pick_lists), 1)
+		rows = frappe.get_doc("Pick List", pick_lists[0]).get("locations")
+		self.assertEqual(sum(row.stock_qty for row in rows), 5.0)  # full demand despite zero real stock
 
-		reports = frappe.get_all("Reporte de Faltante", filters={"sales_order": result["name"]}, pluck="name")
-		self.assertEqual(len(reports), 1)
-		report = frappe.get_doc("Reporte de Faltante", reports[0])
-		self.assertEqual(report.qty_faltante, 5.0)
-		self.assertEqual(report.shortage_reason, "Producción pendiente")
+		self.assertEqual(frappe.db.count("Reporte de Faltante", {"sales_order": result["name"]}), 0)
 
 	def test_e2e_vendedora_still_cannot_read_pick_list_or_shortage_report(self):
 		wh = self.world.warehouse("FG18-2 E2E NoAccess")
@@ -442,7 +502,14 @@ class TestVentasApi(IntegrationTestCase):
 		pl_name = frappe.get_all(
 			"Pick List Item", filters={"sales_order": result["name"]}, pluck="parent", distinct=True
 		)[0]
-		report_name = frappe.get_all("Reporte de Faltante", filters={"sales_order": result["name"]}, pluck="name")[0]
+		so = frappe.get_doc("Sales Order", result["name"])
+		# Commit 25.4: her submit itself no longer creates any Reporte de
+		# Faltante -- build one directly (as if Bodega/Jefe had, or a
+		# manual reprocess had) purely to prove the permission boundary
+		# still holds regardless of who/what created the report.
+		report_name = self._insert_engine_report(
+			result["name"], so.items[0].name, item.name, wh.name, qty_solicitada=6, qty_disponible=2, shortage_reason="Compra pendiente"
+		)
 
 		with fx.as_user(self.vendedora_a):
 			self.assertFalse(frappe.has_permission("Pick List", "read", doc=pl_name))
@@ -450,13 +517,15 @@ class TestVentasApi(IntegrationTestCase):
 
 	# -- E2E (Commit 19.2): Purchase Service creates a Material Request too --
 
-	def test_e2e_vendedora_submit_creates_material_request_despite_no_permission(self):
-		"""Vendedora has zero permission on Material Request, by design
-		(Commit 18.1's Option B, same as Pick List/Reporte de Faltante) --
-		this proves sync_material_requests_for_sales_order() (Commit 19.1,
-		wired into process_sales_order() this commit) still succeeds as a
-		consequence of her own already-authorized Sales Order submit,
-		exactly like Pick List/Reporte de Faltante already do."""
+	def test_e2e_vendedora_submit_never_creates_material_request(self):
+		"""Commit 25.4 supersedes Commit 19.2's own test of this same
+		scenario, which asserted the OLD, now-intentionally-changed
+		behaviour ("her submit automatically creates a draft Material
+		Request"). "Ventas no decide faltantes" extends to procurement
+		too: sync_material_requests_for_sales_order() (still fully intact,
+		still tested directly in test_purchase_service.py) is simply no
+		longer wired to the hook -- her submit only ever queues the full
+		demand to Bodega."""
 		wh = self.world.warehouse("FG19-2 E2E MR")
 		item = self.world.item(
 			"FG19-2-E2E-MR-ITEM", default_material_request_type="Purchase", default_warehouse=wh.name
@@ -470,17 +539,17 @@ class TestVentasApi(IntegrationTestCase):
 		self.world.track_existing("Sales Order", result["name"])
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
-		so = frappe.get_doc("Sales Order", result["name"])
 		mr_names = frappe.get_all(
-			"Material Request Item", filters={"sales_order": so.name}, pluck="parent", distinct=True
+			"Material Request Item", filters={"sales_order": result["name"]}, pluck="parent", distinct=True
 		)
-		self.assertEqual(len(mr_names), 1)
-		mr = frappe.get_doc("Material Request", mr_names[0])
-		self.assertEqual(mr.docstatus, 0)
-		self.assertEqual(mr.owner, self.vendedora_a)  # her session, never a substituted identity
-		self.assertEqual(flt(mr.items[0].qty), 8.0)
-		self.assertEqual(mr.items[0].sales_order, so.name)
-		self.assertEqual(mr.items[0].sales_order_item, so.items[0].name)
+		self.assertEqual(mr_names, [])
+
+		pick_lists = frappe.get_all(
+			"Pick List Item", filters={"sales_order": result["name"], "docstatus": ["!=", 2]}, pluck="parent", distinct=True
+		)
+		self.assertEqual(len(pick_lists), 1)
+		rows = frappe.get_doc("Pick List", pick_lists[0]).get("locations")
+		self.assertEqual(sum(row.stock_qty for row in rows), 10.0)  # full demand, not capped at 2
 
 	def test_e2e_vendedora_still_cannot_access_material_request_directly(self):
 		wh = self.world.warehouse("FG19-2 E2E MR NoAccess")
@@ -496,9 +565,11 @@ class TestVentasApi(IntegrationTestCase):
 		self.world.track_existing("Sales Order", result["name"])
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
-		mr_name = frappe.get_all(
-			"Material Request Item", filters={"sales_order": result["name"]}, pluck="parent", distinct=True
-		)[0]
+		so = frappe.get_doc("Sales Order", result["name"])
+		# Commit 25.4: her submit itself no longer creates any Material
+		# Request -- build one directly (as e.g. a manual reprocess would)
+		# purely to prove the permission boundary still holds.
+		mr_name = self._insert_engine_material_request(result["name"], so.items[0].name, item.name, wh.name, qty=4)
 
 		with fx.as_user(self.vendedora_a):
 			self.assertFalse(frappe.has_permission("Material Request", "read", doc=mr_name))
@@ -740,7 +811,13 @@ class TestVentasApi(IntegrationTestCase):
 		pick_list_name = frappe.get_all(
 			"Pick List Item", filters={"sales_order": result["name"], "docstatus": ["!=", 2]}, pluck="parent", distinct=True
 		)[0]
-		report_name = frappe.get_all("Reporte de Faltante", filters={"sales_order": result["name"]}, pluck="name")[0]
+		# Commit 25.4: her submit itself no longer creates any Reporte de
+		# Faltante -- build one directly to prove cancellation_service.py's
+		# own resolve-on-cancel behaviour is untouched.
+		so = frappe.get_doc("Sales Order", result["name"])
+		report_name = self._insert_engine_report(
+			result["name"], so.items[0].name, item.name, wh.name, qty_solicitada=8, qty_disponible=3, shortage_reason="Compra pendiente"
+		)
 
 		with fx.as_user(self.vendedora_a):
 			ventas.cancel_sales_order(result["name"])

@@ -27,6 +27,7 @@ from erpnext.stock.doctype.material_request.material_request import make_purchas
 
 from fabergray_erp.api import bodega as bodega_api
 from fabergray_erp.api import ventas
+from fabergray_erp.api.bodega import _insert_shortage_report
 from fabergray_erp.tests import fixtures as fx
 
 EXTRA_TEST_RECORD_DEPENDENCIES = []
@@ -77,6 +78,59 @@ class TestSalesOrderModification(IntegrationTestCase):
 			"Pick List Item", filters={"sales_order": so_name, "docstatus": ["!=", 2]}, pluck="parent", distinct=True
 		)
 		return names[0] if names else None
+
+	def _insert_engine_material_request(self, so_name, sales_order_item_name, item_code, warehouse, qty):
+		"""Commit 25.4: create_and_submit_sales_order()'s own on_submit
+		hook no longer creates a draft Material Request automatically
+		(sync_material_requests_for_sales_order() is no longer wired to
+		the hook -- "Ventas no decide faltantes" extends to procurement
+		too). Several blocker tests below exist specifically to prove
+		modification_blockers_for() still reacts correctly to an
+		already-existing, submitted Material Request / linked Purchase
+		Order, so they build one directly (fg_created_by_fulfillment_
+		engine=1, the same shape purchase_service.py itself would have
+		produced) instead of relying on the hook to produce it."""
+		mr = frappe.get_doc(
+			{
+				"doctype": "Material Request",
+				"material_request_type": "Purchase",
+				"company": fx.COMPANY,
+				"transaction_date": frappe.utils.nowdate(),
+				"fg_created_by_fulfillment_engine": 1,
+				"items": [
+					{
+						"item_code": item_code,
+						"qty": qty,
+						"warehouse": warehouse,
+						"schedule_date": frappe.utils.add_days(frappe.utils.nowdate(), 7),
+						"sales_order": so_name,
+						"sales_order_item": sales_order_item_name,
+					}
+				],
+			}
+		)
+		mr.insert(ignore_permissions=True)
+		self.world.track_existing("Material Request", mr.name)
+		return mr.name
+
+	def _insert_engine_report(self, so_name, sales_order_item_name, item_code, warehouse, qty_solicitada, qty_disponible, shortage_reason):
+		"""Same reasoning as _insert_engine_material_request() above, for
+		the Engine-created Reporte de Faltante -- built directly since
+		sync_shortage_reports_for_sales_order() is no longer wired to the
+		hook either (Commit 25.4)."""
+		report_name = _insert_shortage_report(
+			item_code=item_code,
+			warehouse=warehouse,
+			sales_order=so_name,
+			sales_order_item=sales_order_item_name,
+			qty_solicitada=qty_solicitada,
+			qty_disponible=qty_disponible,
+			detected_by="Fulfillment Engine",
+			shortage_reason=shortage_reason,
+			via_fulfillment_engine=True,
+		)
+		self.world.track_existing("Reporte de Faltante", report_name)
+		return report_name
 
 	# =====================================================================
 	# Allowed modification -- happy path, recalculation
@@ -238,15 +292,14 @@ class TestSalesOrderModification(IntegrationTestCase):
 		item = self.world.item(
 			"FG18-5b-SUBMITTEDMR-ITEM", default_material_request_type="Purchase", default_warehouse=wh.name
 		)
-		# No stock at all -- create_and_submit_sales_order()'s own on_submit
-		# hook already produces a draft, Engine-created Material Request
-		# (Commit 19.1/19.2); submitting THAT draft (Compras reviewing it)
-		# is what must block modification here.
+		# No stock at all. Commit 25.4: create_and_submit_sales_order()'s
+		# own on_submit hook no longer produces a draft Material Request
+		# automatically -- build one directly (as Compras/a manual
+		# reprocess would) so submitting THAT draft (Compras reviewing it)
+		# is what must block modification here, exactly as before.
 		so_name = self._submit_order(item, 6)
-
-		mr_name = frappe.get_all(
-			"Material Request Item", filters={"sales_order": so_name}, pluck="parent", distinct=True
-		)[0]
+		so = frappe.get_doc("Sales Order", so_name)
+		mr_name = self._insert_engine_material_request(so_name, so.items[0].name, item.name, wh.name, qty=6)
 		frappe.get_doc("Material Request", mr_name).submit()
 		frappe.db.commit()
 
@@ -275,9 +328,8 @@ class TestSalesOrderModification(IntegrationTestCase):
 			self.world.track_existing("Supplier", doc.name)
 
 		so_name = self._submit_order(item, 6)
-		mr_name = frappe.get_all(
-			"Material Request Item", filters={"sales_order": so_name}, pluck="parent", distinct=True
-		)[0]
+		so = frappe.get_doc("Sales Order", so_name)
+		mr_name = self._insert_engine_material_request(so_name, so.items[0].name, item.name, wh.name, qty=6)
 		frappe.get_doc("Material Request", mr_name).submit()  # native precondition for make_purchase_order()
 
 		po = make_purchase_order(mr_name)
@@ -405,59 +457,79 @@ class TestSalesOrderModification(IntegrationTestCase):
 	# Downstream artifact recalculation
 	# =====================================================================
 
-	def test_modification_regenerates_shortage_report_and_material_request(self):
+	def test_modification_regenerates_pick_list_with_current_quantities(self):
+		"""Commit 25.4 supersedes this test's original premise (a fresh
+		submit auto-creating a Reporte de Faltante/Material Request that
+		modification then "regenerates") -- neither is created
+		automatically anymore. What still needs proving: modify_submitted_
+		sales_order()'s cancel+amend cycle (1) still correctly cleans up a
+		pre-existing engine artifact tied to the OLD version (built here
+		manually, since the hook itself no longer produces one) via the
+		standard on_cancel cleanup (Commit 17/19.3), untouched by this
+		commit, and (2) the amended version gets a FRESH, full-demand Pick
+		List for the NEW quantity -- never a stale copy of the original,
+		and never a new automatic shortage/Material Request either."""
 		wh = self.world.warehouse("FG18-5b Regen")
 		item = self.world.item(
 			"FG18-5b-REGEN-ITEM", default_material_request_type="Purchase", default_warehouse=wh.name
 		)
 		self.world.stock_up_real(item.name, wh.name, 3)
 
-		so_name = self._submit_order(item, 10)  # 3 available, 7 short
+		so_name = self._submit_order(item, 10)
+		so = frappe.get_doc("Sales Order", so_name)
 
-		old_report = frappe.get_all("Reporte de Faltante", filters={"sales_order": so_name}, pluck="name")[0]
-		old_mr = frappe.get_all(
-			"Material Request Item", filters={"sales_order": so_name}, pluck="parent", distinct=True
-		)[0]
+		old_report = self._insert_engine_report(
+			so_name, so.items[0].name, item.name, wh.name, qty_solicitada=7, qty_disponible=3, shortage_reason="Compra pendiente"
+		)
+		old_mr = self._insert_engine_material_request(so_name, so.items[0].name, item.name, wh.name, qty=7)
 		self.assertEqual(frappe.get_doc("Reporte de Faltante", old_report).status, "Abierto")
 
 		with fx.as_user(self.vendedora_a):
 			result = ventas.modify_submitted_sales_order(
-				name=so_name, customer=self.customer.name, items=[{"item_code": item.name, "qty": 3}]  # now fully covered
+				name=so_name, customer=self.customer.name, items=[{"item_code": item.name, "qty": 15}]
 			)
 		self.world.track_existing("Sales Order", result["name"])
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
-		# Old shortage report: resolved automatically by the standard
-		# on_cancel cleanup (Commit 17) -- kept as history, not deleted.
+		# Old artifacts: cleaned up by the standard on_cancel cleanup.
 		self.assertEqual(frappe.get_doc("Reporte de Faltante", old_report).status, "Resuelto")
-		# Old draft Material Request: this Sales Order was its only row ->
-		# removed entirely (Commit 19.3's "removed" case).
 		self.assertFalse(frappe.db.exists("Material Request", old_mr))
 
-		# New version, now fully covered by stock -- no new shortage, no new MR.
-		new_reports = frappe.get_all("Reporte de Faltante", filters={"sales_order": result["name"]}, pluck="name")
-		self.assertEqual(new_reports, [])
-		new_mrs = frappe.get_all(
-			"Material Request Item", filters={"sales_order": result["name"]}, pluck="parent", distinct=True
+		# New version: fresh Pick List reflecting the NEW qty (15), never
+		# capped by stock, and no automatic shortage/Material Request.
+		new_pick_lists = frappe.get_all(
+			"Pick List Item", filters={"sales_order": result["name"], "docstatus": ["!=", 2]}, pluck="parent", distinct=True
 		)
-		self.assertEqual(new_mrs, [])
+		self.assertEqual(len(new_pick_lists), 1)
+		rows = frappe.get_doc("Pick List", new_pick_lists[0]).get("locations")
+		self.assertEqual(sum(flt(row.stock_qty) for row in rows), 15.0)
 
-	def test_modification_uses_current_stock_not_original(self):
+		self.assertEqual(frappe.db.count("Reporte de Faltante", {"sales_order": result["name"]}), 0)
+		self.assertEqual(frappe.db.count("Material Request Item", {"sales_order": result["name"]}), 0)
+
+	def test_modification_pick_list_always_reflects_full_demand_regardless_of_stock(self):
+		"""Commit 25.4: modification's amend+resubmit path calls the exact
+		same create_pick_list_for_full_demand() a fresh submit does --
+		proven here by keeping the SAME final quantity (10) across the
+		modification while stock changes dramatically in between (2 ->
+		12), and confirming the Pick List sent to Bodega is 10 both times,
+		never capped -- or "now fully covered" -- by whatever ERPNext's
+		Bin happens to say at the moment of (re)submit."""
 		wh = self.world.warehouse("FG18-5b FreshStock")
 		item = self.world.item(
 			"FG18-5b-FRESHSTOCK-ITEM", default_material_request_type="Purchase", default_warehouse=wh.name
 		)
 		self.world.stock_up_real(item.name, wh.name, 2)
 
-		so_name = self._submit_order(item, 10)  # 2 available, 8 short at creation time
+		so_name = self._submit_order(item, 10)  # 2 available, 10 requested
 
 		pl_name = self._pick_list_for(so_name)
-		original_pl_qty = flt(
-			frappe.get_all("Pick List Item", filters={"parent": pl_name}, pluck="stock_qty")[0]
+		original_pl_qty = sum(
+			flt(row.stock_qty) for row in frappe.get_doc("Pick List", pl_name).get("locations")
 		)
-		self.assertEqual(original_pl_qty, 2.0)
+		self.assertEqual(original_pl_qty, 10.0)  # full demand already, despite only 2 in stock
 
-		# More stock arrives before the modification.
+		# More stock arrives before the modification -- must have zero bearing.
 		self.world.stock_up(item.name, wh.name, 10)
 
 		with fx.as_user(self.vendedora_a):
@@ -468,8 +540,9 @@ class TestSalesOrderModification(IntegrationTestCase):
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
 		new_pl_name = self._pick_list_for(result["name"])
-		new_pl_qty = flt(frappe.get_all("Pick List Item", filters={"parent": new_pl_name}, pluck="stock_qty")[0])
-		self.assertEqual(new_pl_qty, 10.0)  # fully covered by the stock that arrived in between
+		new_pl_qty = sum(
+			flt(row.stock_qty) for row in frappe.get_doc("Pick List", new_pl_name).get("locations")
+		)
+		self.assertEqual(new_pl_qty, 10.0)  # unchanged -- still full demand, not "now fully covered"
 
-		reports = frappe.get_all("Reporte de Faltante", filters={"sales_order": result["name"]}, pluck="name")
-		self.assertEqual(reports, [])
+		self.assertEqual(frappe.db.count("Reporte de Faltante", {"sales_order": result["name"]}), 0)

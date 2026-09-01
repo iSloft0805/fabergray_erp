@@ -4,6 +4,28 @@ hooks.py `doc_events` (see hooks.py). No `apps/erpnext` modification, no
 Purchase Receipt class override, no Server Script -- plain doc_events
 entry, same extension point sales_order_hooks.py already uses.
 
+DEPRECATED as of Commit 25.4's own architecture audit -- kept as a removal
+candidate, deliberately NOT redesigned, NOT deleted this session. The
+approved way to resolve a Bodega-reported shortage is a native Stock
+Entry (api.jefe_bodega.receive_shortage_purchase(), Commit 22.8) -- never
+a Material Request -> Purchase Order -> Purchase Receipt chain (this app
+has no Proveedores/Supplier module for a real Purchase Receipt to name a
+Supplier; see receive_shortage_purchase()'s own module docstring for that
+original reasoning). Since Commit 25.4 also stopped wiring Sales Order.
+on_submit to sync_material_requests_for_sales_order(), nothing in this
+app's real flow ever populates Purchase Receipt Item.sales_order any
+more -- this hook is a confirmed, empirically-verified live no-op today
+(see test_purchase_receipt_hooks.py's own module docstring and
+test_on_submit_is_a_noop_for_a_real_purchase_receipt_unrelated_to_any_
+sales_order). Left in place rather than removed because it is provably
+harmless even if manually triggered on a Sales Order that went through
+the real confirm flow (test_reprocessing_a_confirmed_order_via_the_
+legacy_pipeline_is_a_safe_no_op, same file) -- the full-demand Pick
+List's own "already claimed" accounting neutralizes process_sales_
+order() by construction. Do not build new functionality on top of this
+file; removing it (together with purchase_service.py and the "purchasing"
+step of process_sales_order()) is a separate, later decision.
+
 Zero fulfillment logic of its own, on purpose -- the only thing this
 module does is identify which Sales Orders the just-submitted Purchase
 Receipt's own rows reference (native `Purchase Receipt Item.sales_order`,

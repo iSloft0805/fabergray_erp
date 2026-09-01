@@ -18,6 +18,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, nowdate
 
 from fabergray_erp.api import bodega
+from fabergray_erp.api.bodega import _insert_shortage_report
 from fabergray_erp.fulfillment.cancellation_service import cleanup_fulfillment_for_cancelled_sales_order
 from fabergray_erp.tests import fixtures as fx
 
@@ -76,6 +77,64 @@ class TestSalesOrderCancel(IntegrationTestCase):
 	def _reports_for(self, sales_order_name):
 		return frappe.get_all("Reporte de Faltante", filters={"sales_order": sales_order_name}, pluck="name")
 
+	def _insert_engine_report(self, so, sales_order_item_name, item_code, warehouse, qty_solicitada, qty_disponible, shortage_reason):
+		"""Commit 25.4: the real on_submit hook no longer creates any
+		Reporte de Faltante automatically (create_pick_list_for_full_demand()
+		is the only thing it calls), so these Sales Order-cancellation
+		tests -- whose whole point is exercising cancellation_service.py's
+		handling of an already-existing, Fulfillment-Engine-detected
+		report -- build one directly through the single approved insert
+		path (_insert_shortage_report(), api/bodega.py) instead of relying
+		on the hook to produce it. This is exactly what still legitimately
+		happens whenever process_sales_order()/sync_shortage_reports_for_
+		sales_order() (both untouched, Commit 25.4's own docstrings) are
+		run manually against a confirmed order -- cancellation_service.py
+		itself was not touched by Commit 25.4 and must keep resolving
+		reports built this way regardless of who/what created them."""
+		report_name = _insert_shortage_report(
+			item_code=item_code,
+			warehouse=warehouse,
+			sales_order=so.name,
+			sales_order_item=sales_order_item_name,
+			qty_solicitada=qty_solicitada,
+			qty_disponible=qty_disponible,
+			detected_by="Fulfillment Engine",
+			shortage_reason=shortage_reason,
+			via_fulfillment_engine=True,
+		)
+		self.world.track_existing("Reporte de Faltante", report_name)
+		return report_name
+
+	def _insert_engine_material_request(self, so, sales_order_item_name, item_code, warehouse, qty):
+		"""Same reasoning as _insert_engine_report() above, for the
+		Engine-created draft Material Request purchase_service.py used to
+		produce automatically pre-Commit-25.4 (fg_created_by_fulfillment_
+		engine=1, the one field cancellation_service.py uses to recognise
+		it) -- built directly since sync_material_requests_for_sales_order()
+		is no longer wired to the hook either."""
+		mr = frappe.get_doc(
+			{
+				"doctype": "Material Request",
+				"material_request_type": "Purchase",
+				"company": fx.COMPANY,
+				"transaction_date": nowdate(),
+				"fg_created_by_fulfillment_engine": 1,
+				"items": [
+					{
+						"item_code": item_code,
+						"qty": qty,
+						"warehouse": warehouse,
+						"schedule_date": add_days(nowdate(), 7),
+						"sales_order": so.name,
+						"sales_order_item": sales_order_item_name,
+					}
+				],
+			}
+		)
+		mr.insert(ignore_permissions=True)
+		self.world.track_existing("Material Request", mr.name)
+		return mr.name
+
 	# -- Caso 1+2: Pick List draft se elimina y deja de aparecer en get_queue() --
 
 	def test_cancelling_so_with_draft_pick_list_removes_it_and_from_queue(self):
@@ -103,7 +162,9 @@ class TestSalesOrderCancel(IntegrationTestCase):
 	def test_open_automatic_report_is_resolved_with_clear_note_on_cancel(self):
 		wh, item, customer = self._new_world("AutoReport", stock_qty=None, default_material_request_type="Purchase")
 		so = self._submit_via_hook(customer.name, [{"item_code": item.name, "warehouse": wh.name, "qty": 5, "rate": 100}])
-		report_name = self._reports_for(so.name)[0]
+		report_name = self._insert_engine_report(
+			so, so.items[0].name, item.name, wh.name, qty_solicitada=5, qty_disponible=0, shortage_reason="Compra pendiente"
+		)
 		self.assertEqual(frappe.get_doc("Reporte de Faltante", report_name).status, "Abierto")
 
 		so.cancel()
@@ -238,7 +299,17 @@ class TestSalesOrderCancel(IntegrationTestCase):
 		)
 
 		pick_list_name = self._pick_lists_for(so.name)[0]
-		report_names = self._reports_for(so.name)
+		so_items_by_code = {row.item_code: row.name for row in so.items}
+		report_names = [
+			self._insert_engine_report(
+				so, so_items_by_code[item_b.name], item_b.name, wh.name,
+				qty_solicitada=8, qty_disponible=3, shortage_reason="Compra pendiente",
+			),
+			self._insert_engine_report(
+				so, so_items_by_code[item_c.name], item_c.name, wh.name,
+				qty_solicitada=20, qty_disponible=0, shortage_reason="Producción pendiente",
+			),
+		]
 		self.assertEqual(len(report_names), 2)  # B (Purchase) and C (Manufacture)
 
 		so.cancel()
@@ -281,7 +352,9 @@ class TestSalesOrderCancel(IntegrationTestCase):
 	def test_cleanup_service_run_twice_is_idempotent(self):
 		wh, item, customer = self._new_world("Idempotent", stock_qty=None, default_material_request_type="Purchase")
 		so = self._submit_via_hook(customer.name, [{"item_code": item.name, "warehouse": wh.name, "qty": 5, "rate": 100}])
-		report_name = self._reports_for(so.name)[0]
+		report_name = self._insert_engine_report(
+			so, so.items[0].name, item.name, wh.name, qty_solicitada=5, qty_disponible=0, shortage_reason="Compra pendiente"
+		)
 
 		so.cancel()
 		self.assertEqual(frappe.get_doc("Reporte de Faltante", report_name).status, "Resuelto")
@@ -316,12 +389,12 @@ class TestSalesOrderCancel(IntegrationTestCase):
 		so = self._submit_via_hook(customer.name, [{"item_code": item.name, "warehouse": wh.name, "qty": 10, "rate": 100}])
 
 		pick_list_name = self._pick_lists_for(so.name)[0]
-		report_name = self._reports_for(so.name)[0]
-		mr_names = frappe.get_all(
-			"Material Request Item", filters={"sales_order": so.name}, pluck="parent", distinct=True
+		report_name = self._insert_engine_report(
+			so, so.items[0].name, item.name, wh.name, qty_solicitada=8, qty_disponible=2, shortage_reason="Compra pendiente"
 		)
+		mr_name = self._insert_engine_material_request(so, so.items[0].name, item.name, wh.name, qty=8)
+		mr_names = [mr_name]
 		self.assertEqual(len(mr_names), 1)
-		mr_name = mr_names[0]
 		self.assertEqual(
 			frappe.db.get_value(
 				"Material Request", mr_name, ["docstatus", "fg_created_by_fulfillment_engine"], as_dict=True

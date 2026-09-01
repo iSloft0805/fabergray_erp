@@ -262,12 +262,15 @@ class TestWarehouseFallback(IntegrationTestCase):
     # =====================================================================
 
     def test_fulfillment_splits_available_vs_faltante_with_warehouse_from_stock_settings(self):
-        """The exact scenario the brief's own section 7 asks for (stock=5,
-        pedido=20 -> Pick List disponible=5, Reporte de Faltante=15) --
-        run here specifically through an Item with NO Item Default at
-        all, so the Sales Order's own warehouse comes exclusively from
-        `Stock Settings.default_warehouse` (Case D's mechanism), proving
-        the Fulfillment Engine (untouched by this commit) works
+        """Commit 25.4 superseded the brief's original section 7 scenario
+        (stock=5, pedido=20 -> Pick List disponible=5, Reporte de
+        Faltante=15 automatically): "Ventas no decide faltantes" -- the
+        real on_submit hook now queues the FULL 20 to Bodega's Pick List
+        regardless of the 5 theoretically available, and never creates a
+        Reporte de Faltante on its own. Run here specifically through an
+        Item with NO Item Default at all, so the Sales Order's own
+        warehouse comes exclusively from `Stock Settings.default_warehouse`
+        (Case D's mechanism), proving the Fulfillment Engine works
         end-to-end regardless of which precedence step resolved the
         warehouse."""
         wh = self.world.warehouse("FG25 WH Fulfillment")
@@ -288,12 +291,9 @@ class TestWarehouseFallback(IntegrationTestCase):
         )
         self.assertEqual(len(pick_lists), 1)
         pl = frappe.get_doc("Pick List", pick_lists[0])
-        self.assertEqual(flt(pl.get("locations")[0].stock_qty), 5.0)
+        self.assertEqual(sum(flt(row.stock_qty) for row in pl.get("locations")), 20.0)  # full demand, not capped at 5
 
-        reports = frappe.get_all("Reporte de Faltante", filters={"sales_order": so.name}, pluck="name")
-        self.assertEqual(len(reports), 1)
-        report = frappe.get_doc("Reporte de Faltante", reports[0])
-        self.assertEqual(report.qty_faltante, 15.0)
+        self.assertEqual(frappe.db.count("Reporte de Faltante", {"sales_order": so.name}), 0)
 
     # =====================================================================
     # get_item_info() no longer throws for a missing Item Default either

@@ -34,7 +34,10 @@ it inherits exactly what its four building blocks already enforce.
 import frappe
 
 from fabergray_erp.fulfillment.analyzer import analyze_sales_order
-from fabergray_erp.fulfillment.pick_list_service import create_pick_list_for_available_stock
+from fabergray_erp.fulfillment.pick_list_service import (
+    create_pick_list_for_available_stock,
+    create_pick_list_for_full_demand,
+)
 from fabergray_erp.fulfillment.purchase_service import sync_material_requests_for_sales_order
 from fabergray_erp.fulfillment.shortage_service import sync_shortage_reports_for_sales_order
 
@@ -160,4 +163,52 @@ def process_sales_order(sales_order):
         "shortages": shortages,
         "purchasing": purchasing,
         "status": "processed",
+    }
+
+
+def process_sales_order_for_confirmation(sales_order):
+    """Commit 25.4 -- wired to `Sales Order.on_submit` INSTEAD of
+    `process_sales_order()` above (see `fulfillment/sales_order_hooks.py`).
+    `process_sales_order()` itself is untouched -- still the full,
+    four-step composition, still fully valid and tested, still directly
+    callable by anyone who explicitly wants it (e.g. a future admin
+    "reprocess" action) -- this is a NARROWER, separate entry point, not
+    a behavior change to that one.
+
+    New business rule (approved): "Ventas no decide faltantes. El stock
+    teórico no decide el faltante definitivo. Bodega debe recibir TODOS
+    los pedidos y confirmar físicamente cuánto pudo alistar." Confirming
+    a Sales Order from Ventas must do exactly one automated thing: make
+    sure Bodega has a complete Pick List to work from, covering the
+    FULL requested demand of every line (`create_pick_list_for_full_
+    demand()`, Commit 25.4 -- never capped or silently dropped for a
+    line with `actual_qty=0`, unlike `create_pick_list_for_available_
+    stock()` above). It deliberately does NOT call `sync_shortage_
+    reports_for_sales_order()` or `sync_material_requests_for_sales_
+    order()` anymore -- both are driven by the exact same theoretical,
+    `Bin.actual_qty`-based shortage computation the new rule explicitly
+    forbids acting on automatically; a Reporte de Faltante may now only
+    ever originate from Bodega's own physical confirmation
+    (`api.bodega.report_shortage()`, unchanged, already exactly the
+    right mechanism -- see this commit's own audit), and a Material
+    Request this Engine creates automatically is the exact same class
+    of premature action, so it is withheld for the same reason.
+
+    Returns a narrower shape than `process_sales_order()`'s -- no
+    `analysis`/`shortages`/`purchasing` keys, since none of those steps
+    run here:
+        {
+            "sales_order": "SAL-ORD-...",
+            "pick_list": "STO-PICK-..." or None,
+            "status": "queued_for_bodega",
+        }
+    """
+    so = sales_order if hasattr(sales_order, "doctype") else frappe.get_doc("Sales Order", sales_order)
+
+    pick_list = create_pick_list_for_full_demand(so)
+
+    return {
+        "sales_order": so.name,
+        "pick_list": pick_list.name if pick_list else None,
+        "status": "queued_for_bodega",
     }

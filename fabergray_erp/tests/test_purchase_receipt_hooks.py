@@ -1,16 +1,56 @@
 # -*- coding: utf-8 -*-
-"""Commit 19.4 -- end-to-end tests for the real Purchase Receipt.on_submit
--> fulfillment.purchase_receipt_hooks.on_submit -> process_sales_order()
-hook (hooks.py doc_events).
+"""Commit 19.4 -- tests for fulfillment.purchase_receipt_hooks.on_submit,
+REWRITTEN for Commit 25.4's approved architecture (see this session's own
+audit -- ventas/faltante-resolution session, "Ventas no decide faltantes").
 
-Every test builds and submits its own Sales Order directly (like
-test_sales_order_hook.py, NOT through TestWorld.multi_item_sales_order(),
-which stays wrapped in fx.without_sales_order_hook()) so the real
-on_submit hook creates the initial Pick List/Reporte de Faltante/Material
-Request automatically, then drives a real Material Request -> Purchase
-Order -> Purchase Receipt chain through ERPNext's own native mappers
-(never a hand-built document skipping them) to exercise the real
-Purchase Receipt on_submit hook this commit adds.
+Reality this file now represents, confirmed live before writing a line of
+it (not assumed):
+
+1. The ROUTINE flow (Draft -> Confirmar pedido -> Bodega -> "Registrar
+   compra") never creates a Material Request, Purchase Order or Purchase
+   Receipt at all -- the approved resolution mechanism for a Bodega-
+   reported shortage is a native Stock Entry (purpose="Material Receipt"),
+   built by api.jefe_bodega.receive_shortage_purchase() (Commit 22.8,
+   already fully covered by its own 27 tests in
+   test_jefe_bodega_purchase_api.py, plus the real Draft->Confirmar->
+   Bodega->Compra chain end to end in test_shortage_resolution_flow.py).
+   So under the real, current flow, a Purchase Receipt Item row's
+   `sales_order` is never populated by anything this app does -- this
+   hook is a live no-op today. test_on_submit_is_a_noop_for_a_real_
+   purchase_receipt_unrelated_to_any_sales_order below proves that
+   directly against a real, native Purchase Receipt.
+
+2. process_sales_order() (Commit 15) itself is completely UNCHANGED --
+   still correct, still the composition test_engine.py already verifies
+   in isolation. What changed is only that Sales Order.on_submit no
+   longer calls it (Commit 25.4 wired process_sales_order_for_
+   confirmation() instead -- see fulfillment/sales_order_hooks.py). So
+   every scenario below that still needs a Material Request/Purchase
+   Order/Purchase Receipt to exist builds its own Sales Order OUTSIDE the
+   real hook (fx.without_sales_order_hook(), the same helper every test
+   file written before Commit 16 already uses for this exact reason) and
+   then calls process_sales_order() explicitly -- deliberately modelling
+   the one legitimate remaining use of this pipeline: an admin-triggered
+   manual reprocess of an order the routine Commit 25.4 flow never
+   touched, per process_sales_order()'s own docstring ("e.g. a future
+   admin 'reprocess' action"). Every assertion in those tests is
+   unchanged from before this rewrite -- only the setup fixture changed,
+   because only the setup fixture's assumption (Sales Order.submit()
+   itself producing the Material Request) stopped being true.
+
+3. test_reprocessing_a_confirmed_order_via_the_legacy_pipeline_is_a_safe_
+   no_op below is new: it proves, empirically (not by inspection), that
+   if process_sales_order() is ever manually called on a Sales Order that
+   WAS confirmed through the real Commit 25.4 flow (so it already has a
+   full-demand Pick List), it creates no duplicate Pick List, no
+   duplicate/parallel Reporte de Faltante, and no Material Request -- the
+   full-demand Pick List's own "already claimed by an open Pick List"
+   accounting (pick_list_service._qty_already_claimed_by_open_pick_
+   lists_for_so_item(), reused as-is by sync_shortage_reports_for_sales_
+   order()) neutralizes it by construction. This is a real regression
+   guard, not a formality: it is what makes it safe that this whole
+   pipeline was left in place (deprecated, a candidate for removal, not
+   redesigned) rather than deleted.
 """
 
 from unittest.mock import patch
@@ -23,6 +63,7 @@ from erpnext.buying.doctype.purchase_order.purchase_order import make_purchase_r
 from erpnext.stock.doctype.material_request.material_request import make_purchase_order
 
 from fabergray_erp.api import bodega
+from fabergray_erp.api import ventas
 from fabergray_erp.fulfillment.engine import process_sales_order
 from fabergray_erp.tests import fixtures as fx
 
@@ -79,8 +120,22 @@ class TestPurchaseReceiptHooks(IntegrationTestCase):
 		return doc
 
 	def _submit_via_hook(self, customer, items):
+		"""Kept the original name (every existing scenario below still calls
+		it) but NOT the original mechanism: Commit 25.4 changed what Sales
+		Order.on_submit does (see this file's own module docstring, point
+		2), so this no longer produces a Material Request just by
+		submitting. It now explicitly models the one legitimate remaining
+		use of this pipeline -- an admin/legacy manual reprocess of an
+		order the real Commit 25.4 hook never touched -- by submitting
+		OUTSIDE that hook (fx.without_sales_order_hook()) and then calling
+		process_sales_order() (Commit 15, itself completely unchanged)
+		directly, exactly once, exactly like the real
+		fulfillment.purchase_receipt_hooks.on_submit does for each row it
+		finds."""
 		doc = self._draft_sales_order(customer, items)
-		doc.submit()
+		with fx.without_sales_order_hook():
+			doc.submit()
+		process_sales_order(doc.name)
 		self.world.track_existing_pick_lists_and_reports_for(doc.name)
 		return doc
 
@@ -374,8 +429,16 @@ class TestPurchaseReceiptHooks(IntegrationTestCase):
 	# -- Caso 8 (Commit 18.1's own standard, re-confirmed): Vendedora gana ningún permiso nuevo --
 
 	def test_vendedora_gains_no_new_permission_from_receipt_reprocessing(self):
-		from fabergray_erp.api import ventas
-
+		"""Commit 25.4 note: her REAL submit path (ventas.confirm_order(),
+		via process_sales_order_for_confirmation()) never creates a
+		Material Request at all any more, so this scenario -- "does
+		reprocessing triggered somewhere downstream of a Vendedora's own
+		action leak her any new permission" -- can only still arise from
+		this file's own legacy/admin reprocess pipeline (module docstring,
+		point 2), never from her routine order-confirmation flow itself.
+		The guarantee under test is unchanged: her role must still never
+		read Purchase Receipt/Purchase Order/Material Request, regardless
+		of what an admin does with a Sales Order afterward."""
 		wh, item, customer = self._new_world("VendedoraNoNewPerm", stock_qty=3)
 		vendedora = self.world.user("fg194-vendedora@example.com", ["Vendedora"])
 		item_defaults_item = self.world.item(
@@ -383,13 +446,8 @@ class TestPurchaseReceiptHooks(IntegrationTestCase):
 		)
 		self.world.stock_up_real(item_defaults_item.name, wh.name, 3)
 
-		with fx.as_user(vendedora):
-			result = ventas.create_and_submit_sales_order(
-				customer=customer.name, items=[{"item_code": item_defaults_item.name, "qty": 10}]
-			)
-		self.world.track_existing("Sales Order", result["name"])
-		self.world.track_existing_pick_lists_and_reports_for(result["name"])
-		mr_name = self._mr_for(result["name"])
+		so = self._submit_via_hook(customer.name, [{"item_code": item_defaults_item.name, "warehouse": wh.name, "qty": 10, "rate": 100}])
+		mr_name = self._mr_for(so.name)
 
 		# Compras/Stock (an already-privileged Administrator session in this
 		# test, exactly like every other Purchase Order/Purchase Receipt in
@@ -399,7 +457,7 @@ class TestPurchaseReceiptHooks(IntegrationTestCase):
 		# concern for her own Sales Order submit.
 		self._receive_via_po_and_pr(mr_name)
 
-		self.assertEqual(frappe.get_doc("Reporte de Faltante", self._reports_for(result["name"])[0]).status, "Resuelto")
+		self.assertEqual(frappe.get_doc("Reporte de Faltante", self._reports_for(so.name)[0]).status, "Resuelto")
 
 		with fx.as_user(vendedora):
 			self.assertFalse(frappe.has_permission("Purchase Receipt", "read"))
@@ -509,3 +567,107 @@ class TestPurchaseReceiptHooks(IntegrationTestCase):
 			pass
 
 		self.assertEqual(frappe.db.count("Reporte de Faltante", {"sales_order": so.name}), 1)
+
+	# -- Nuevas (rewrite): la realidad del flujo actual --------------------------
+
+	def test_distinct_sales_orders_for_deduplicates_and_ignores_rows_without_one(self):
+		"""Pure unit test of the one real piece of logic this hook still
+		owns -- purchase_receipt_hooks._distinct_sales_orders_for() -- with
+		no DB dependency at all, so it stays meaningful regardless of
+		whether this pipeline has a live trigger in this app or not."""
+		from types import SimpleNamespace
+
+		from fabergray_erp.fulfillment.purchase_receipt_hooks import _distinct_sales_orders_for
+
+		doc = SimpleNamespace(
+			items=[
+				SimpleNamespace(sales_order="SO-A"),
+				SimpleNamespace(sales_order=None),
+				SimpleNamespace(sales_order="SO-B"),
+				SimpleNamespace(sales_order="SO-A"),  # duplicate -- must not appear twice
+				SimpleNamespace(sales_order=""),  # falsy -- must be skipped, not treated as a name
+			]
+		)
+		self.assertEqual(_distinct_sales_orders_for(doc), ["SO-A", "SO-B"])
+
+	def test_on_submit_is_a_noop_for_a_real_purchase_receipt_unrelated_to_any_sales_order(self):
+		"""The real, current shape of a Purchase Receipt in this app: a
+		plain, standalone purchase (Compras buying general stock), never
+		derived from a Material Request tied to a Sales Order -- exactly
+		what api.jefe_bodega.receive_shortage_purchase() deliberately does
+		NOT produce either (it inserts a Stock Entry, never a Purchase
+		Receipt at all). process_sales_order() must never be reached for
+		this, proven directly against the real hook function, not
+		inferred."""
+		wh = self.world.warehouse("FG194 UnrelatedNoop")
+		item = self.world.item("FG194-UNRELATED-NOOP-ITEM")
+
+		po = frappe.get_doc(
+			{
+				"doctype": "Purchase Order",
+				"supplier": self.supplier,
+				"company": fx.COMPANY,
+				"schedule_date": nowdate(),
+				"items": [
+					{"item_code": item.name, "qty": 5, "rate": 10, "schedule_date": nowdate(), "warehouse": wh.name}
+				],
+			}
+		)
+		po.insert()
+		po.submit()
+		self.world.track_existing("Purchase Order", po.name)
+
+		pr = make_purchase_receipt(po.name)
+		pr.posting_date = nowdate()
+		pr.insert()
+
+		with patch("fabergray_erp.fulfillment.purchase_receipt_hooks.process_sales_order") as spy:
+			pr.submit()
+			self.world.track_existing("Purchase Receipt", pr.name)
+			spy.assert_not_called()
+
+	def test_reprocessing_a_confirmed_order_via_the_legacy_pipeline_is_a_safe_no_op(self):
+		"""Empirically verified during this session's audit, not assumed:
+		manually running the old, unchanged process_sales_order() against a
+		Sales Order that WAS confirmed through the real Commit 25.4 flow
+		(ventas.confirm_order() -> a full-demand Pick List already exists)
+		creates nothing new and touches nothing -- the exact same
+		"already claimed by an open Pick List" accounting sync_shortage_
+		reports_for_sales_order()/create_pick_list_for_available_stock()
+		already used for Commit 13's own integration case (see
+		shortage_service.py's own docstring) applies here too, since the
+		full-demand Pick List's rows are indistinguishable from any other
+		open Pick List's rows to that shared accounting. This is what
+		makes it safe to leave fulfillment/purchase_receipt_hooks.py and
+		process_sales_order() in place (deprecated, a removal candidate,
+		not deleted this session) instead of having to delete them
+		immediately to avoid a real hazard."""
+		wh = self.world.warehouse("FG194 SafeNoOp")
+		item = self.world.item(
+			"FG194-SAFE-NOOP-ITEM", default_material_request_type="Purchase", default_warehouse=wh.name
+		)
+		customer = self.world.customer("FG194 SafeNoOp Customer")
+		vendedora = self.world.user("fg194-safenoop-vendedora@example.com", ["Vendedora"])
+
+		with fx.as_user(vendedora):
+			draft = ventas.create_draft_sales_order(customer=customer.name, items=[{"item_code": item.name, "qty": 10}])
+			so_name = draft["name"]
+			self.world.track_existing("Sales Order", so_name)
+			ventas.confirm_order(so_name)
+		self.world.track_existing_pick_lists_and_reports_for(so_name)
+
+		pick_lists_before = self._pick_lists_for(so_name)
+		self.assertEqual(len(pick_lists_before), 1)
+
+		result = process_sales_order(so_name)  # e.g. someone runs the legacy pipeline on this order by mistake
+		self.world.track_existing_pick_lists_and_reports_for(so_name)
+
+		self.assertIsNone(result["pick_list"])
+		self.assertEqual(result["shortages"]["created"], [])
+		self.assertEqual(result["shortages"]["updated"], [])
+		self.assertEqual(result["purchasing"]["created"], [])
+		self.assertEqual(self._pick_lists_for(so_name), pick_lists_before)  # no second Pick List
+		self.assertEqual(self._reports_for(so_name), [])  # no Reporte de Faltante at all
+		self.assertEqual(
+			frappe.get_all("Material Request Item", filters={"sales_order": so_name}, pluck="parent"), []
+		)
