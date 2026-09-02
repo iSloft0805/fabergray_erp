@@ -57,7 +57,27 @@ fabergray_erp.Ventas = class Ventas {
 			customer_results: [],
 			item_results: [],
 			observations: "",
+			// Commit 25.8.6 -- "2. Agregar productos" now has two input modes,
+			// sharing the ONE cart above -- neither mode owns its own copy of
+			// "what's in the order". "manual" is always the default per pedido
+			// (brief section 2); switching modes never clears the other mode's
+			// own state (quick_order below), only which one is currently shown.
+			item_mode: "manual", // "manual" | "quick_order"
+			quick_order: this.blank_quick_order_state(),
 		};
+	}
+
+	// Commit 25.8.6 -- "Pedido rápido" working state, entirely client-side
+	// (brief section 5: "NO persistir nada todavía") -- reset by
+	// open_nuevo_pedido() (via blank_nuevo_pedido_state() above) and by
+	// clear_quick_order() (explicit "Limpiar pedido rápido" or after a
+	// successful apply_quick_order_to_cart()), never anywhere else. `lines`
+	// is empty until interpret_quick_order() succeeds; each entry there is
+	// this.build_quick_order_line_state()'s own shape -- see that function's
+	// own docstring for exactly what's server data vs. client-only selection
+	// state.
+	blank_quick_order_state() {
+		return { text: "", lines: [], loading: false };
 	}
 
 	// -------------------------------------------------------------------
@@ -565,11 +585,15 @@ fabergray_erp.Ventas = class Ventas {
 
 			<div class="fg-np-section">
 				<div class="fg-np-section-title">${__("2. Agregar productos")}</div>
-				<div class="fg-search-box">
-					${icon("search")}
-					<input type="text" class="fg-search-input fg-item-search-input" placeholder="${__("Buscar producto...")}">
+				<div class="fg-item-mode-switch" role="tablist">
+					<button type="button" class="fg-item-mode-btn ${this.np.item_mode === "manual" ? "is-active" : ""}" data-mode="manual" role="tab" aria-selected="${this.np.item_mode === "manual"}">
+						${icon("search", "fg-icon-sm")} ${__("Buscar manualmente")}
+					</button>
+					<button type="button" class="fg-item-mode-btn ${this.np.item_mode === "quick_order" ? "is-active" : ""}" data-mode="quick_order" role="tab" aria-selected="${this.np.item_mode === "quick_order"}">
+						${icon("clipboard-list", "fg-icon-sm")} ${__("Pedido rápido")}
+					</button>
 				</div>
-				<div class="fg-item-results"></div>
+				<div class="fg-item-mode-body"></div>
 			</div>
 
 			<div class="fg-np-section">
@@ -578,9 +602,34 @@ fabergray_erp.Ventas = class Ventas {
 			</div>
 		`);
 		this.render_customer_area();
-		this.render_item_results_empty_prompt();
+		this.render_item_mode_body();
 		this.render_summary();
 		this.bind_nuevo_pedido_events();
+	}
+
+	// Commit 25.8.6 -- dispatches "2. Agregar productos"' single body area to
+	// whichever of the two input modes is currently active, WITHOUT losing
+	// either mode's own state (this.np.item_results / this.np.quick_order
+	// both live on this.np regardless of which one is rendered right now --
+	// switching modes back and forth just re-renders from what's already
+	// there, see blank_nuevo_pedido_state()'s own comment).
+	render_item_mode_body() {
+		const $wrap = this.$body.find(".fg-item-mode-body");
+		if (this.np.item_mode === "quick_order") {
+			$wrap.html(this.quick_order_panel_html());
+			this.bind_quick_order_panel_events();
+			this.render_quick_order_lines();
+		} else {
+			$wrap.html(`
+				<div class="fg-search-box">
+					${icon("search")}
+					<input type="text" class="fg-search-input fg-item-search-input" placeholder="${__("Buscar producto...")}">
+				</div>
+				<div class="fg-item-results"></div>
+			`);
+			this.render_item_results_empty_prompt();
+			this.bind_item_search_input();
+		}
 	}
 
 	render_item_results_skeleton() {
@@ -604,6 +653,22 @@ fabergray_erp.Ventas = class Ventas {
 	bind_nuevo_pedido_events() {
 		this.$body.find(".fg-np-back").on("click", () => this.back_to_dashboard());
 
+		this.$body.find(".fg-item-mode-btn").on("click", (e) => {
+			const mode = $(e.currentTarget).data("mode");
+			if (mode === this.np.item_mode) return;
+			this.np.item_mode = mode;
+			this.$body.find(".fg-item-mode-btn").removeClass("is-active").attr("aria-selected", "false");
+			$(e.currentTarget).addClass("is-active").attr("aria-selected", "true");
+			this.render_item_mode_body();
+		});
+	}
+
+	// Extracted out of bind_nuevo_pedido_events() (Commit 25.8.6) -- the
+	// manual search box is now conditionally rendered (only when
+	// this.np.item_mode === "manual"), so its own input listener has to be
+	// (re)bound every time render_item_mode_body() puts it back on screen,
+	// not just once when the whole "Nuevo pedido" screen first renders.
+	bind_item_search_input() {
 		const $item_input = this.$body.find(".fg-item-search-input");
 		const debounced_item_search = frappe.utils.debounce((txt) => this.search_items(txt), 300);
 		$item_input.on("input", (e) => {
@@ -829,6 +894,583 @@ fabergray_erp.Ventas = class Ventas {
 				this.set_cart_qty(item_code, Math.max(flt($input.val()), 0));
 			});
 		});
+	}
+
+	// -- Pedido rápido (Commit 25.8.6) -----------------------------------------
+	//
+	// Talks to fabergray_erp.api.ventas.parse_quick_order (Commit 25.8.5) --
+	// read-only, never creates/submits anything server-side. Every business
+	// rule this section renders (high/medium/low, ambiguous, preselected_item)
+	// comes straight from that response -- nothing here recomputes a score
+	// threshold or an ambiguity margin (brief section 8: those live server-
+	// side, in fabergray_erp/quick_order/scoring.py, on purpose).
+	//
+	// The ONLY way this section ever touches the real cart is by calling
+	// set_cart_qty() (apply_quick_order_to_cart() below) -- the exact same
+	// public method the manual product-card stepper already calls. Nothing
+	// here writes to this.np.cart directly, and nothing here ever calls
+	// confirm_order()/build_order_payload() or any create_*/update_*/
+	// modify_* server method -- "CONFIRMAR PEDIDO"/"GUARDAR CAMBIOS" (Paso 3,
+	// untouched by this commit) remains the one and only place a Sales Order
+	// is created or changed.
+
+	quick_order_panel_html() {
+		return `
+			<div class="fg-qo-panel">
+				<div class="fg-qo-intro">
+					<div class="fg-qo-title">${__("Captura rápida de pedido")}</div>
+					<div class="fg-qo-subtitle">
+						${__("Pega el pedido recibido por WhatsApp.")}<br>
+						${__("Revisa los productos sugeridos antes de agregarlos.")}
+					</div>
+				</div>
+				<label class="fg-qo-textarea-label" for="fg-quick-order-textarea">${__("Pedido")}</label>
+				<textarea
+					id="fg-quick-order-textarea"
+					class="fg-quick-order-textarea"
+					rows="6"
+					placeholder="${frappe.utils.escape_html(
+						"2 cajas guantes talla L negro\n1 paquete bolsa blanca 70x90\n3 galones desengrasante"
+					)}"
+				>${frappe.utils.escape_html(this.np.quick_order.text || "")}</textarea>
+				<div class="fg-qo-actions-row">
+					<button type="button" class="fg-btn fg-btn--solid-primary fg-quick-order-interpret-btn">
+						${icon("search", "fg-icon-sm")} ${__("Interpretar pedido")}
+					</button>
+					<button type="button" class="fg-btn fg-btn--ghost fg-quick-order-clear-btn">
+						${icon("trash-2", "fg-icon-sm")} ${__("Limpiar pedido rápido")}
+					</button>
+				</div>
+				<div class="fg-quick-order-results"></div>
+				<div class="fg-quick-order-apply-bar"></div>
+			</div>
+		`;
+	}
+
+	bind_quick_order_panel_events() {
+		this.$body.find(".fg-quick-order-textarea").on("input", (e) => {
+			this.np.quick_order.text = $(e.currentTarget).val();
+		});
+		this.$body.find(".fg-quick-order-interpret-btn").on("click", () => this.interpret_quick_order());
+		this.$body.find(".fg-quick-order-clear-btn").on("click", () => this.clear_quick_order());
+	}
+
+	// Sends exactly what's in the textarea (trimmed) to parse_quick_order()
+	// -- disables the button and shows a loading state for the duration
+	// (brief section 4: "impedir doble click"), always restores it in
+	// .finally() even on error. A failed call leaves the textarea and the
+	// cart both exactly as they were -- frappe.call()'s own default error
+	// dialog already shows the real server message (same convention every
+	// other .catch() in this file already follows), nothing custom needed
+	// here. Re-running this REPLACES this.np.quick_order.lines wholesale
+	// (brief section 21: "reemplazar, NO duplicar") -- never appends.
+	interpret_quick_order() {
+		if (this.np.quick_order.loading) return;
+
+		const $textarea = this.$body.find(".fg-quick-order-textarea");
+		const text = ($textarea.val() || "").trim();
+		if (!text) {
+			frappe.show_alert({ message: __("Pega un pedido antes de interpretar."), indicator: "orange" });
+			return;
+		}
+
+		this.np.quick_order.loading = true;
+		this.np.quick_order.text = text;
+		const $btn = this.$body.find(".fg-quick-order-interpret-btn").prop("disabled", true).addClass("fg-btn--loading");
+		this.render_quick_order_results_skeleton();
+
+		this.call("parse_quick_order", { text: text })
+			.then((response) => {
+				this.np.quick_order.lines = (response.lines || []).map((line) => this.build_quick_order_line_state(line));
+				this.render_quick_order_lines();
+			})
+			.catch(() => {
+				this.render_quick_order_lines(); // back to the empty prompt, textarea untouched
+			})
+			.finally(() => {
+				this.np.quick_order.loading = false;
+				$btn.prop("disabled", false).removeClass("fg-btn--loading");
+			});
+	}
+
+	// The one place a parse_quick_order() line becomes this Page's own
+	// working state -- everything through `candidates` is server data,
+	// copied as-is; everything after is client-only selection state that
+	// this screen owns until "Agregar productos al pedido" is pressed.
+	// `selected` starts from `preselected_item` when the server sent one
+	// (brief section 8: ONLY preselected_item ever auto-selects anything --
+	// never top_candidate on its own, never a client-side score check).
+	build_quick_order_line_state(server_line) {
+		return {
+			source_text: server_line.source_text,
+			qty: server_line.qty,
+			detected_uom: server_line.detected_uom,
+			confidence: server_line.confidence,
+			ambiguous: server_line.ambiguous,
+			candidates: server_line.candidates || [],
+			selected: server_line.preselected_item
+				? {
+						item_code: server_line.preselected_item.item_code,
+						item_name: server_line.preselected_item.item_name,
+						stock_uom: server_line.preselected_item.stock_uom,
+				  }
+				: null,
+			ignored: false,
+			manual_search_open: false,
+			manual_search_txt: "",
+			manual_search_results: [],
+			_search_seq: 0,
+		};
+	}
+
+	render_quick_order_results_skeleton() {
+		this.$body.find(".fg-quick-order-results").html(`
+			<div class="fg-skeleton fg-product-skeleton"></div>
+			<div class="fg-skeleton fg-product-skeleton"></div>
+		`);
+		this.$body.find(".fg-quick-order-apply-bar").empty();
+	}
+
+	render_quick_order_lines() {
+		const $area = this.$body.find(".fg-quick-order-results");
+		if (!$area.length) return; // mode switched away before this resolved
+		const lines = this.np.quick_order.lines;
+
+		if (!lines.length) {
+			$area.html(`<div class="fg-empty fg-empty--sm">${__('Pega un pedido y presiona "Interpretar pedido".')}</div>`);
+			this.$body.find(".fg-quick-order-apply-bar").empty();
+			return;
+		}
+
+		$area.html(lines.map((line, i) => this.render_quick_order_line(line, i)).join(""));
+		lines.forEach((_, i) => this.bind_quick_order_line_events(i));
+		this.render_quick_order_apply_bar();
+	}
+
+	// Re-renders ONE line card in place (never the whole list) -- every
+	// per-line action below (qty edit, candidate pick, ignore toggle, manual
+	// search open/close/pick) calls this, not render_quick_order_lines(),
+	// so the rest of the review list never loses scroll position or gets
+	// needlessly rebuilt for an edit to a single row.
+	render_quick_order_line_at(index) {
+		const line = this.np.quick_order.lines[index];
+		const $old = this.$body.find(`.fg-qo-line[data-index="${index}"]`);
+		if (!line || !$old.length) return;
+		$old.replaceWith(this.render_quick_order_line(line, index));
+		this.bind_quick_order_line_events(index);
+		this.render_quick_order_apply_bar();
+	}
+
+	// The five states from the brief's own section 7 table -- "sin
+	// candidatos" is checked FIRST (a line whose server confidence happens
+	// to be "low" with zero candidates must say "Producto no encontrado",
+	// never "Selecciona producto").
+	quick_order_line_status(line) {
+		if (!line.candidates.length) return { label: __("Producto no encontrado"), mod: "not-found" };
+		if (line.confidence === "high" && !line.ambiguous) return { label: __("Coincidencia alta"), mod: "high" };
+		if (line.confidence === "high" && line.ambiguous) return { label: __("Revisar alternativas"), mod: "review" };
+		if (line.confidence === "medium") return { label: __("Revisar sugerencia"), mod: "review" };
+		return { label: __("Selecciona producto"), mod: "low" };
+	}
+
+	// A small, non-selection tag shown on the FIRST candidate only (brief
+	// section 9): "Seleccionado" when it's genuinely this line's current
+	// pick (server preselected it, or she clicked it herself); otherwise a
+	// plain hint -- "Mejor coincidencia" for an ambiguous high-confidence
+	// top pick, "Sugerencia principal" for medium -- that never implies a
+	// selection was made. Low confidence gets no tag at all (brief: "NO
+	// mostrarlo como si fuera una sugerencia confiable").
+	quick_order_candidate_tag(line, candidate, index) {
+		if (line.selected && line.selected.item_code === candidate.item_code) return __("Seleccionado");
+		if (index !== 0) return null;
+		if (line.confidence === "high" && line.ambiguous) return __("Mejor coincidencia");
+		if (line.confidence === "medium") return __("Sugerencia principal");
+		return null;
+	}
+
+	render_quick_order_line(line, index) {
+		const status = this.quick_order_line_status(line);
+		const candidates_html = line.candidates.length
+			? line.candidates.map((c, i) => this.render_quick_order_candidate(line, c, i, index)).join("")
+			: `<div class="fg-empty fg-empty--sm">${__("Sin coincidencias")}</div>`;
+
+		return `
+			<div class="fg-qo-line ${line.ignored ? "fg-qo-line--ignored" : ""}" data-index="${index}">
+				<div class="fg-qo-line-header">
+					<div class="fg-qo-line-source">
+						<span class="fg-qo-line-label">${__("Texto original")}</span>
+						<span class="fg-qo-line-text">${frappe.utils.escape_html(line.source_text)}</span>
+					</div>
+					<span class="fg-qo-status fg-qo-status--${status.mod}">${status.label}</span>
+				</div>
+
+				<div class="fg-qo-line-body">
+					<div class="fg-qo-field">
+						<label for="fg-qo-qty-${index}">${__("Cantidad")}</label>
+						<input
+							id="fg-qo-qty-${index}"
+							type="number"
+							inputmode="decimal"
+							class="fg-qo-qty-input"
+							value="${line.qty}"
+							min="0"
+							${line.ignored ? "disabled" : ""}
+						>
+					</div>
+					<div class="fg-qo-field">
+						<label>${__("Unidad detectada")}</label>
+						<div class="fg-qo-uom">${
+							line.detected_uom ? __("Detectado") + ": " + frappe.utils.escape_html(line.detected_uom) : "—"
+						}</div>
+					</div>
+					<div class="fg-qo-field fg-qo-field--product">
+						<label>${__("Producto")}</label>
+						${this.render_quick_order_selected_product(line)}
+					</div>
+				</div>
+
+				<div class="fg-qo-line-candidates">
+					<div class="fg-qo-line-label">${__("Alternativas")}</div>
+					<div class="fg-qo-candidate-list">${candidates_html}</div>
+				</div>
+
+				${this.render_quick_order_manual_search(line, index)}
+
+				<div class="fg-qo-line-actions">
+					<button type="button" class="fg-qo-line-search-toggle" data-index="${index}">
+						${icon("search", "fg-icon-sm")} ${line.manual_search_open ? __("Cerrar búsqueda") : __("Buscar otro producto")}
+					</button>
+					<button type="button" class="fg-qo-line-ignore" data-index="${index}" aria-pressed="${line.ignored}">
+						${line.ignored ? icon("circle-check", "fg-icon-sm") + " " + __("Reactivar") : icon("x", "fg-icon-sm") + " " + __("Ignorar")}
+					</button>
+				</div>
+			</div>
+		`;
+	}
+
+	render_quick_order_selected_product(line) {
+		if (line.selected) {
+			return `
+				<div class="fg-selected-chip fg-qo-selected-chip">
+					${icon("check", "fg-icon-sm")}
+					<span>${frappe.utils.escape_html(line.selected.item_name)}</span>
+					<span class="fg-qo-selected-code">${frappe.utils.escape_html(line.selected.item_code)}</span>
+				</div>
+			`;
+		}
+		return `<div class="fg-qo-no-selection">${__("Sin seleccionar")}</div>`;
+	}
+
+	// Never renders price/stock/cost/warehouse (brief section 10) -- these
+	// fields are all parse_quick_order() ever sends per candidate in the
+	// first place (Commit 25.8.5), so there is nothing to omit here, only
+	// to display: item_name/item_code/stock_uom/score/confidence.
+	render_quick_order_candidate(line, candidate, index, line_index) {
+		const is_selected = line.selected && line.selected.item_code === candidate.item_code;
+		const tag = this.quick_order_candidate_tag(line, candidate, index);
+		return `
+			<button
+				type="button"
+				class="fg-qo-candidate ${is_selected ? "is-selected" : ""}"
+				data-line="${line_index}"
+				data-item-code="${frappe.utils.escape_html(candidate.item_code)}"
+				aria-pressed="${!!is_selected}"
+			>
+				<div class="fg-qo-candidate-main">
+					<span class="fg-qo-candidate-name">${frappe.utils.escape_html(candidate.item_name)}</span>
+					<span class="fg-qo-candidate-code">${frappe.utils.escape_html(candidate.item_code)}</span>
+				</div>
+				<div class="fg-qo-candidate-meta">
+					${candidate.stock_uom ? `<span>${frappe.utils.escape_html(candidate.stock_uom)}</span>` : ""}
+					<span class="fg-qo-candidate-score fg-qo-candidate-score--${candidate.confidence}">${candidate.score}%</span>
+					${tag ? `<span class="fg-qo-candidate-tag">${tag}</span>` : ""}
+				</div>
+			</button>
+		`;
+	}
+
+	// -- Búsqueda manual por fila (brief section 11) ---------------------------
+	//
+	// Reuses the real search_items() SERVER call directly (this.call(...)),
+	// never the class's own search_items() METHOD -- that one mutates
+	// this.np.item_results/renders .fg-item-results, the shared state behind
+	// the main manual-search box; a per-line search here needs its own,
+	// isolated result list instead. No second matching algorithm of any kind
+	// is introduced -- same endpoint, same server-side logic, just a
+	// separate client-side results array scoped to this one Quick Order line.
+
+	render_quick_order_manual_search(line, index) {
+		if (!line.manual_search_open) return "";
+		return `
+			<div class="fg-qo-manual-search">
+				<div class="fg-search-box fg-search-box--sm">
+					${icon("search", "fg-icon-sm")}
+					<input
+						type="text"
+						class="fg-qo-manual-search-input"
+						data-index="${index}"
+						placeholder="${__("Buscar producto...")}"
+						value="${frappe.utils.escape_html(line.manual_search_txt || "")}"
+					>
+				</div>
+				<div class="fg-qo-manual-search-results">
+					${this.quick_order_manual_results_html(line, index)}
+				</div>
+			</div>
+		`;
+	}
+
+	quick_order_manual_results_html(line, index) {
+		const results = line.manual_search_results || [];
+		if (results.length) return results.map((r) => this.render_quick_order_manual_result_row(r, index)).join("");
+		if (line.manual_search_txt) return `<div class="fg-empty fg-empty--sm">${__("Sin resultados")}</div>`;
+		return "";
+	}
+
+	render_quick_order_manual_result_row(r, index) {
+		return `
+			<button
+				type="button"
+				class="fg-qo-manual-result"
+				data-index="${index}"
+				data-item-code="${frappe.utils.escape_html(r.item_code)}"
+				data-item-name="${frappe.utils.escape_html(r.item_name)}"
+				data-stock-uom="${frappe.utils.escape_html(r.stock_uom || "")}"
+			>
+				<span>${frappe.utils.escape_html(r.item_name)}</span>
+				<span class="fg-qo-manual-result-code">${frappe.utils.escape_html(r.item_code)}</span>
+			</button>
+		`;
+	}
+
+	// Surgical update -- only the results list inside ONE line's manual
+	// search reflows while she types, never the whole line/card (which
+	// would drop input focus on every keystroke).
+	render_quick_order_manual_results_only(index) {
+		const line = this.np.quick_order.lines[index];
+		if (!line) return;
+		const $results = this.$body.find(`.fg-qo-line[data-index="${index}"] .fg-qo-manual-search-results`);
+		if (!$results.length) return;
+		$results.html(this.quick_order_manual_results_html(line, index));
+		$results.find(".fg-qo-manual-result").on("click", (e) => {
+			const $btn = $(e.currentTarget);
+			this.select_quick_order_manual_result(index, {
+				item_code: $btn.data("item-code"),
+				item_name: $btn.data("item-name"),
+				stock_uom: $btn.data("stock-uom"),
+			});
+		});
+	}
+
+	search_quick_order_item(index, txt) {
+		const line = this.np.quick_order.lines[index];
+		if (!line) return;
+		if (!txt || !txt.trim()) {
+			line.manual_search_results = [];
+			this.render_quick_order_manual_results_only(index);
+			return;
+		}
+		line._search_seq = (line._search_seq || 0) + 1;
+		const seq = line._search_seq;
+		this.call("search_items", { txt: txt }).then((results) => {
+			if (line._search_seq !== seq) return; // a newer search for this same line superseded this one
+			line.manual_search_results = results || [];
+			this.render_quick_order_manual_results_only(index);
+		});
+	}
+
+	toggle_quick_order_manual_search(index) {
+		const line = this.np.quick_order.lines[index];
+		if (!line) return;
+		line.manual_search_open = !line.manual_search_open;
+		if (!line.manual_search_open) {
+			line.manual_search_txt = "";
+			line.manual_search_results = [];
+		}
+		this.render_quick_order_line_at(index);
+	}
+
+	select_quick_order_manual_result(index, item) {
+		const line = this.np.quick_order.lines[index];
+		if (!line) return;
+		line.selected = { item_code: item.item_code, item_name: item.item_name, stock_uom: item.stock_uom };
+		line.manual_search_open = false;
+		line.manual_search_txt = "";
+		line.manual_search_results = [];
+		this.render_quick_order_line_at(index);
+	}
+
+	select_quick_order_candidate(index, item_code) {
+		const line = this.np.quick_order.lines[index];
+		if (!line) return;
+		const candidate = line.candidates.find((c) => c.item_code === item_code);
+		if (!candidate) return;
+		line.selected = { item_code: candidate.item_code, item_name: candidate.item_name, stock_uom: candidate.stock_uom };
+		line.manual_search_open = false;
+		this.render_quick_order_line_at(index);
+	}
+
+	toggle_quick_order_ignore(index) {
+		const line = this.np.quick_order.lines[index];
+		if (!line) return;
+		line.ignored = !line.ignored;
+		this.render_quick_order_line_at(index);
+	}
+
+	// Same clamp set_cart_qty()'s own callers already use everywhere else in
+	// this file (bind_item_result_events()/bind_cart_line_events()) --
+	// 0/negative/NaN/empty all normalize to 0 here too (brief section 12: no
+	// new, incompatible rule). A qty of 0 simply fails
+	// validate_quick_order_lines() below for an active (non-ignored) line --
+	// it is never silently treated as valid.
+	set_quick_order_qty(index, raw_value) {
+		const line = this.np.quick_order.lines[index];
+		if (!line) return;
+		line.qty = Math.max(flt(raw_value), 0);
+		this.render_quick_order_line_at(index);
+	}
+
+	bind_quick_order_line_events(index) {
+		const $line = this.$body.find(`.fg-qo-line[data-index="${index}"]`);
+		if (!$line.length) return;
+
+		$line.find(".fg-qo-qty-input").on("change", (e) => {
+			this.set_quick_order_qty(index, $(e.currentTarget).val());
+		});
+		$line.find(".fg-qo-candidate").on("click", (e) => {
+			this.select_quick_order_candidate(index, $(e.currentTarget).data("item-code"));
+		});
+		$line.find(".fg-qo-line-ignore").on("click", () => this.toggle_quick_order_ignore(index));
+		$line.find(".fg-qo-line-search-toggle").on("click", () => this.toggle_quick_order_manual_search(index));
+
+		const $manual_input = $line.find(".fg-qo-manual-search-input");
+		const debounced_manual_search = frappe.utils.debounce((txt) => this.search_quick_order_item(index, txt), 300);
+		$manual_input.on("input", (e) => {
+			const txt = $(e.currentTarget).val();
+			const line = this.np.quick_order.lines[index];
+			if (line) line.manual_search_txt = txt;
+			if (!txt || !txt.trim()) {
+				if (line) line.manual_search_results = [];
+				this.render_quick_order_manual_results_only(index);
+				return;
+			}
+			debounced_manual_search(txt);
+		});
+
+		$line.find(".fg-qo-manual-result").on("click", (e) => {
+			const $btn = $(e.currentTarget);
+			this.select_quick_order_manual_result(index, {
+				item_code: $btn.data("item-code"),
+				item_name: $btn.data("item-name"),
+				stock_uom: $btn.data("stock-uom"),
+			});
+		});
+	}
+
+	// -- Validación + aplicar al carrito (brief sections 16-19) ----------------
+
+	// Ignored lines never count, toward either the "at least one active
+	// line" requirement or the "every active line resolved" one -- an
+	// ignored line with no Item selected is not an error, it is simply not
+	// part of this batch.
+	validate_quick_order_lines() {
+		const active = this.np.quick_order.lines.filter((l) => !l.ignored);
+		const missing = active.filter((l) => !l.selected || !(flt(l.qty) > 0));
+		return { valid: active.length > 0 && missing.length === 0, active_count: active.length, missing_count: missing.length };
+	}
+
+	render_quick_order_apply_bar() {
+		const $bar = this.$body.find(".fg-quick-order-apply-bar");
+		if (!$bar.length) return;
+		if (!this.np.quick_order.lines.length) {
+			$bar.empty();
+			return;
+		}
+		const { valid, missing_count } = this.validate_quick_order_lines();
+		$bar.html(`
+			${missing_count > 0 ? `<div class="fg-qo-warning">${icon("triangle-alert", "fg-icon-sm")} ${__("Faltan {0} línea(s) por resolver antes de agregar.", [missing_count])}</div>` : ""}
+			<button type="button" class="fg-btn fg-btn--solid-primary fg-quick-order-apply-btn" ${valid ? "" : "disabled"}>
+				${icon("shopping-cart", "fg-icon-sm")} ${__("Agregar productos al pedido")}
+			</button>
+		`);
+		$bar.find(".fg-quick-order-apply-btn").on("click", () => this.apply_quick_order_to_cart());
+	}
+
+	// The one place Quick Order ever touches the real cart -- exclusively
+	// through set_cart_qty(), never a direct this.np.cart.set() (brief
+	// section 17). Groups every active, resolved line by item_code and SUMS
+	// their quantities FIRST (brief section 18 -- "2 guantes..." + "3
+	// guantes..." resolving to the same Item must add up to 5, never let one
+	// line silently overwrite the other: set_cart_qty() itself REPLACES a
+	// line's qty, it does not add), then adds that sum on top of whatever
+	// qty the cart already had for that Item (cart_qty(item_code), read
+	// BEFORE any of this batch's own set_cart_qty() calls) -- an item
+	// already in the cart at qty 4 plus a Quick Order total of 5 ends at 9,
+	// never at a bare 5 (this commit's own report, section K/L, has the full
+	// audit of set_cart_qty()'s replace-not-add semantics that makes this
+	// necessary).
+	apply_quick_order_to_cart() {
+		const { valid } = this.validate_quick_order_lines();
+		if (!valid) return; // apply button is already disabled in this case -- defensive guard only
+
+		const additions = new Map(); // item_code -> {qty_to_add, item_name, stock_uom}
+		for (const line of this.np.quick_order.lines) {
+			if (line.ignored || !line.selected) continue;
+			const qty = flt(line.qty);
+			if (qty <= 0) continue;
+			const existing = additions.get(line.selected.item_code);
+			if (existing) {
+				existing.qty_to_add += qty;
+			} else {
+				additions.set(line.selected.item_code, {
+					qty_to_add: qty,
+					item_name: line.selected.item_name,
+					stock_uom: line.selected.stock_uom,
+				});
+			}
+		}
+		if (!additions.size) return;
+
+		for (const [item_code, addition] of additions) {
+			// set_cart_qty() resolves item_name/stock_uom for a NEW cart line by
+			// checking this.np.item_results, then this._item_info_cache, then
+			// (only as a last resort) falls back to the bare item_code -- an
+			// Item that only ever came from a Quick Order candidate/manual
+			// search was never in either of those, so it would otherwise show
+			// its raw code instead of its real name. Seeding the info cache
+			// here (only if not already present -- never overwrite a fresher
+			// entry) is what makes set_cart_qty() resolve it correctly, without
+			// touching set_cart_qty() itself at all.
+			if (!this._item_info_cache.has(item_code)) {
+				this._item_info_cache.set(item_code, {
+					item_code: item_code,
+					item_name: addition.item_name,
+					stock_uom: addition.stock_uom,
+				});
+			}
+			this.set_cart_qty(item_code, this.cart_qty(item_code) + addition.qty_to_add);
+		}
+
+		frappe.show_alert(
+			{
+				message: `${icon("check", "fg-icon-sm")} ${__("{0} producto(s) agregado(s) al pedido", [additions.size])}`,
+				indicator: "green",
+			},
+			5
+		);
+
+		this.clear_quick_order(); // results + textarea only -- render_summary() above already reflects the cart
+	}
+
+	// "Limpiar pedido rápido" (brief section 15) AND the automatic cleanup
+	// after a successful apply (brief section 19) both funnel through here
+	// -- one implementation, never two. Only ever touches
+	// this.np.quick_order + its own textarea; this.np.cart is never part of
+	// this reset.
+	clear_quick_order() {
+		this.np.quick_order = this.blank_quick_order_state();
+		this.$body.find(".fg-quick-order-textarea").val("");
+		this.render_quick_order_lines();
 	}
 
 	// -- Cart / Paso 3: Resumen -----------------------------------------------

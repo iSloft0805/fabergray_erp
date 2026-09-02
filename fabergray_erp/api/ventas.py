@@ -42,6 +42,9 @@ from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 from fabergray_erp.api.bodega import _require_login
 from fabergray_erp.fulfillment.modification_service import modification_blockers_for
 from fabergray_erp.permission_conditions import assert_same_company
+from fabergray_erp.quick_order import catalog as quick_order_catalog
+from fabergray_erp.quick_order import matcher as quick_order_matcher
+from fabergray_erp.quick_order import parser as quick_order_parser
 from fabergray_erp.sales_order_naming import root_commercial_name
 
 # No native default exists for Sales Order.delivery_date -- confirmed by
@@ -59,6 +62,25 @@ DEFAULT_DELIVERY_LEAD_DAYS = 7
 # field -- is rejected outright, not silently dropped, by
 # create_and_submit_sales_order() below.
 _ALLOWED_ITEM_FIELDS = {"item_code", "qty"}
+
+# Commit 25.8.5 -- defensive input limits for parse_quick_order() below.
+# 50 lines / 10,000 characters is generous for what this feature is for (a
+# single pasted WhatsApp order) while still bounding the work one request
+# can force the server to do -- each line runs its own
+# search_catalog_candidates() + match_order_line() pass. Exceeding either
+# throws immediately (frappe.ValidationError, via frappe.throw()'s own
+# default) -- never silently truncated, so the asesora is never shown a
+# partial interpretation of her own pasted text without knowing it.
+QUICK_ORDER_MAX_LINES = 50
+QUICK_ORDER_MAX_CHARS = 10000
+
+# The only fields a quick-order candidate is ever serialized with (Commit
+# 25.8 audit + this commit's own brief, section 8) -- built explicitly, key
+# by key, in _serialize_quick_order_candidate() below, never by forwarding
+# scoring.score_candidate()'s own dict or Candidate itself verbatim. No
+# rate/price/price_list_rate/valuation_rate/cost/standard_rate/stock field
+# is ever read into a variable here, matching get_item_info()/search_items()'s
+# own "nothing to leak by construction" convention elsewhere in this module.
 
 
 class SalesOrderAlreadyCancelledError(frappe.ValidationError):
@@ -264,6 +286,177 @@ def get_item_info(item_code, customer=None, qty=None):
         "image": item.image,
         "qty_disponible": qty_disponible,
     }
+
+
+def _serialize_quick_order_candidate(scored_candidate, catalog_index):
+    """The one place a `scoring.score_candidate()` result is turned into
+    what the client actually receives -- an explicit, field-by-field dict,
+    never the scoring result forwarded verbatim (same convention
+    `get_order_detail()`'s own docstring establishes elsewhere in this
+    module: nothing economic is ever read into a variable here in the first
+    place, so there is nothing to filter after the fact).
+
+    `stock_uom` is the one field `scoring.score_candidate()` itself doesn't
+    carry (it only knows `item_code`/`item_name`/score/tokens) -- looked up
+    from the already-loaded `catalog_index["by_code"]` Candidate, never a
+    fresh `frappe.get_doc()` per candidate.
+    """
+    candidate = catalog_index["by_code"].get(scored_candidate["item_code"])
+    return {
+        "item_code": scored_candidate["item_code"],
+        "item_name": scored_candidate["item_name"],
+        "stock_uom": candidate["stock_uom"] if candidate else None,
+        "score": scored_candidate["score"],
+        "confidence": scored_candidate["confidence"],
+        "matched_tokens": scored_candidate["matched_tokens"],
+        "conflicts": scored_candidate["conflicts"],
+        "reasons": scored_candidate["reasons"],
+    }
+
+
+def _build_quick_order_line_response(parsed_line, match_result, catalog_index):
+    """One line of `parse_quick_order()`'s own response -- see that
+    function's own docstring for the full shape and the
+    `top_candidate`/`preselected_item` distinction (Commit 25.8.5 brief,
+    section 6), which is decided HERE, once, server-side -- `ventas.js`
+    (Commit 25.8.6+, not built yet) will never need to re-derive the
+    high/ambiguous business rule itself."""
+    candidates = [_serialize_quick_order_candidate(c, catalog_index) for c in match_result["candidates"]]
+    top_candidate = candidates[0] if candidates else None
+    confidence = top_candidate["confidence"] if top_candidate else "low"
+
+    preselected_item = None
+    if top_candidate and top_candidate["confidence"] == "high" and not match_result["ambiguous"]:
+        preselected_item = top_candidate
+
+    return {
+        "source_text": parsed_line["source_text"],
+        "qty": parsed_line["qty"],
+        "detected_uom": parsed_line["detected_uom"],
+        "product_text": parsed_line["product_text"],
+        "top_candidate": top_candidate,
+        "preselected_item": preselected_item,
+        "confidence": confidence,
+        "ambiguous": match_result["ambiguous"],
+        "score_margin": match_result["score_margin"],
+        "candidates": candidates,
+    }
+
+
+@frappe.whitelist()
+def parse_quick_order(text):
+    """Commit 25.8.5 -- "Pedido rápido": interprets a pasted, multi-line,
+    free-text order against the real sellable Item catalog and returns a
+    per-line list of scored candidates. Read-only, no side effect of any
+    kind beyond the catalog's own already-designed read-through cache
+    (Commit 25.8.3's `get_cached_catalog()`) -- never touches a Sales
+    Order, a Quotation, a Pick List, a cart, or an Item. Never accepts an
+    `item_code` from the client -- the only input is free text; every
+    candidate this function can ever return comes from
+    `quick_order.catalog.get_sellable_item_candidates()`'s own filter
+    (`disabled=0`/`is_sales_item=1`/`has_variants=0`, identical to
+    `search_items()` above), never anything the caller named directly.
+
+    This function is deliberately thin -- it is glue, not logic. Every bit
+    of actual interpretation lives in `quick_order.parser`/`.catalog`/
+    `.matcher` (Commits 25.8.1-25.8.4, all pure Python except `catalog.py`'s
+    own read-only ERPNext integration) and is reused here verbatim, never
+    duplicated: `parse_order_text()` for parsing, `get_cached_catalog()` +
+    `search_catalog_candidates()` for retrieval, `match_order_line()` for
+    scoring/ranking. `get_cached_catalog()` is called exactly ONCE per
+    request (never once per line) -- the loop below only calls
+    `search_catalog_candidates()`/`match_order_line()` per line, both of
+    which take the already-loaded `catalog_index` as an argument rather
+    than re-fetching it.
+
+    Security: `_require_login()` + `frappe.has_permission("Item", "read",
+    throw=True)` -- the exact same two calls `search_items()`/
+    `get_item_info()` above already use for the same reason (Vendedora's
+    existing Item-read grant, Commit 18.1). No new permission of any kind
+    was added for this endpoint.
+
+    Input validation (Commit 25.8.5 brief, section 3): `text` must be a
+    non-empty string (after `.strip()`); longer than
+    `QUICK_ORDER_MAX_CHARS` or more than `QUICK_ORDER_MAX_LINES` non-blank
+    lines raises immediately (`frappe.throw()`'s own default
+    `frappe.ValidationError`) -- never silently truncated, so nothing is
+    ever interpreted from a request the asesora doesn't know was cut short.
+
+    A line with no reasonable candidate at all (`candidates: []`, e.g.
+    "producto que no existe xyz") never fails the whole request -- see
+    `_build_quick_order_line_response()`'s own construction, which always
+    returns a well-formed line dict regardless of whether anything matched.
+
+    Returns:
+        {
+            "lines": [
+                {
+                    "source_text": str,
+                    "qty": int | float,
+                    "detected_uom": str | None,
+                    "product_text": str,
+                    "top_candidate": <candidate> | None,       # best result, if any -- NOT a selection
+                    "preselected_item": <candidate> | None,    # ONLY if confidence=="high" AND not ambiguous
+                    "confidence": "high" | "medium" | "low",   # of top_candidate, "low" if none
+                    "ambiguous": bool,
+                    "score_margin": int | float | None,
+                    "candidates": [<candidate>, ...],          # <= 5, score DESC
+                },
+                ...
+            ],
+            "line_count": int,
+        }
+
+        <candidate> = {
+            "item_code": str,
+            "item_name": str,
+            "stock_uom": str | None,
+            "score": int,                     # 0-100
+            "confidence": "high" | "medium" | "low",
+            "matched_tokens": [str, ...],
+            "conflicts": [{"category", "order_value", "candidate_value"}, ...],
+            "reasons": [str, ...],
+        }
+
+        Never any economic field (`rate`/`price`/`price_list_rate`/
+        `valuation_rate`/`cost`/`standard_rate`) or stock-quantity field (no
+        Bin/Stock Ledger read of any kind happens here), or `description`
+        (omitted on purpose -- Commit 25.8.5 brief, section 9: item_name is
+        already long enough, description would only
+        grow the payload with nothing the UI needs yet).
+    """
+    _require_login()
+    frappe.has_permission("Item", "read", throw=True)
+
+    if not isinstance(text, str) or not text.strip():
+        frappe.throw(_("El texto del pedido no puede estar vacío."))
+
+    if len(text) > QUICK_ORDER_MAX_CHARS:
+        frappe.throw(
+            _("El texto del pedido es demasiado largo (máximo {0} caracteres).").format(QUICK_ORDER_MAX_CHARS)
+        )
+
+    parsed_lines = quick_order_parser.parse_order_text(text)
+
+    if len(parsed_lines) > QUICK_ORDER_MAX_LINES:
+        frappe.throw(
+            _("El pedido tiene demasiadas líneas (máximo {0}).").format(QUICK_ORDER_MAX_LINES)
+        )
+
+    catalog_index = quick_order_catalog.get_cached_catalog()  # ONE load for the whole request, never per line
+
+    lines = [
+        _build_quick_order_line_response(
+            parsed_line,
+            quick_order_matcher.match_order_line(
+                parsed_line, quick_order_catalog.search_catalog_candidates(parsed_line, catalog=catalog_index)
+            ),
+            catalog_index,
+        )
+        for parsed_line in parsed_lines
+    ]
+
+    return {"lines": lines, "line_count": len(lines)}
 
 
 @frappe.whitelist()
