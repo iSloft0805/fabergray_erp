@@ -31,7 +31,12 @@ fabergray_erp.Ventas = class Ventas {
 
 		// Dashboard data (view: "dashboard").
 		this.summary = null;
-		this.orders = null;
+		this.orders = null; // active orders only (get_my_orders(view="active")) -- never includes docstatus=2
+		// Commit 25.10 -- a SEPARATE list, fetched lazily (get_my_orders(view="cancelled"))
+		// the first time "Cancelados" is opened, never mixed into `this.orders`
+		// above. `null` here specifically means "not fetched yet" -- distinct
+		// from `[]` ("fetched, there are none") -- see set_order_filter().
+		this.cancelled_orders = null;
 		this.order_filter = null; // null | "pedidos_hoy" | "pendientes" | "entregados" | "cancelados"
 
 		// "Nuevo pedido" (view: "nuevo_pedido") working state -- reset every
@@ -131,14 +136,26 @@ fabergray_erp.Ventas = class Ventas {
 	// =====================================================================
 	// Dashboard
 	// =====================================================================
+	// Commit 25.10 -- always refreshes the active list; also refreshes
+	// `this.cancelled_orders` if "Cancelados" was already opened at least
+	// once this session (never fetches it for the first time here -- see
+	// set_order_filter(), the one place that lazy-load happens), so a
+	// manual refresh while looking at Cancelados doesn't show stale data.
 	load_dashboard() {
 		this.set_busy(true);
 		this.state.view = "dashboard";
 		this.render_skeleton_dashboard();
-		return Promise.all([this.call("get_sales_summary"), this.call("get_my_orders")])
-			.then(([summary, orders]) => {
+
+		const calls = [this.call("get_sales_summary"), this.call("get_my_orders", { view: "active" })];
+		if (this.cancelled_orders !== null) {
+			calls.push(this.call("get_my_orders", { view: "cancelled" }));
+		}
+
+		return Promise.all(calls)
+			.then(([summary, orders, cancelled_orders]) => {
 				this.summary = summary;
 				this.orders = orders;
+				if (cancelled_orders !== undefined) this.cancelled_orders = cancelled_orders;
 				this.render_dashboard();
 			})
 			.finally(() => this.set_busy(false));
@@ -199,18 +216,28 @@ fabergray_erp.Ventas = class Ventas {
 	// (fabergray_erp/api/ventas.py) -- re-applied client-side only to filter
 	// the already-fetched get_my_orders() list, never to compute a KPI number
 	// itself (that number always comes straight from get_sales_summary()).
+	// Commit 25.10 -- "cancelados" is deliberately NOT one of the branches
+	// here anymore: it is never a client-side filter over `this.orders`
+	// (which, since this commit, is fetched with view="active" and can
+	// never contain a docstatus=2 order to begin with -- see
+	// load_dashboard()) -- it is its own separate list, `this.cancelled_orders`,
+	// switched to by render_orders_section()/set_order_filter() below. The
+	// three real filters here all apply to the active list only, which is
+	// what already keeps a cancelled-today order from ever matching
+	// "pedidos_hoy" -- there is no cancelled order left in `this.orders` for
+	// it to match against.
 	order_matches_filter(o, filter) {
 		if (!filter) return true;
 		if (filter === "pedidos_hoy") return o.transaction_date === frappe.datetime.nowdate();
 		if (filter === "pendientes") return ["To Deliver and Bill", "To Deliver"].includes(o.status);
 		if (filter === "entregados") return o.status === "Completed";
-		if (filter === "cancelados") return o.status === "Cancelled";
 		return true;
 	}
 
 	render_orders_section() {
-		const all = this.orders || [];
-		const list = all.filter((o) => this.order_matches_filter(o, this.order_filter));
+		const is_cancelled_view = this.order_filter === "cancelados";
+		const all = is_cancelled_view ? this.cancelled_orders || [] : this.orders || [];
+		const list = is_cancelled_view ? all : all.filter((o) => this.order_matches_filter(o, this.order_filter));
 
 		const filter_labels = {
 			pedidos_hoy: __("Pedidos de hoy"),
@@ -329,24 +356,54 @@ fabergray_erp.Ventas = class Ventas {
 
 		this.$body.find(".fg-kpi[data-filter]").on("click", (e) => {
 			const key = $(e.currentTarget).data("filter");
-			this.order_filter = this.order_filter === key ? null : key;
-			this.$body.find(".fg-orders-section").html(this.render_orders_section());
-			this.bind_orders_section_events();
-			this.$body.find(".fg-kpi").removeClass("is-active");
-			if (this.order_filter) this.$body.find(`.fg-kpi[data-filter="${this.order_filter}"]`).addClass("is-active");
-			document.querySelector(".fg-orders-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+			this.set_order_filter(this.order_filter === key ? null : key);
 		});
 
 		this.bind_orders_section_events();
 	}
 
+	// Commit 25.10 -- the ONE place `this.order_filter` changes, for both the
+	// KPI chips (bind_dashboard_events()) and the "clear filter" chip
+	// (bind_orders_section_events()) -- consolidated so "Cancelados" gets
+	// its lazy-load exactly once, from a single call site, instead of that
+	// logic being duplicated (or forgotten) at a second one. Fetches
+	// `this.cancelled_orders` from the server only the FIRST time
+	// "Cancelados" is opened this session (`=== null` check -- an empty
+	// array from a real, empty result never re-fetches); every other
+	// filter change just re-renders from data already in memory.
+	set_order_filter(filter) {
+		this.order_filter = filter;
+		this.$body.find(".fg-kpi").removeClass("is-active");
+		if (filter) this.$body.find(`.fg-kpi[data-filter="${filter}"]`).addClass("is-active");
+
+		if (filter === "cancelados" && this.cancelled_orders === null) {
+			this.render_orders_section_loading();
+			this.call("get_my_orders", { view: "cancelled" }).then((orders) => {
+				this.cancelled_orders = orders || [];
+				this.$body.find(".fg-orders-section").html(this.render_orders_section());
+				this.bind_orders_section_events();
+			});
+			return;
+		}
+
+		this.$body.find(".fg-orders-section").html(this.render_orders_section());
+		this.bind_orders_section_events();
+		document.querySelector(".fg-orders-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+	}
+
+	render_orders_section_loading() {
+		this.$body.find(".fg-orders-section").html(`
+			<div class="fg-section-head">
+				<div class="fg-section-title">${__("Pedidos")}</div>
+			</div>
+			<div class="fg-skeleton-cards">
+				<div class="fg-skeleton"></div><div class="fg-skeleton"></div><div class="fg-skeleton"></div>
+			</div>
+		`);
+	}
+
 	bind_orders_section_events() {
-		this.$body.find(".fg-filter-chip-clear").on("click", () => {
-			this.order_filter = null;
-			this.$body.find(".fg-kpi").removeClass("is-active");
-			this.$body.find(".fg-orders-section").html(this.render_orders_section());
-			this.bind_orders_section_events();
-		});
+		this.$body.find(".fg-filter-chip-clear").on("click", () => this.set_order_filter(null));
 
 		this.$body.find(".fg-order-card-view").on("click", (e) => {
 			this.open_order_detail($(e.currentTarget).data("order-name"));
@@ -393,6 +450,19 @@ fabergray_erp.Ventas = class Ventas {
 				this.call("cancel_sales_order", { name: name })
 					.then(() => {
 						frappe.show_alert({ message: __("Pedido cancelado."), indicator: "green" }, 5);
+						// Commit 25.10.1 -- explicit cache invalidation, not left as
+						// an incidental side effect of load_dashboard()'s own "also
+						// refetch cancelled_orders if it happened to be loaded
+						// already" behaviour (which stays, unchanged, below -- this
+						// is additive, not a replacement for it). Setting this back
+						// to `null` (never a manually-appended array entry -- see
+						// this commit's own report, section C, for why: docstatus=2
+						// on the server stays the one authority) is what forces the
+						// NEXT time "Cancelados" is opened to run a fresh
+						// get_my_orders(view="cancelled") in set_order_filter(),
+						// instead of possibly still holding whatever snapshot was
+						// cached from before this cancellation.
+						this.cancelled_orders = null;
 						this.load_dashboard();
 					})
 					.catch(() => {
@@ -1534,7 +1604,7 @@ fabergray_erp.Ventas = class Ventas {
 					"Escribe observaciones sobre este pedido..."
 				)}">${frappe.utils.escape_html(this.np.observations || "")}</textarea>
 			</div>
-			<button type="button" class="fg-btn fg-btn--solid-primary fg-btn--lg fg-confirm-btn" disabled>
+			<button type="button" class="fg-btn fg-btn--solid-primary fg-btn--lg fg-confirm-btn">
 				${icon("check")} ${
 					this.np.editing_order_name || this.np.modifying_order_name ? __("GUARDAR CAMBIOS") : __("CONFIRMAR PEDIDO")
 				}
@@ -1581,9 +1651,20 @@ fabergray_erp.Ventas = class Ventas {
 		});
 	}
 
+	// Commit 25.10 -- CONFIRMAR PEDIDO/GUARDAR CAMBIOS stays visually enabled
+	// through the entire Nuevo Pedido/Editar/Modificar flow, regardless of
+	// customer/cart/qty state -- the ONLY reason this button is ever
+	// disabled is a request genuinely in flight (`this.busy`), to prevent a
+	// double submit. What used to gate this (no customer, empty cart) is
+	// now validated explicitly, with a specific message per case, at the
+	// top of confirm_order() itself -- see that function's own comment.
+	// Real bug this fixes: an asesora correcting/continuing a pedido could
+	// find the button disabled with no visible reason (cart temporarily
+	// empty while swapping products, customer chip just removed to change
+	// it, etc.) -- she now always gets an explicit, actionable message
+	// instead of a silently inert button.
 	refresh_confirm_state() {
-		const can_confirm = !!this.np.customer && this.np.cart.size > 0;
-		this.$body.find(".fg-confirm-btn").prop("disabled", !can_confirm || this.busy);
+		this.$body.find(".fg-confirm-btn").prop("disabled", this.busy);
 	}
 
 	// -- Confirmar --------------------------------------------------------------
@@ -1604,16 +1685,35 @@ fabergray_erp.Ventas = class Ventas {
 		};
 	}
 
+	// Commit 25.10 -- every "is this pedido actually ready" check now lives
+	// HERE, explicitly, checked at click time -- never as a precondition for
+	// the button to be clickable at all (see refresh_confirm_state()'s own
+	// comment). Three distinct, specific messages, in the order a real
+	// pedido is built (cliente -> productos -> cantidades) -- never a
+	// single generic "invalid" message, and never a request sent to the
+	// server for any of these: `this.call(...)` is only ever reached below
+	// once every one of these has already passed. The button itself is
+	// never disabled by any of this -- it stays clickable so she can fix
+	// the issue and press it again immediately.
 	confirm_order() {
 		if (this.busy) return;
 
-		const payload = this.build_order_payload();
-		if (!payload.customer) {
+		if (!this.np.customer) {
 			frappe.show_alert({ message: __("Selecciona un cliente antes de confirmar."), indicator: "orange" });
 			return;
 		}
+		if (this.np.cart.size === 0) {
+			frappe.show_alert({ message: __("Agrega al menos un producto al pedido."), indicator: "orange" });
+			return;
+		}
+
+		const payload = this.build_order_payload();
 		if (!payload.items.length) {
-			frappe.show_alert({ message: __("Agrega al menos un producto antes de confirmar."), indicator: "orange" });
+			// this.np.cart has entries (checked above) but every single one
+			// filtered out of build_order_payload() for qty <= 0 -- a
+			// distinct message from "cart is empty", since the asesora
+			// added products, she just needs to fix their quantities.
+			frappe.show_alert({ message: __("Revisa las cantidades de los productos."), indicator: "orange" });
 			return;
 		}
 

@@ -460,7 +460,7 @@ def parse_quick_order(text):
 
 
 @frappe.whitelist()
-def get_my_orders(limit=50):
+def get_my_orders(limit=50, view="active"):
     """All of Fabrigray's Sales Orders (Commit 25.1: "el rol controla el
     área, no el owner" -- if_owner dropped from Sales Order/Vendedora's
     Custom DocPerm), most recent first -- operational fields only
@@ -512,12 +512,49 @@ def get_my_orders(limit=50):
     "MODIFICAR PEDIDO" per card without a second round-trip; the
     authoritative check still lives in `modify_submitted_sales_order()`
     itself, re-derived there, never trusted from here.
+
+    Commit 25.10 -- `view` ("active" default | "cancelled") is the one new,
+    explicit, closed-set parameter this function accepts -- never an
+    arbitrary client-supplied filter. "active" means `docstatus != 2`
+    (every Draft/Submitted/whatever-native-status order that has not been
+    cancelled); "cancelled" means `docstatus == 2`. Real bug this fixes:
+    the Page's own main "Pedidos" list used to return every Sales Order
+    regardless of status, so a cancelled order stayed mixed in with active
+    ones in the default view instead of moving to its own, explicit
+    "Cancelados" section.
+
+    Commit 25.10.1 -- an unrecognized `view` value now raises
+    `frappe.ValidationError` outright instead of silently falling back to
+    "active". This is a brand-new parameter with exactly one caller this
+    app fully controls (ventas.js) -- there is no legacy/external caller a
+    silent fallback would need to stay compatible with, and a silent
+    fallback would have actively hidden a real bug: a future typo in the
+    one call site (e.g. `view: "canceled"`, one "l") would have quietly
+    rendered the ACTIVE list under the "Cancelados" label instead of
+    surfacing loudly during development. Same "reject outright, never
+    silently drop/coerce" convention `_validate_and_build_item_rows()`
+    above already establishes for `_ALLOWED_ITEM_FIELDS`.
+
+    The already-established amend-chain-tip skip below (a document
+    superseded by a LATER amendment is never listed on its own) applies
+    identically to both views: an order that was cancelled purely as the
+    internal first half of Commit 18.5's own cancel+amend "modify" flow
+    (and therefore has a live, amended successor) is not a real,
+    asesora-facing cancellation and never appears under "Cancelados"
+    either -- only a genuinely terminal cancellation (nothing amends it)
+    does, matching what "Cancelados" is actually supposed to mean to her.
     """
     _require_login()
     frappe.has_permission("Sales Order", "read", throw=True)
 
+    if view not in ("active", "cancelled"):
+        frappe.throw(_("Parámetro view inválido: {0}. Debe ser 'active' o 'cancelled'.").format(view))
+
+    filters = {"docstatus": ["!=", 2]} if view == "active" else {"docstatus": 2}
+
     names = frappe.get_list(
         "Sales Order",
+        filters=filters,
         fields=["name"],
         order_by="transaction_date desc, creation desc",
         limit_page_length=0,
@@ -619,11 +656,23 @@ def get_sales_summary():
     To Deliver and Bill, To Bill, To Deliver, Completed, Cancelled,
     Closed) -- no "Alistamiento iniciado" or similar experimental bucket
     yet, and no bucket that would require Pick List/Reporte de Faltante
-    access (Commit 18's approved Option B)."""
+    access (Commit 18's approved Option B).
+
+    Commit 25.10 -- `pedidos_hoy` now explicitly excludes `docstatus == 2`:
+    it used to count every Sales Order created today by `transaction_date`
+    alone, regardless of status, so an order cancelled the same day it was
+    created still inflated this "today's activity" number. `pendientes`/
+    `entregados` never needed this fix -- a cancelled order's own native
+    `status` is literally "Cancelled", which can never also be "To Deliver
+    and Bill"/"To Deliver"/"Completed" at the same time -- only
+    `pedidos_hoy`'s date-only filter had no status condition of its own at
+    all. `cancelados` stays its own separate bucket, exactly as before."""
     _require_login()
     frappe.has_permission("Sales Order", "read", throw=True)
 
-    pedidos_hoy = frappe.get_list("Sales Order", filters={"transaction_date": nowdate()}, pluck="name")
+    pedidos_hoy = frappe.get_list(
+        "Sales Order", filters={"transaction_date": nowdate(), "docstatus": ["!=", 2]}, pluck="name"
+    )
     pendientes = frappe.get_list(
         "Sales Order",
         filters={"status": ["in", ["To Deliver and Bill", "To Deliver"]]},
