@@ -433,10 +433,26 @@ def set_picked_qty(name, row_name, qty):
 
 	`row_name` is validated against this specific Pick List (see
 	_get_pick_list_row) so a row from a different Pick List can never be
-	targeted through this call. The over-delivery ceiling reuses ERPNext's own
-	Stock Settings.over_delivery_receipt_allowance instead of inventing a new
-	threshold, and the physical-stock ceiling is enforced by Pick List's own
-	`validate_stock_qty()` when `doc.save()` runs -- not duplicated here.
+	targeted through this call.
+
+	Commit 25.9 -- `picked_qty` represents the quantity Bodega physically
+	found and set aside, which is allowed to be anywhere from 0 up to what
+	was actually REQUESTED on this row (`row.stock_qty`, "Solicitado" in the
+	UI) -- never bounded by the ERP's own live stock figure
+	(`Bin.actual_qty`), which this site's opening inventory frequently
+	leaves at 0 even for items that physically exist. This used to reuse
+	ERPNext's own Stock Settings.over_delivery_receipt_allowance as the
+	ceiling; that made the "picked <= requested" guarantee depend on a
+	global, independently-configurable percentage instead of being a hard
+	rule (an administrator raising that setting would silently have let
+	over-picking through) -- replaced with a direct, deterministic bound
+	against `row.stock_qty` itself, decimal-tolerant via the field's own
+	precision (same utility, same tolerance, `fulfillment/pick_list_mixin.py`'s
+	own `validate_stock_qty()` override uses to enforce this identical rule
+	again, authoritatively, the moment `doc.save()` below actually runs --
+	see that module's own docstring for the full incident writeup on why a
+	second, doctype-level enforcement point is what actually makes this
+	unavoidable, not just this early, friendlier check).
 	`_lock_manual_picking` is called before saving in case this is the first
 	write on the document (see its docstring for why that matters).
 	"""
@@ -455,15 +471,14 @@ def set_picked_qty(name, row_name, qty):
 		frappe.throw(_("La cantidad alistada no puede ser negativa."))
 
 	if row.stock_qty:
-		allowance_pct = 100 + flt(
-			frappe.get_single_value("Stock Settings", "over_delivery_receipt_allowance")
-		)
-		if (qty / flt(row.stock_qty)) * 100 > allowance_pct:
+		precision = row.precision("picked_qty") or 6
+		requested_qty = flt(row.stock_qty, precision)
+		if flt(qty, precision) > requested_qty:
 			frappe.throw(
 				_(
-					"La cantidad alistada ({0}) supera lo permitido para la fila {1} "
-					"(máximo {2}% de lo solicitado, según la tolerancia configurada en Stock Settings)."
-				).format(qty, row.idx, allowance_pct)
+					"La cantidad alistada ({0}) no puede superar la cantidad solicitada ({1}) "
+					"para la fila {2}."
+				).format(qty, requested_qty, row.idx)
 			)
 
 	row.picked_qty = qty

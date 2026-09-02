@@ -524,9 +524,18 @@ after_migrate = "fabergray_erp.user_hooks.backfill_module_profile_for_operationa
 # ------------------------------
 #
 # Specify custom mixins to extend the standard doctype controller.
-# extend_doctype_class = {
-# 	"Task": "fabergray_erp.custom.task.CustomTaskMixin"
-# }
+#
+# Commit 25.9 -- Pick List's own native validate_stock_qty() (erpnext core)
+# throws "Insufficient Stock" whenever picked_qty > Bin.actual_qty, which is
+# the wrong rule for Bodega's physical-count flow (picked_qty must be
+# bounded by what was REQUESTED, not by what the ERP's own live stock
+# figure says -- see fulfillment/pick_list_mixin.py's own module docstring
+# for the full incident writeup and why this is the correct fix point:
+# no core file touched, no global negative-stock bypass, scoped to Pick
+# List only).
+extend_doctype_class = {
+	"Pick List": "fabergray_erp.fulfillment.pick_list_mixin.PickListPhysicalCountMixin"
+}
 
 # Overriding Methods
 # ------------------------------
