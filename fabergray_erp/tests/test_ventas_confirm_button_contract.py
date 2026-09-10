@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""Commit 25.10 -- static contract tests for two ventas.js changes:
+"""Commit 25.11 -- static contract tests for two ventas.js changes:
 
-1. CONFIRMAR PEDIDO/GUARDAR CAMBIOS stays visually enabled through the
-   whole Nuevo Pedido/Editar/Modificar flow -- the button is only ever
-   disabled while a request is genuinely in flight (`this.busy`); every
-   other "is this ready" check moved into confirm_order() itself, checked
-   at click time, each with its own specific message.
+1. CONFIRMAR PEDIDO/GUARDAR CAMBIOS stays visually AND functionally
+   enabled ALWAYS through the whole Nuevo Pedido/Editar/Modificar flow --
+   it is never disabled, not even while a request is genuinely in flight
+   (`this.busy`). Double-submit protection is the `if (this.busy)
+   return;` guard alone, never the `disabled` attribute. Every "is this
+   ready" check lives in confirm_order() itself, checked at click time,
+   each with its own specific message.
 2. Cancelled Sales Orders are fetched through a separate `view` param
    (never a client-side filter over the same list active orders come
    from) and their cards never offer an edit/modify/re-cancel action.
@@ -58,14 +60,26 @@ class TestConfirmButtonContract(IntegrationTestCase):
         super().setUpClass()
         cls.js = _read()
 
-    # A/B. botón no disabled por carrito vacío / cliente vacío
-    def test_a_b_refresh_confirm_state_only_depends_on_busy(self):
-        body = _method_body(self.js, "refresh_confirm_state")
-        self.assertNotIn("cart.size", body)
-        self.assertNotIn("np.customer", body)
-        self.assertIn("this.busy", body)
+    # A. HTML inicial no contiene disabled
+    def test_a_confirm_button_markup_has_no_hardcoded_disabled_attribute(self):
+        """The initial markup itself must not ship pre-disabled --
+        refresh_confirm_state() is the single source of truth for this."""
+        m = re.search(r'class="[^"]*fg-confirm-btn[^"]*"([^>]*)>', self.js)
+        self.assertIsNotNone(m)
+        self.assertNotIn("disabled", m.group(1))
 
-    def test_no_disable_condition_based_on_forbidden_reasons(self):
+    # B. refresh_confirm_state nunca pone disabled=true (ni siquiera para busy)
+    def test_b_refresh_confirm_state_always_forces_disabled_false(self):
+        body = _method_body(self.js, "refresh_confirm_state")
+        self.assertIn('.prop("disabled", false)', body)
+        self.assertNotIn('"disabled", true', body)
+        # this.busy must not be referenced here at all -- the button is
+        # unconditionally enabled, busy or not.
+        self.assertNotIn("this.busy", body)
+
+    # C/D/E/F. carrito vacío / sin cliente / editando / modificando -- ninguno
+    # de estos puede aparecer como condición de disable en ningún lado.
+    def test_c_to_f_no_disable_condition_based_on_forbidden_reasons(self):
         """Section 2's own explicit list -- none of these may ever appear
         inside refresh_confirm_state() as a *disabling* condition."""
         body = _method_body(self.js, "refresh_confirm_state")
@@ -78,13 +92,6 @@ class TestConfirmButtonContract(IntegrationTestCase):
             "quick_order",
         ):
             self.assertNotIn(forbidden, body, f"{forbidden!r} must never appear in refresh_confirm_state()")
-
-    def test_confirm_button_markup_has_no_hardcoded_disabled_attribute(self):
-        """The initial markup itself must not ship pre-disabled --
-        refresh_confirm_state() is the single source of truth for this."""
-        m = re.search(r'class="[^"]*fg-confirm-btn[^"]*"([^>]*)>', self.js)
-        self.assertIsNotNone(m)
-        self.assertNotIn("disabled", m.group(1))
 
     # C. click con cliente vacío muestra validación y no llama servidor
     def test_c_customer_check_happens_before_any_server_call(self):
@@ -116,32 +123,54 @@ class TestConfirmButtonContract(IntegrationTestCase):
         self.assertEqual(len(messages), len(set(messages)), "each validation must show its own distinct message")
         self.assertGreaterEqual(len(messages), 3)
 
-    # F. request en curso sí bloquea doble click
-    def test_f_busy_guard_and_temporary_disable_around_the_real_call(self):
+    # I. busy guard evita doble ejecución (única protección contra doble click)
+    def test_i_busy_guard_is_the_only_double_submit_protection(self):
         body = _method_body(self.js, "confirm_order")
         self.assertTrue(body.strip().startswith("if (this.busy) return;"))
         self.assertIn("this.busy = true;", body)
-        self.assertIn('.prop("disabled", true)', body)
 
-    # G. error de servidor reactiva botón
-    def test_g_every_write_path_reenables_the_button_in_finally(self):
+    # G/H. busy=true / request en curso -- el botón NUNCA recibe disabled=true,
+    # en ninguno de los tres flujos de escritura (nuevo/editar/modificar).
+    def test_g_h_no_write_path_ever_sets_disabled_true_while_busy(self):
         for method_name in ("confirm_order", "save_draft_edit", "save_submitted_modification"):
             body = _method_body(self.js, method_name)
-            self.assertIn('.prop("disabled", false)', body)
-            self.assertIn("this.busy = false;", body)
+            self.assertIn("this.busy = true;", body)
+            self.assertNotIn('"disabled", true', body)
+            self.assertNotIn('attr("disabled"', body)
 
-    # H/I/J: Nuevo/Editar/Modificar -- el despacho por modo permanece
+    # J/K. error de servidor / success -- busy siempre se resetea y el botón
+    # nunca queda (ni pasa por) disabled en el camino de salida.
+    def test_j_k_every_write_path_resets_busy_without_ever_disabling(self):
+        for method_name in ("confirm_order", "save_draft_edit", "save_submitted_modification"):
+            body = _method_body(self.js, method_name)
+            self.assertIn("this.busy = false;", body)
+            self.assertIn('removeClass("fg-btn--loading")', body)
+            self.assertNotIn('"disabled", true', body)
+            self.assertNotIn('"disabled", false', body)
+
+    # L/M/N: Nuevo/Editar/Modificar -- el despacho por modo permanece
     # intacto (sin cambios de este commit); el comportamiento SERVER-SIDE
     # de los tres flujos está cubierto end-to-end en Python (ver docstring
     # del módulo) -- esto solo fija que confirm_order() sigue enrutando
-    # correctamente a los tres.
-    def test_h_i_j_confirm_order_still_dispatches_to_all_three_modes(self):
+    # correctamente a los tres, y que en ninguno el botón queda disabled.
+    def test_l_m_n_confirm_order_still_dispatches_to_all_three_modes(self):
         body = _method_body(self.js, "confirm_order")
         self.assertIn("this.np.editing_order_name", body)
         self.assertIn("this.save_draft_edit(payload)", body)
         self.assertIn("this.np.modifying_order_name", body)
         self.assertIn("this.save_submitted_modification(payload)", body)
         self.assertIn('this.call("create_and_submit_sales_order"', body)
+
+    # O. ningún otro método de ventas.js deshabilita .fg-confirm-btn --
+    # whole-file guardrail, not scoped to any one method.
+    def test_o_no_method_anywhere_in_the_file_disables_the_confirm_button(self):
+        self.assertNotIn('.fg-confirm-btn").prop("disabled", true)', self.js)
+        self.assertNotIn(".fg-confirm-btn\").attr(\"disabled\"", self.js)
+        self.assertNotIn(".fg-confirm-btn').prop('disabled', true)", self.js)
+        # Every occurrence of the selector, whole-file, must never be
+        # immediately followed by a call that sets disabled to true.
+        for m in re.finditer(r'\.fg-confirm-btn"\)[^\n;]*', self.js):
+            self.assertNotIn('"disabled", true', m.group(0))
 
 
 class TestCancelledOrdersUiContract(IntegrationTestCase):

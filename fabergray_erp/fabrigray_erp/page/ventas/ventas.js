@@ -1651,20 +1651,23 @@ fabergray_erp.Ventas = class Ventas {
 		});
 	}
 
-	// Commit 25.10 -- CONFIRMAR PEDIDO/GUARDAR CAMBIOS stays visually enabled
-	// through the entire Nuevo Pedido/Editar/Modificar flow, regardless of
-	// customer/cart/qty state -- the ONLY reason this button is ever
-	// disabled is a request genuinely in flight (`this.busy`), to prevent a
-	// double submit. What used to gate this (no customer, empty cart) is
-	// now validated explicitly, with a specific message per case, at the
-	// top of confirm_order() itself -- see that function's own comment.
-	// Real bug this fixes: an asesora correcting/continuing a pedido could
-	// find the button disabled with no visible reason (cart temporarily
-	// empty while swapping products, customer chip just removed to change
-	// it, etc.) -- she now always gets an explicit, actionable message
-	// instead of a silently inert button.
+	// Commit 25.11 -- CONFIRMAR PEDIDO/GUARDAR CAMBIOS stays visually and
+	// functionally enabled ALWAYS, through the entire Nuevo Pedido/Editar/
+	// Modificar flow, regardless of customer/cart/qty state AND regardless
+	// of a request being in flight -- this button must never receive
+	// disabled=true for any reason. Double-submit protection is the
+	// `if (this.busy) return;` guard at the top of confirm_order() alone
+	// (see that function's own comment), never the disabled attribute.
+	// What used to gate this (no customer, empty cart) is validated
+	// explicitly, with a specific message per case, at the top of
+	// confirm_order() itself. Real bug this fixes: an asesora correcting/
+	// continuing a pedido could find the button disabled with no visible
+	// reason (cart temporarily empty while swapping products, customer
+	// chip just removed to change it, a request still in flight, etc.) --
+	// she now always gets a clickable button and, if truly not ready, an
+	// explicit, actionable message instead of a silently inert button.
 	refresh_confirm_state() {
-		this.$body.find(".fg-confirm-btn").prop("disabled", this.busy);
+		this.$body.find(".fg-confirm-btn").prop("disabled", false);
 	}
 
 	// -- Confirmar --------------------------------------------------------------
@@ -1735,7 +1738,7 @@ fabergray_erp.Ventas = class Ventas {
 		}
 
 		this.busy = true;
-		const $btn = this.$body.find(".fg-confirm-btn").prop("disabled", true).addClass("fg-btn--loading");
+		const $btn = this.$body.find(".fg-confirm-btn").addClass("fg-btn--loading");
 
 		frappe.confirm(
 			__("¿Confirmas la creación de este pedido?"),
@@ -1760,20 +1763,20 @@ fabergray_erp.Ventas = class Ventas {
 					})
 					.finally(() => {
 						this.busy = false;
-						$btn.prop("disabled", false).removeClass("fg-btn--loading");
+						$btn.removeClass("fg-btn--loading");
 						this.refresh_confirm_state();
 					});
 			},
 			() => {
 				this.busy = false;
-				$btn.prop("disabled", false).removeClass("fg-btn--loading");
+				$btn.removeClass("fg-btn--loading");
 			}
 		);
 	}
 
 	save_draft_edit(payload) {
 		this.busy = true;
-		const $btn = this.$body.find(".fg-confirm-btn").prop("disabled", true).addClass("fg-btn--loading");
+		const $btn = this.$body.find(".fg-confirm-btn").addClass("fg-btn--loading");
 
 		this.call("update_draft_sales_order", {
 			name: this.np.editing_order_name,
@@ -1799,7 +1802,7 @@ fabergray_erp.Ventas = class Ventas {
 			})
 			.finally(() => {
 				this.busy = false;
-				$btn.prop("disabled", false).removeClass("fg-btn--loading");
+				$btn.removeClass("fg-btn--loading");
 				this.refresh_confirm_state();
 			});
 	}
@@ -1813,7 +1816,7 @@ fabergray_erp.Ventas = class Ventas {
 	// never swallowed, never bypassed, no manual retry attempted.
 	save_submitted_modification(payload) {
 		this.busy = true;
-		const $btn = this.$body.find(".fg-confirm-btn").prop("disabled", true).addClass("fg-btn--loading");
+		const $btn = this.$body.find(".fg-confirm-btn").addClass("fg-btn--loading");
 
 		this.call("modify_submitted_sales_order", {
 			name: this.np.modifying_order_name,
@@ -1840,7 +1843,7 @@ fabergray_erp.Ventas = class Ventas {
 			})
 			.finally(() => {
 				this.busy = false;
-				$btn.prop("disabled", false).removeClass("fg-btn--loading");
+				$btn.removeClass("fg-btn--loading");
 				this.refresh_confirm_state();
 			});
 	}
