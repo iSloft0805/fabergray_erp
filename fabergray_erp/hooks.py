@@ -441,6 +441,10 @@ fixtures = [
 					"fg_invoicing_status",
 					"fg_invoiced_on",
 					"fg_invoiced_by",
+					# Commit 25.12 -- mandatory cancellation reason (+ optional
+					# free-text detail) captured by cancel_sales_order().
+					"fg_cancellation_reason",
+					"fg_cancellation_note",
 				],
 			]
 		],

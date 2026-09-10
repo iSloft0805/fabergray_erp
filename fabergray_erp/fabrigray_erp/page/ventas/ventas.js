@@ -273,6 +273,30 @@ fabergray_erp.Ventas = class Ventas {
 		const obs = o.observations
 			? `<div class="fg-order-card-obs">${icon("file-text", "fg-icon-sm")} ${frappe.utils.escape_html(o.observations)}</div>`
 			: "";
+		// Commit 25.12 -- only ever rendered for a genuinely cancelled card
+		// (o.status === "Cancelled"); `o.cancellation_reason` is `null` for
+		// any Sales Order cancelled before this commit, or cancelled
+		// outside this app (native Desk) -- "No registrada" is shown for
+		// that case, NEVER a guessed/inferred value (Commit 25.12 brief,
+		// section 9). `cancellation_note` is genuinely optional even for a
+		// cancellation made through this app (only mandatory when
+		// `cancellation_reason === "Otro"`, enforced server-side in
+		// cancel_sales_order()) -- so its own line is omitted entirely
+		// when absent, matching `obs` above's own "nothing to show ->
+		// nothing rendered" convention.
+		const cancellation_html =
+			o.status === "Cancelled"
+				? `
+					<div class="fg-order-card-cancellation">
+						<div>${icon("x", "fg-icon-sm")} ${__("Razón")}: ${frappe.utils.escape_html(o.cancellation_reason || __("No registrada"))}</div>
+						${
+							o.cancellation_note
+								? `<div>${__("Detalle")}: ${frappe.utils.escape_html(o.cancellation_note)}</div>`
+								: ""
+						}
+					</div>
+				`
+				: "";
 
 		return `
 			<div class="fg-order-card">
@@ -290,6 +314,7 @@ fabergray_erp.Ventas = class Ventas {
 					<span>${format_qty(o.total_qty)} ${__("unidades")}</span>
 				</div>
 				${obs}
+				${cancellation_html}
 				${this.render_order_card_actions(o)}
 			</div>
 		`;
@@ -440,39 +465,110 @@ fabergray_erp.Ventas = class Ventas {
 		});
 	}
 
+	// Commit 25.12 -- a reason is now mandatory to cancel a pedido, so a
+	// plain frappe.confirm() (yes/no only) is no longer enough; this opens
+	// a real frappe.ui.Dialog with a "Razón de cancelación" Select
+	// (`reqd: 1`) + a "Detalle" Small Text (`mandatory_depends_on` for
+	// `reason === "Otro"`, matching cancel_sales_order()'s own server-side
+	// rule exactly). `reason_options` is read from the Sales Order
+	// doctype's OWN meta (`fg_cancellation_reason`'s Custom Field
+	// `options`) at dialog-open time via `frappe.model.with_doctype()` --
+	// never a second, hand-typed copy of the enum here -- same pattern
+	// page/bodega/bodega.js's own `open_report_shortage_dialog()` already
+	// established for "Reporte de Faltante"'s `shortage_reason`. That
+	// keeps this dialog and `CANCELLATION_REASONS` (api/ventas.py) from
+	// ever silently drifting apart: whatever the fixture ships is exactly
+	// what both the UI offers and the server accepts.
+	//
+	// Frappe's own `Dialog.get_values()` already refuses to invoke
+	// `primary_action` at all while a `reqd`/`mandatory_depends_on` field
+	// is empty (confirmed by reading frappe/public/js/frappe/ui/dialog.js
+	// directly) -- so "sin razón" / "Otro sin detalle" never reach the
+	// server through the framework alone. The two checks repeated at the
+	// top of `primary_action` below are a deliberate, explicit second
+	// line of defense (same "never trust framework wiring alone for a
+	// hard requirement" convention `confirm_order()` already follows for
+	// its own three validations) -- not there because the framework check
+	// is known to be insufficient.
+	//
+	// Double-click protection is scoped to this dialog's own primary
+	// button (`dialog.disable_primary_action()`/`enable_primary_action()`,
+	// same convention as `open_report_shortage_dialog()`'s own "REPORTAR
+	// FALTANTE" button) -- `this.busy`/`.fg-confirm-btn` (Commit 25.11:
+	// ALWAYS enabled, no exceptions) are never touched by this function.
 	confirm_cancel_order(name) {
 		if (!name) return;
-		frappe.confirm(
-			__(
-				"¿Cancelar este pedido? Esta acción retirará el pedido del flujo operativo cuando sea permitido por ERPNext."
-			),
-			() => {
-				this.call("cancel_sales_order", { name: name })
-					.then(() => {
-						frappe.show_alert({ message: __("Pedido cancelado."), indicator: "green" }, 5);
-						// Commit 25.10.1 -- explicit cache invalidation, not left as
-						// an incidental side effect of load_dashboard()'s own "also
-						// refetch cancelled_orders if it happened to be loaded
-						// already" behaviour (which stays, unchanged, below -- this
-						// is additive, not a replacement for it). Setting this back
-						// to `null` (never a manually-appended array entry -- see
-						// this commit's own report, section C, for why: docstatus=2
-						// on the server stays the one authority) is what forces the
-						// NEXT time "Cancelados" is opened to run a fresh
-						// get_my_orders(view="cancelled") in set_order_filter(),
-						// instead of possibly still holding whatever snapshot was
-						// cached from before this cancellation.
-						this.cancelled_orders = null;
-						this.load_dashboard();
+
+		frappe.model.with_doctype("Sales Order", () => {
+			const reason_field = frappe.get_meta("Sales Order").fields.find((f) => f.fieldname === "fg_cancellation_reason");
+			const reason_options = ["", ...(reason_field.options || "").split("\n").map((o) => o.trim()).filter(Boolean)];
+
+			const dialog = new frappe.ui.Dialog({
+				title: __("Cancelar pedido"),
+				fields: [
+					{
+						fieldtype: "Select",
+						fieldname: "reason",
+						label: __("Razón de cancelación"),
+						options: reason_options,
+						reqd: 1,
+					},
+					{
+						fieldtype: "Small Text",
+						fieldname: "note",
+						label: __("Detalle"),
+						mandatory_depends_on: "eval:doc.reason === 'Otro'",
+					},
+				],
+				primary_action_label: __("Confirmar cancelación"),
+				primary_action: (values) => {
+					if (!values.reason) {
+						frappe.msgprint(__("Selecciona una razón de cancelación."));
+						return;
+					}
+					if (values.reason === "Otro" && !(values.note || "").trim()) {
+						frappe.msgprint(__('Escribe el detalle de la cancelación cuando la razón es "Otro".'));
+						return;
+					}
+
+					dialog.disable_primary_action();
+					this.call("cancel_sales_order", {
+						name: name,
+						reason: values.reason,
+						note: (values.note || "").trim() || null,
 					})
-					.catch(() => {
-						// Native ERPNext blocks (submitted Pick List/Material Request/
-						// Purchase Order still linked, etc.) surface here via the
-						// server's own real error message -- never swallowed, never
-						// bypassed, no manual cleanup attempted client-side.
-					});
-			}
-		);
+						.then(() => {
+							dialog.hide();
+							frappe.show_alert({ message: __("Pedido cancelado."), indicator: "green" }, 5);
+							// Commit 25.10.1 -- explicit cache invalidation, not left as
+							// an incidental side effect of load_dashboard()'s own "also
+							// refetch cancelled_orders if it happened to be loaded
+							// already" behaviour (which stays, unchanged, below -- this
+							// is additive, not a replacement for it). Setting this back
+							// to `null` (never a manually-appended array entry -- see
+							// this commit's own report, section C, for why: docstatus=2
+							// on the server stays the one authority) is what forces the
+							// NEXT time "Cancelados" is opened to run a fresh
+							// get_my_orders(view="cancelled") in set_order_filter(),
+							// instead of possibly still holding whatever snapshot was
+							// cached from before this cancellation.
+							this.cancelled_orders = null;
+							this.load_dashboard();
+						})
+						.catch(() => {
+							// Native ERPNext blocks (submitted Pick List/Material Request/
+							// Purchase Order still linked, etc.) surface here via the
+							// server's own real error message -- never swallowed, never
+							// bypassed, no manual cleanup attempted client-side.
+							dialog.enable_primary_action();
+						});
+				},
+				secondary_action_label: __("Volver"),
+				secondary_action: () => dialog.hide(),
+			});
+
+			dialog.show();
+		});
 	}
 
 	// =====================================================================

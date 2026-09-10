@@ -766,7 +766,7 @@ class TestVentasApi(IntegrationTestCase):
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
 		with fx.as_user(self.vendedora_a):
-			cancel_result = ventas.cancel_sales_order(result["name"])
+			cancel_result = ventas.cancel_sales_order(result["name"], reason="Cliente canceló")
 		self.assertEqual(cancel_result["name"], result["name"])
 		self.assertEqual(frappe.db.get_value("Sales Order", result["name"], "docstatus"), 2)
 
@@ -790,7 +790,7 @@ class TestVentasApi(IntegrationTestCase):
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
 		with fx.as_user(self.vendedora_b):
-			cancel_result = ventas.cancel_sales_order(result["name"])
+			cancel_result = ventas.cancel_sales_order(result["name"], reason="Cliente canceló")
 		self.assertEqual(cancel_result["name"], result["name"])
 		self.assertEqual(frappe.db.get_value("Sales Order", result["name"], "docstatus"), 2)
 
@@ -820,7 +820,7 @@ class TestVentasApi(IntegrationTestCase):
 		)
 
 		with fx.as_user(self.vendedora_a):
-			ventas.cancel_sales_order(result["name"])
+			ventas.cancel_sales_order(result["name"], reason="Cliente canceló")
 
 		self.assertFalse(frappe.db.exists("Pick List", pick_list_name))  # Commit 17 cleanup, draft removed
 		self.assertEqual(frappe.get_doc("Reporte de Faltante", report_name).status, "Resuelto")
@@ -853,7 +853,7 @@ class TestVentasApi(IntegrationTestCase):
 
 		with fx.as_user(self.vendedora_a):
 			with self.assertRaises(frappe.LinkExistsError):
-				ventas.cancel_sales_order(result["name"])
+				ventas.cancel_sales_order(result["name"], reason="Cliente canceló")
 
 		# Same finding Commit 17 already documented: ERPNext's back-link
 		# check runs AFTER on_cancel, so docstatus=2 is already written to
@@ -880,7 +880,7 @@ class TestVentasApi(IntegrationTestCase):
 		self.world.track_existing_pick_lists_and_reports_for(result["name"])
 
 		with fx.as_user(self.vendedora_a):
-			ventas.cancel_sales_order(result["name"])
+			ventas.cancel_sales_order(result["name"], reason="Cliente canceló")
 
 		with fx.as_user(self.vendedora_a):
 			with self.assertRaises(frappe.ValidationError):
@@ -890,7 +890,7 @@ class TestVentasApi(IntegrationTestCase):
 			with self.assertRaises(frappe.ValidationError):
 				ventas.delete_draft_sales_order(result["name"])
 			with self.assertRaises(frappe.ValidationError):
-				ventas.cancel_sales_order(result["name"])
+				ventas.cancel_sales_order(result["name"], reason="Cliente canceló")
 
 		# VER (get_order_detail) still works -- read-only access is preserved.
 		with fx.as_user(self.vendedora_a):

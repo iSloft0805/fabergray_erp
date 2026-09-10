@@ -82,6 +82,26 @@ QUICK_ORDER_MAX_CHARS = 10000
 # is ever read into a variable here, matching get_item_info()/search_items()'s
 # own "nothing to leak by construction" convention elsewhere in this module.
 
+# Commit 25.12 -- the one, closed set of cancellation reasons
+# cancel_sales_order() below accepts. Kept as a single Python constant, not
+# re-derived from Sales Order-fg_cancellation_reason's own Custom Field
+# `options` at request time -- this is the enum client-side (ventas.js) and
+# server-side validation both check against, so it must never silently
+# drift from what the fixture actually ships; a mismatch between the two
+# would either reject a value the UI itself offered, or accept one the UI
+# never could have sent. `"Otro"` is the one value that additionally
+# requires `fg_cancellation_note` -- see cancel_sales_order()'s own
+# docstring for that second rule.
+CANCELLATION_REASONS = (
+    "Cliente canceló",
+    "Pedido duplicado",
+    "Error en cantidades",
+    "Error en productos",
+    "Error en cliente",
+    "Cambio solicitado por cliente",
+    "Otro",
+)
+
 
 class SalesOrderAlreadyCancelledError(frappe.ValidationError):
     pass
@@ -587,6 +607,23 @@ def get_my_orders(limit=50, view="active"):
                 "total_qty": so.total_qty,
                 "observations": so.fg_observations,
                 "modifiable": modifiable,
+                # Commit 25.12 -- null for any Sales Order cancelled before
+                # this commit, or cancelled outside this app (native Desk)
+                # -- never backfilled/inferred here. `or None` normalizes
+                # `""` to `None` too: `fg_cancellation_reason` is a Select
+                # field, and Frappe's own `get_static_default_value()`
+                # (frappe/model/create_new.py) silently defaults ANY Select
+                # field with no explicit `default` to its first *option* on
+                # every new document -- the fixture's own leading blank
+                # option (`"\nCliente canceló\n..."`) turns that into `""`
+                # instead of a real reason string, but the response here
+                # stays clean either way (empty string or true SQL NULL
+                # both read as "not set"). ventas.js's own Cancelados card
+                # is what shows "No registrada" for that case; this
+                # function just passes through, exactly like `observations`
+                # above.
+                "cancellation_reason": so.fg_cancellation_reason or None,
+                "cancellation_note": so.fg_cancellation_note or None,
             }
         )
 
@@ -1017,9 +1054,21 @@ def delete_draft_sales_order(name):
 
 
 @frappe.whitelist()
-def cancel_sales_order(name):
+def cancel_sales_order(name, reason=None, note=None):
     """Cancels a submitted Sales Order of this Company (Commit 18.5;
     role + Company since Commit 25.1, no longer ownership).
+
+    Commit 25.12 -- `reason` is now ALWAYS required, validated
+    server-side against the closed `CANCELLATION_REASONS` enum -- never
+    an arbitrary string, and never trusted from the client just because
+    ventas.js's own dialog already offers only these same options as a
+    Select (that is a UX convenience, not the security boundary; this
+    check is). `note` is optional for every reason except `"Otro"`,
+    where it becomes mandatory too (an asesora picking "Otro" must say
+    what actually happened, in her own words) -- both rules enforced
+    here, before the Sales Order is even loaded, exactly like
+    `_validate_and_build_item_rows()` validates `items` before
+    `create_and_submit_sales_order()` builds anything.
 
     `check_permission("cancel")` + `assert_same_company()` are where
     access is actually enforced. `so.cancel()` is called with
@@ -1040,8 +1089,29 @@ def cancel_sales_order(name):
     `docstatus == 1` is required explicitly, throwing a clear, specific
     message for an already-Draft or already-Cancelled order rather than
     letting ERPNext's own docstatus-transition error surface instead.
+
+    Commit 25.12 -- `fg_cancellation_reason`/`fg_cancellation_note` are
+    set on the in-memory `so` BEFORE `so.cancel()` runs, never after via
+    a separate `db_set()`: `Document._save()` (what `.cancel()` calls
+    internally, confirmed by reading `frappe/model/document.py` directly)
+    skips both `_validate()` and `validate_update_after_submit()` for a
+    cancel action (`self._action == "cancel"`), then writes the ENTIRE
+    current in-memory document -- these two fields included -- via one
+    `db_update()` call. So setting them here persists atomically together
+    with `docstatus=2`, in the exact same write `.cancel()` already makes
+    -- no second round-trip, no `db_set()`, no risk of a reason being
+    saved against a Sales Order that failed to actually cancel (e.g. the
+    native back-link block below): if `.cancel()` throws, nothing this
+    function set on `so` was ever committed either.
     """
     _require_login()
+
+    if reason not in CANCELLATION_REASONS:
+        frappe.throw(_("Selecciona una razón de cancelación válida."))
+
+    note = (note or "").strip() or None
+    if reason == "Otro" and not note:
+        frappe.throw(_('Escribe el detalle de la cancelación cuando la razón es "Otro".'))
 
     so = frappe.get_doc("Sales Order", name)
     so.check_permission("cancel")
@@ -1050,6 +1120,8 @@ def cancel_sales_order(name):
     if so.docstatus != 1:
         frappe.throw(_("Solo se pueden cancelar pedidos sometidos."))
 
+    so.fg_cancellation_reason = reason
+    so.fg_cancellation_note = note
     so.cancel()  # no ignore_permissions -- native back-link checks apply unmodified
 
     return {"name": name, "status": "Cancelled"}

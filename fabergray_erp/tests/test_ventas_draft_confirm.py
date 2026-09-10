@@ -174,7 +174,7 @@ class TestVentasDraftConfirm(IntegrationTestCase):
         self.world.track_existing_pick_lists_and_reports_for(so_name)
 
         with fx.as_user(self.vendedora):
-            ventas.cancel_sales_order(so_name)
+            ventas.cancel_sales_order(so_name, reason="Cliente canceló")
 
         with fx.as_user(self.vendedora):
             with self.assertRaises(ventas.SalesOrderAlreadyCancelledError):

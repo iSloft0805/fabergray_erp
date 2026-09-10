@@ -56,7 +56,7 @@ class TestVentasCancelledOrders(IntegrationTestCase):
 	def _cancelled_order(self):
 		name = self._active_order()
 		with fx.as_user(self.vendedora):
-			ventas.cancel_sales_order(name)
+			ventas.cancel_sales_order(name, reason="Cliente canceló")
 		return name
 
 	# K. listado normal excluye docstatus=2
@@ -122,7 +122,7 @@ class TestVentasCancelledOrders(IntegrationTestCase):
 		self.assertIn(name, before)
 
 		with fx.as_user(self.vendedora):
-			ventas.cancel_sales_order(name)
+			ventas.cancel_sales_order(name, reason="Cliente canceló")
 			after = [o["name"] for o in ventas.get_my_orders(view="active")]
 		self.assertNotIn(name, after)
 
@@ -130,7 +130,7 @@ class TestVentasCancelledOrders(IntegrationTestCase):
 	def test_o_order_appears_in_cancelled_after_cancel(self):
 		name = self._active_order()
 		with fx.as_user(self.vendedora):
-			ventas.cancel_sales_order(name)
+			ventas.cancel_sales_order(name, reason="Cliente canceló")
 			cancelled = [o["name"] for o in ventas.get_my_orders(view="cancelled")]
 		self.assertIn(name, cancelled)
 
@@ -195,7 +195,7 @@ class TestVentasCancelledOrders(IntegrationTestCase):
 					name=name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 1}]
 				)
 			with self.assertRaises(Exception):
-				ventas.cancel_sales_order(name)  # already cancelled -- cannot cancel again
+				ventas.cancel_sales_order(name, reason="Cliente canceló")  # already cancelled -- cannot cancel again
 
 	# S. contadores activos excluyen cancelados si existen contadores
 	def test_s_pedidos_hoy_counter_excludes_orders_cancelled_today(self):
@@ -208,7 +208,7 @@ class TestVentasCancelledOrders(IntegrationTestCase):
 		self.assertEqual(after_active, before + 1)
 
 		with fx.as_user(self.vendedora):
-			ventas.cancel_sales_order(name)
+			ventas.cancel_sales_order(name, reason="Cliente canceló")
 			after_cancel = ventas.get_sales_summary()["pedidos_hoy"]
 		self.assertEqual(after_cancel, before)
 

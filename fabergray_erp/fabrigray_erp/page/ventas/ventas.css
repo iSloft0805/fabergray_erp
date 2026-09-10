@@ -198,6 +198,20 @@
 	padding: 8px 10px;
 }
 
+/* Commit 25.12 -- Razón/Detalle de cancelación, same visual weight as
+   .fg-order-card-obs above (muted, own background block), only ever
+   rendered on a Cancelled card. */
+.fg-ventas .fg-order-card-cancellation {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-sm);
+	padding: 8px 10px;
+}
+
 .fg-ventas .fg-empty--sm {
 	padding: 24px 0;
 }
