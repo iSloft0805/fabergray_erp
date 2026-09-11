@@ -180,69 +180,88 @@ def get_item_info(item_code):
 
 @frappe.whitelist()
 def get_quotation_summary():
-    """KPI counts for the Page Cotizaciones dashboard header -- derived
-    exclusively from `Quotation.status`/`transaction_date`'s own native
-    values, scoped to this site's own Company (Commit 25.1: no longer to
-    Vendedora's own quotations -- if_owner dropped from the Custom
-    DocPerm). Company isolation comes from `frappe.get_list()`'s own
+    """KPI counts for the Page Cotizaciones dashboard header, scoped to
+    this site's own Company (Commit 25.1: no longer to Vendedora's own
+    quotations -- if_owner dropped from the Custom DocPerm). Company
+    isolation comes from `frappe.get_list()`'s own
     `permission_query_conditions` (see `permission_conditions.py`), never
     a manual filter here; `frappe.get_all()` is never used.
 
-    Native `status` values (`quotation.json`): Draft, Open, Replied,
-    Partially Ordered, Ordered, Lost, Cancelled, Expired.
-    - `cotizaciones_hoy`: `transaction_date == hoy` (any status).
-    - `pendientes`: `status == "Open"` (submitted, no Sales Order made
-      from it yet).
-    - `aprobadas`: `status in ("Ordered", "Partially Ordered")` -- native,
-      derived by ERPNext's own `get_ordered_status()` from submitted Sales
-      Order Item rows referencing this Quotation. Will read 0 until the
-      future Quotation -> Sales Order conversion phase exists (out of
-      scope here) -- included now anyway since it is zero-cost and
-      already correct the day that phase ships.
-    - `vencidas`: `status == "Expired"` -- set automatically, daily, by
-      ERPNext's own already-active scheduled job
-      (`erpnext.selling.doctype.quotation.quotation.set_expired_status`),
-      zero scheduling of our own required.
+    Commit 25.16 -- BUGFIX, confirmed visually on real data (COTIZACION-4/
+    COTIZACION-3-5): before this commit, `pendientes`/`aprobadas` here
+    were derived from native `Quotation.status` (`Open`/`Ordered`/
+    `Partially Ordered`), which tracks Quotation -> Sales Order conversion
+    -- a phase this app has never implemented (explicitly out of scope,
+    see `assert_quotation_approved_for_conversion()`'s own module
+    position). Native `status` therefore stayed `Open` forever regardless
+    of Facturación's own review, so `aprobadas` always read 0 and
+    `pendientes` kept counting a Quotation Facturación had ALREADY
+    approved -- the exact contradiction the Page Cotizaciones card badge
+    showed too (`fg-quotation-card-top`'s badge came from the same native
+    `status`, see `cotizaciones.js::render_quotation_card()`). Facturación's
+    own review (`fg_billing_review_status`, Commit 25.13) is this app's
+    real, only commercial-approval workflow today -- `pendientes` and
+    `aprobadas` are now derived from it directly, exactly like the
+    `*_facturacion` buckets already were (Commit 25.13 section 15); the
+    two are now intentionally identical in value (`pendientes ==
+    pendientes_facturacion`, `aprobadas == aprobadas_facturacion`) and
+    computed from the SAME query result below, never a second, redundant
+    one -- `pendientes`/`aprobadas` simply remain the stable key names the
+    dashboard's four KPI cards and `cotizaciones.js`'s own
+    `quotation_matches_filter()` already read.
 
-    Commit 25.13 (section 15) -- four ADDITIONAL counters, deliberately
-    distinct key names (`*_facturacion`, never reusing `pendientes`/
-    `aprobadas` above) so they are never confused with the native-status
-    buckets already returned: `borradores_facturacion`/
-    `pendientes_facturacion`/`aprobadas_facturacion`/
-    `devueltas_facturacion`, each counting `fg_billing_review_status`
-    directly. `borradores_facturacion` includes both an explicit
-    "Borrador" AND a historical null/"" (Commit 25.13's own "treat empty
-    as Borrador" rule, section 14) -- the only bucket here that is not a
-    single exact-match filter, `["in", ["", "Borrador"]]` covers both in
-    one query.
+    Every one of the four `fg_billing_review_status` buckets below now
+    also filters `docstatus != 2` -- an old, superseded amendment (an
+    earlier version `modify_submitted_quotation()`/
+    `apply_quotation_price_mode()` cancelled to create a new one, e.g.
+    COTIZACION-3 through COTIZACION-3-4 before COTIZACION-3-5) keeps
+    whatever `fg_billing_review_status` it read the INSTANT BEFORE
+    cancellation frozen on the dead document forever (native Frappe
+    amend-chain behavior, confirmed live) -- without this filter, a
+    once-approved-then-price-adjusted Quotation would double (or
+    triple...) count itself across every one of its own past amendments.
+    Only the current, vigente version of a Quotation ever counts here.
+
+    `cotizaciones_hoy` (`transaction_date == hoy`, any status/review) and
+    `vencidas` (native `status == "Expired"`, set automatically, daily, by
+    ERPNext's own already-active `set_expired_status()` scheduled job) are
+    UNCHANGED by this commit -- vigencia (`valid_till`) and revisión
+    comercial (`fg_billing_review_status`) are deliberately two separate
+    concepts (section 10): a Quotation can read Aprobada AND Expired at
+    the same time, and `aprobadas` never excludes an expired one just
+    because it is expired (nothing here converts one into the other).
     """
     _require_login()
     frappe.has_permission("Quotation", "read", throw=True)
 
     cotizaciones_hoy = frappe.get_list("Quotation", filters={"transaction_date": nowdate()}, pluck="name")
-    pendientes = frappe.get_list("Quotation", filters={"status": "Open"}, pluck="name")
-    aprobadas = frappe.get_list(
-        "Quotation", filters={"status": ["in", ["Ordered", "Partially Ordered"]]}, pluck="name"
-    )
     vencidas = frappe.get_list("Quotation", filters={"status": "Expired"}, pluck="name")
 
     borradores_facturacion = frappe.get_list(
-        "Quotation", filters={"fg_billing_review_status": ["in", ["", BILLING_REVIEW_DRAFT]]}, pluck="name"
+        "Quotation",
+        filters={"fg_billing_review_status": ["in", ["", BILLING_REVIEW_DRAFT]], "docstatus": ["!=", 2]},
+        pluck="name",
     )
     pendientes_facturacion = frappe.get_list(
-        "Quotation", filters={"fg_billing_review_status": BILLING_REVIEW_PENDING}, pluck="name"
+        "Quotation",
+        filters={"fg_billing_review_status": BILLING_REVIEW_PENDING, "docstatus": ["!=", 2]},
+        pluck="name",
     )
     aprobadas_facturacion = frappe.get_list(
-        "Quotation", filters={"fg_billing_review_status": BILLING_REVIEW_APPROVED}, pluck="name"
+        "Quotation",
+        filters={"fg_billing_review_status": BILLING_REVIEW_APPROVED, "docstatus": ["!=", 2]},
+        pluck="name",
     )
     devueltas_facturacion = frappe.get_list(
-        "Quotation", filters={"fg_billing_review_status": BILLING_REVIEW_RETURNED}, pluck="name"
+        "Quotation",
+        filters={"fg_billing_review_status": BILLING_REVIEW_RETURNED, "docstatus": ["!=", 2]},
+        pluck="name",
     )
 
     return {
         "cotizaciones_hoy": len(cotizaciones_hoy),
-        "pendientes": len(pendientes),
-        "aprobadas": len(aprobadas),
+        "pendientes": len(pendientes_facturacion),
+        "aprobadas": len(aprobadas_facturacion),
         "vencidas": len(vencidas),
         "borradores_facturacion": len(borradores_facturacion),
         "pendientes_facturacion": len(pendientes_facturacion),

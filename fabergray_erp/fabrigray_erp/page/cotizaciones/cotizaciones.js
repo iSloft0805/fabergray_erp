@@ -181,7 +181,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		const cards = [
 			{ key: "cotizaciones_hoy", label: __("Cotizaciones de hoy"), sub: __("Creadas hoy"), i: "calendar", mod: "cotizaciones-hoy" },
 			{ key: "pendientes", label: __("Pendientes"), sub: __("Sin resolver"), i: "clock", mod: "cotizaciones-pendientes" },
-			{ key: "aprobadas", label: __("Aprobadas"), sub: __("Con pedido generado"), i: "check", mod: "cotizaciones-aprobadas" },
+			{ key: "aprobadas", label: __("Aprobadas"), sub: __("Por Facturación"), i: "check", mod: "cotizaciones-aprobadas" },
 			{ key: "vencidas", label: __("Vencidas"), sub: __("Fuera de vigencia"), i: "x", mod: "cotizaciones-vencidas" },
 		];
 
@@ -207,11 +207,28 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 	// filter the already-fetched get_my_quotations() list, never to compute
 	// a KPI number itself (that number always comes straight from
 	// get_quotation_summary()).
+	//
+	// Commit 25.16 -- BUGFIX: "pendientes"/"aprobadas" used to read native
+	// `q.status` here (`"Open"`/`["Ordered","Partially Ordered"]`), the
+	// same field the card's top badge used to read (see
+	// quotation_review_badge_meta() below) -- both wrong for the same
+	// reason: native status never changes on its own once Facturación
+	// approves a Quotation (no Quotation -> Sales Order conversion exists
+	// in this app), so clicking "Aprobadas" never showed anything
+	// Facturación had actually approved, and "Pendientes" kept showing
+	// Quotations that already were. `fg_billing_review_status` is now the
+	// one source of truth here too, exactly matching
+	// get_quotation_summary()'s own `pendientes`/`aprobadas` buckets --
+	// `docstatus !== 2` excludes an old, superseded price-mode amendment
+	// (see that function's own docstring) from ever matching either
+	// filter.
 	quotation_matches_filter(q, filter) {
 		if (!filter) return true;
 		if (filter === "cotizaciones_hoy") return q.transaction_date === frappe.datetime.nowdate();
-		if (filter === "pendientes") return q.status === "Open";
-		if (filter === "aprobadas") return ["Ordered", "Partially Ordered"].includes(q.status);
+		const vigente = q.docstatus !== 2;
+		const billing_status = q.fg_billing_review_status || "Borrador";
+		if (filter === "pendientes") return vigente && billing_status === "Pendiente de Facturación";
+		if (filter === "aprobadas") return vigente && billing_status === "Aprobada";
 		if (filter === "vencidas") return q.status === "Expired";
 		return true;
 	}
@@ -248,7 +265,11 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 	}
 
 	render_quotation_card(q) {
-		const status = quotation_status_meta(q.status);
+		// Commit 25.16 -- the top-right badge used to be quotation_status_meta
+		// (q.status) here, see quotation_review_badge_meta()'s own docstring
+		// for why that showed a contradictory "PENDIENTE" on an
+		// already-Aprobada card.
+		const top_badge = quotation_review_badge_meta(q);
 		// Commit 25.13 -- null/"" (historical, pre-this-commit Quotation)
 		// treated identically to "Borrador" here, section 14's own rule.
 		const billing = billing_review_status_meta(q.fg_billing_review_status || "Borrador");
@@ -271,7 +292,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 			<div class="fg-quotation-card">
 				<div class="fg-quotation-card-top">
 					<div class="fg-quotation-card-id">#${frappe.utils.escape_html(q.name)}</div>
-					<span class="fg-badge fg-badge--${status.mod}">${status.label}</span>
+					<span class="fg-badge fg-badge--${top_badge.mod}">${top_badge.label}</span>
 				</div>
 				<span class="fg-badge fg-badge--${billing.mod}">${billing.label}</span>
 				<div class="fg-quotation-card-customer">${icon("user", "fg-icon-sm")} ${customer_label}</div>
@@ -355,9 +376,10 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		// Never shown for Borrador/Pendiente de Facturación/Devuelta
 		// (already excluded above/by billing_status) or Cancelled
 		// (`q.status === "Cancelled"`, native field, independent check).
-		const pdf_btns =
-			billing_status === "Aprobada" && q.docstatus !== 2 && q.status !== "Cancelled"
-				? `
+		const aprobada_vigente = billing_status === "Aprobada" && q.docstatus !== 2 && q.status !== "Cancelled";
+
+		const pdf_btns = aprobada_vigente
+			? `
 					<button type="button" class="fg-order-card-action fg-quotation-card-view-pdf" ${name_attr}>
 						${icon("file-text", "fg-icon-sm")} ${__("VER PDF")}
 					</button>
@@ -365,7 +387,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 						${icon("download", "fg-icon-sm")} ${__("DESCARGAR PDF")}
 					</button>
 				`
-				: "";
+			: "";
 
 		return `<div class="fg-quotation-card-actions">${view_btn}${edit_btn}${send_btn}${pdf_btns}</div>`;
 	}
@@ -1289,4 +1311,43 @@ function billing_review_status_meta(status) {
 		Devuelta: { label: __("Devuelta por Facturación"), mod: "billing-returned" },
 	};
 	return map[status] || map["Borrador"];
+}
+
+// Commit 25.16 -- the card's own TOP-right badge (`.fg-quotation-card-top`),
+// BUGFIX: before this commit that badge was quotation_status_meta(q.status)
+// -- native Quotation.status, which stays "Open" ("Pendiente") forever once
+// submitted, because this app has never implemented Quotation -> Sales
+// Order conversion (the only thing that ever moves native status off
+// "Open"). A Quotation Facturación had already approved
+// (fg_billing_review_status === "Aprobada") therefore kept showing
+// "Pendiente" here, directly contradicting the billing-review strip right
+// below it (billing_review_status_meta() above, unchanged, still reads
+// "Aprobada por Facturación"). fg_billing_review_status is now this
+// badge's own source of truth too, exactly matching
+// get_quotation_summary()'s Aprobadas/Pendientes KPI definitions and
+// quotation_matches_filter() above -- section 2's own closed mapping,
+// short labels (this is the compact badge; the full-sentence one stays
+// the second badge below it, unchanged).
+//
+// docstatus===2/"Cancelled" is checked FIRST, before fg_billing_review_
+// status: an old, superseded amendment (get_my_quotations() returns every
+// version, including ones a later apply_quotation_price_mode()/
+// modify_submitted_quotation() already cancelled+replaced) keeps
+// fg_billing_review_status frozen at whatever it read the INSTANT BEFORE
+// cancellation -- it can still read "Aprobada" long after ceasing to be
+// the vigente document. Without this check first, a dead document would
+// show a stale "APROBADA" instead of "CANCELADA" -- the exact same class
+// of contradictory badge this commit exists to fix, just on a different
+// field.
+function quotation_review_badge_meta(q) {
+	if (q.docstatus === 2 || q.status === "Cancelled") {
+		return { label: __("Cancelada"), mod: "review-cancelled" };
+	}
+	const map = {
+		Borrador: { label: __("Borrador"), mod: "review-draft" },
+		"Pendiente de Facturación": { label: __("Pendiente"), mod: "review-pending" },
+		Aprobada: { label: __("Aprobada"), mod: "review-approved" },
+		Devuelta: { label: __("Devuelta"), mod: "review-returned" },
+	};
+	return map[q.fg_billing_review_status || "Borrador"] || map["Borrador"];
 }

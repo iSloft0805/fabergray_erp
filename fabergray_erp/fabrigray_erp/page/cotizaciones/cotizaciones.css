@@ -296,6 +296,38 @@
 	margin-top: 6px;
 }
 
+/* ------------------------------------------------------------------ */
+/* Commit 25.16 -- the card's own top-right badge, source of truth is   */
+/* fg_billing_review_status now (see quotation_review_badge_meta() in   */
+/* cotizaciones.js) -- same color language as the billing-* badges      */
+/* above, but no margin-top: this one sits in the top flex row next to  */
+/* the quotation id, not stacked below it.                              */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-badge--review-draft {
+	background: #f1f5f9;
+	color: #475569;
+}
+
+.fg-cotizaciones .fg-badge--review-pending {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-cotizaciones .fg-badge--review-approved {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-cotizaciones .fg-badge--review-returned {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+.fg-cotizaciones .fg-badge--review-cancelled {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
 .fg-cotizaciones .fg-quotation-card-returned-note {
 	display: flex;
 	align-items: flex-start;

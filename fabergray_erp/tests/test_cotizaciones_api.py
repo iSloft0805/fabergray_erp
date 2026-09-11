@@ -14,12 +14,19 @@ strict key allowlist and against `_ECONOMIC_KEYS`, and every economic
 field name a line could carry is proven rejected, not silently dropped.
 """
 
+import os
+import re
+
 import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, nowdate
 
 from fabergray_erp.api import cotizaciones
 from fabergray_erp.tests import fixtures as fx
+
+_COTIZACIONES_JS_PATH = os.path.join(
+	frappe.get_app_path("fabergray_erp"), "fabrigray_erp", "page", "cotizaciones", "cotizaciones.js"
+)
 
 EXTRA_TEST_RECORD_DEPENDENCIES = []
 IGNORE_TEST_RECORD_DEPENDENCIES = []
@@ -103,7 +110,19 @@ class TestCotizacionesApi(IntegrationTestCase):
 	# -- get_quotation_summary ----------------------------------------------
 
 	def test_get_quotation_summary_buckets_correctly(self):
+		"""Commit 25.16 -- BUGFIX: `pendientes`/`aprobadas` used to be
+		derived from native `Quotation.status` here (`"Open"`/`"Ordered"`),
+		which this test used to assert directly (`pendientes >= 1` right
+		after a raw submit, `aprobadas == 0` always, "no conversion phase
+		yet"). Both assertions encoded the exact bug fixed by this commit --
+		a raw submitted-but-never-sent-to-Facturación Quotation is
+		`fg_billing_review_status` Borrador, and must NOT be counted in
+		either bucket any more (see `test_j_borrador_never_counts_in_either_
+		kpi` below for the same assertion, `cotizaciones_hoy`/`vencidas`
+		stay native-status-derived, unchanged, still asserted here)."""
 		with fx.as_user(self.vendedora_a):
+			before = cotizaciones.get_quotation_summary()
+
 			qtn_today = self._raw_quotation(self.customer.name, self.item.name, submit=True)
 			qtn_today.reload()
 			self.assertEqual(qtn_today.status, "Open")  # submitted, not yet ordered/lost
@@ -133,21 +152,27 @@ class TestCotizacionesApi(IntegrationTestCase):
 				"devueltas_facturacion",
 			},
 		)
-		self.assertGreaterEqual(summary["cotizaciones_hoy"], 2)
-		self.assertGreaterEqual(summary["pendientes"], 1)
-		self.assertEqual(summary["aprobadas"], 0)  # no conversion phase yet -- always 0 until built
-		self.assertGreaterEqual(summary["vencidas"], 1)
+		self.assertEqual(summary["cotizaciones_hoy"], before["cotizaciones_hoy"] + 2)
+		self.assertEqual(summary["vencidas"], before["vencidas"] + 1)
+		# Neither qtn_today nor qtn_expired was ever sent to Facturación --
+		# both stay Borrador, neither one may inflate pendientes/aprobadas.
+		self.assertEqual(summary["pendientes"], before["pendientes"])
+		self.assertEqual(summary["aprobadas"], before["aprobadas"])
 
 	def test_get_quotation_summary_reflects_every_vendedoras_quotations(self):
 		"""Commit 25.1: "el rol controla el área, no el owner" --
 		get_quotation_summary() is company-wide, not per-owner (was
 		assertEqual(summary_b[...], 0) pre-25.1: A's Quotation now counts
-		in B's own summary too)."""
+		in B's own summary too). Commit 25.16 -- `pendientes` is now
+		fg_billing_review_status-derived (see that function's own
+		docstring), so this test must actually send the Quotation to
+		Facturación to move the needle, not merely submit it."""
 		with fx.as_user(self.vendedora_b):
 			before_b = cotizaciones.get_quotation_summary()
 
 		with fx.as_user(self.vendedora_a):
-			self._raw_quotation(self.customer.name, self.item.name, submit=True)
+			qtn = self._raw_quotation(self.customer.name, self.item.name, submit=True)
+			cotizaciones.send_quotation_to_billing(qtn.name)
 
 		with fx.as_user(self.vendedora_b):
 			after_b = cotizaciones.get_quotation_summary()
@@ -675,3 +700,406 @@ class TestUpdateDraftQuotation(IntegrationTestCase):
 			)
 		self.assertEqual(set(result.keys()), {"name"})
 		self.assertFalse(_ECONOMIC_KEYS & set(result.keys()))
+
+
+# -- Commit 25.16 -- BUGFIX: Page Cotizaciones showed a card at once
+# "APROBADA POR FACTURACIÓN" (billing_review_status_meta() strip, correct)
+# AND "PENDIENTE" (the card's own top-right badge, wrong -- that badge, and
+# get_quotation_summary()'s own "pendientes"/"aprobadas" KPI counts, used to
+# read native Quotation.status, which never leaves "Open" in this app
+# because Quotation -> Sales Order conversion has never been implemented).
+# fg_billing_review_status is now the one source of truth for all three --
+# the top badge, the two KPI numbers, and the two KPI click-through filters.
+# Section 15's own lettered test list (A-X) is covered across this class
+# (server-side classification/KPI/amendment/regression) and
+# TestQuotationCardBadgeUiContract below (JS-source static checks, this app
+# has no JS test runner -- same convention as test_cotizaciones_pdf.py's own
+# TestQuotationPdfUiContract).
+class TestQuotationClassificationKpi(IntegrationTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.world = fx.TestWorld()
+		cls.addClassCleanup(cls.world.cleanup)
+
+		cls.item = cls.world.item("FG2516-ITEM")
+		cls.customer = cls.world.customer("FG2516 Customer")
+
+		cls.vendedora = cls.world.user("fg2516-vendedora@example.com", ["Vendedora"])
+		cls.facturacion = cls.world.user("fg2516-facturacion@example.com", ["Facturación"])
+
+	def _priced_item(self, item_code, rate=200, price_list="Standard Selling"):
+		"""Only needed for the amendment tests (K/L/M) -- apply_quotation_
+		price_mode() resolves its reference rate off a real Item Price on
+		the Quotation's own selling_price_list, same pattern
+		test_cotizaciones_price_mode.py already establishes."""
+		item = self.world.item(item_code)
+		price = frappe.get_doc(
+			{
+				"doctype": "Item Price",
+				"item_code": item.name,
+				"price_list": price_list,
+				"selling": 1,
+				"price_list_rate": rate,
+			}
+		)
+		price.insert()
+		self.world.track_existing("Item Price", price.name)
+		return item
+
+	def _new_quotation(self, item_name=None):
+		with fx.as_user(self.vendedora):
+			result = cotizaciones.create_and_submit_quotation(
+				customer=self.customer.name, items=[{"item_code": item_name or self.item.name, "qty": 1}]
+			)
+		self.world.track_existing("Quotation", result["name"])
+		return result["name"]
+
+	def _send_to_billing(self, name):
+		with fx.as_user(self.vendedora):
+			cotizaciones.send_quotation_to_billing(name)
+
+	def _approve(self, name):
+		with fx.as_user(self.facturacion):
+			cotizaciones.approve_quotation_billing(name)
+
+	def _return(self, name, reason="Ajustar precio"):
+		with fx.as_user(self.facturacion):
+			cotizaciones.return_quotation_from_billing(name, reason=reason)
+
+	# -- E/F: Aprobada suma Aprobadas, nunca Pendientes ----------------------
+
+	def test_e_f_aprobada_suma_aprobadas_nunca_pendientes(self):
+		name = self._new_quotation()
+		self._send_to_billing(name)
+		with fx.as_user(self.vendedora):
+			before = cotizaciones.get_quotation_summary()
+		self._approve(name)
+		with fx.as_user(self.vendedora):
+			after = cotizaciones.get_quotation_summary()
+
+		self.assertEqual(after["aprobadas"], before["aprobadas"] + 1)
+		self.assertEqual(after["pendientes"], before["pendientes"] - 1)
+
+	# -- G/H: Pendiente suma Pendientes, nunca Aprobadas ---------------------
+
+	def test_g_h_pendiente_suma_pendientes_nunca_aprobadas(self):
+		with fx.as_user(self.vendedora):
+			before = cotizaciones.get_quotation_summary()
+		name = self._new_quotation()
+		self._send_to_billing(name)
+		with fx.as_user(self.vendedora):
+			after = cotizaciones.get_quotation_summary()
+
+		self.assertEqual(after["pendientes"], before["pendientes"] + 1)
+		self.assertEqual(after["aprobadas"], before["aprobadas"])
+
+	# -- I: Devuelta no suma ninguno ------------------------------------------
+
+	def test_i_devuelta_no_suma_ninguno(self):
+		name = self._new_quotation()
+		self._send_to_billing(name)
+		with fx.as_user(self.vendedora):
+			pending_summary = cotizaciones.get_quotation_summary()
+		self._return(name)
+		with fx.as_user(self.vendedora):
+			after = cotizaciones.get_quotation_summary()
+
+		self.assertEqual(after["pendientes"], pending_summary["pendientes"] - 1)
+		self.assertEqual(after["aprobadas"], pending_summary["aprobadas"])
+
+	# -- J: Borrador no suma ninguno -------------------------------------------
+
+	def test_j_borrador_no_suma_ninguno(self):
+		with fx.as_user(self.vendedora):
+			before = cotizaciones.get_quotation_summary()
+		self._new_quotation()  # submitted, never sent to Facturación
+		with fx.as_user(self.vendedora):
+			after = cotizaciones.get_quotation_summary()
+
+		self.assertEqual(after["pendientes"], before["pendientes"])
+		self.assertEqual(after["aprobadas"], before["aprobadas"])
+
+	# -- K/L/M: amendments -- only the vigente version ever counts ----------
+
+	def test_k_l_m_amendment_kpi_and_classification(self):
+		"""Mirrors the real COTIZACION-3 -> ... -> COTIZACION-3-5 chain: an
+		Aprobada Quotation gets price-adjusted (apply_quotation_price_mode()
+		cancels the original, docstatus=2, and creates a new, still-Pendiente
+		amendment), then that amendment is approved. Section 6's own
+		"amendment" concern -- the OLD, now-cancelled version must never
+		double-count, only the current one may."""
+		item = self._priced_item("FG2516-PRICED-ITEM")
+		original_name = self._new_quotation(item_name=item.name)
+		self._send_to_billing(original_name)
+
+		with fx.as_user(self.vendedora):
+			before = cotizaciones.get_quotation_summary()
+
+		with fx.as_user(self.facturacion):
+			adjusted = cotizaciones.apply_quotation_price_mode(original_name, "DISCOUNT_10")
+		new_name = adjusted["name"]
+		self.world.track_existing("Quotation", new_name)
+		self.assertNotEqual(new_name, original_name)
+		self._approve(new_name)
+
+		with fx.as_user(self.vendedora):
+			after = cotizaciones.get_quotation_summary()
+			my_quotations = {q["name"]: q for q in cotizaciones.get_my_quotations(limit=500)}
+
+		# K/L -- the old, now-cancelled original: docstatus=2, never counted.
+		self.assertEqual(my_quotations[original_name]["docstatus"], 2)
+		# M -- only the new, vigente, approved amendment counts: `before` was
+		# captured while the ORIGINAL was still Pendiente (already in that
+		# bucket) -- apply_quotation_price_mode() cancels it (leaves
+		# Pendientes) and creates a new amendment that stays Pendiente too
+		# (net Pendientes unchanged at that point), then approve_quotation_
+		# billing() moves that new, vigente amendment out of Pendientes and
+		# into Aprobadas -- net delta from `before`: aprobadas +1,
+		# pendientes -1, never +2/-0 (which would mean the old, cancelled
+		# original was still being counted somewhere).
+		self.assertEqual(after["aprobadas"], before["aprobadas"] + 1)
+		self.assertEqual(after["pendientes"], before["pendientes"] - 1)
+
+	# -- N/O: filtro Aprobadas/Pendientes -- data correctness ----------------
+	#
+	# cotizaciones.js has no JS test runner (see module docstring) -- these
+	# assert that get_my_quotations()'s own `docstatus`/
+	# fg_billing_review_status fields are correct and sufficient for
+	# quotation_matches_filter() (cotizaciones.js) to filter correctly,
+	# replicating that exact, tiny predicate here in Python against the
+	# real server response.
+
+	@staticmethod
+	def _matches_pendientes(q):
+		return q["docstatus"] != 2 and (q.get("fg_billing_review_status") or "Borrador") == "Pendiente de Facturación"
+
+	@staticmethod
+	def _matches_aprobadas(q):
+		return q["docstatus"] != 2 and (q.get("fg_billing_review_status") or "Borrador") == "Aprobada"
+
+	def test_n_filtro_aprobadas_devuelve_unicamente_aprobadas_vigentes(self):
+		item = self._priced_item("FG2516-FILTER-ITEM")
+		original_name = self._new_quotation(item_name=item.name)
+		self._send_to_billing(original_name)
+		with fx.as_user(self.facturacion):
+			adjusted = cotizaciones.apply_quotation_price_mode(original_name, "DISCOUNT_15")
+		new_name = adjusted["name"]
+		self.world.track_existing("Quotation", new_name)
+		self._approve(new_name)
+
+		with fx.as_user(self.vendedora):
+			my_quotations = {q["name"]: q for q in cotizaciones.get_my_quotations(limit=500)}
+
+		self.assertTrue(self._matches_aprobadas(my_quotations[new_name]))
+		self.assertFalse(self._matches_aprobadas(my_quotations[original_name]))  # docstatus=2 -- excluded
+		self.assertFalse(self._matches_pendientes(my_quotations[new_name]))
+
+	def test_o_filtro_pendientes_devuelve_unicamente_pendientes_vigentes(self):
+		approved_name = self._new_quotation()
+		self._send_to_billing(approved_name)
+		self._approve(approved_name)
+
+		pending_name = self._new_quotation()
+		self._send_to_billing(pending_name)
+
+		with fx.as_user(self.vendedora):
+			my_quotations = {q["name"]: q for q in cotizaciones.get_my_quotations(limit=500)}
+
+		self.assertTrue(self._matches_pendientes(my_quotations[pending_name]))
+		self.assertFalse(self._matches_pendientes(my_quotations[approved_name]))
+		self.assertFalse(self._matches_aprobadas(my_quotations[pending_name]))
+
+	# -- P/Q: real-shape scenarios --------------------------------------------
+
+	def test_p_single_approved_quotation_like_cotizacion_4_classifies_correctly(self):
+		"""A single Quotation, never amended, sent + approved -- the
+		COTIZACION-4 shape: must read Aprobada, vigente, counted in
+		Aprobadas, never in Pendientes."""
+		name = self._new_quotation()
+		self._send_to_billing(name)
+		self._approve(name)
+
+		with fx.as_user(self.vendedora):
+			summary = cotizaciones.get_quotation_summary()
+			q = next(row for row in cotizaciones.get_my_quotations(limit=500) if row["name"] == name)
+
+		self.assertEqual(q["fg_billing_review_status"], "Aprobada")
+		self.assertEqual(q["docstatus"], 1)
+		self.assertTrue(self._matches_aprobadas(q))
+		self.assertGreaterEqual(summary["aprobadas"], 1)
+
+	def test_q_amended_approved_quotation_like_cotizacion_3_5_classifies_correctly(self):
+		"""A price-adjusted-then-approved amendment -- the
+		COTIZACION-3 -> COTIZACION-3-5 shape: only the current, vigente
+		amendment reads Aprobada/counts; the superseded original does not."""
+		item = self._priced_item("FG2516-Q-ITEM")
+		original_name = self._new_quotation(item_name=item.name)
+		self._send_to_billing(original_name)
+		with fx.as_user(self.facturacion):
+			adjusted = cotizaciones.apply_quotation_price_mode(original_name, "DISCOUNT_20")
+		new_name = adjusted["name"]
+		self.world.track_existing("Quotation", new_name)
+		self._approve(new_name)
+
+		with fx.as_user(self.vendedora):
+			quotations = {row["name"]: row for row in cotizaciones.get_my_quotations(limit=500)}
+
+		self.assertEqual(quotations[new_name]["fg_billing_review_status"], "Aprobada")
+		self.assertEqual(quotations[new_name]["docstatus"], 1)
+		self.assertEqual(quotations[original_name]["docstatus"], 2)
+		self.assertTrue(self._matches_aprobadas(quotations[new_name]))
+		self.assertFalse(self._matches_aprobadas(quotations[original_name]))
+
+	# -- T/U: PDF regression -- still works exactly as Commit 25.15 left it --
+
+	def test_t_u_pdf_still_works_for_aprobada_after_this_commit(self):
+		"""This commit touches only classification (badge/KPI/filters) --
+		the PDF security gate (`_assert_quotation_pdf_eligible()`) reads
+		`fg_billing_review_status`/`docstatus` directly from the document,
+		completely independent of get_quotation_summary()/get_my_quotations(),
+		so nothing here could plausibly regress it -- asserted anyway, per
+		section 14's own explicit requirement. `download_pdf` itself is
+		monkeypatched to a no-op, same as test_cotizaciones_pdf.py's own
+		test_ao_download_sets_the_expected_filename -- this environment has
+		no wkhtmltopdf executable, the point here is only that
+		download_fabrigray_quotation_pdf() reaches and calls the native
+		pipeline at all (i.e. _assert_quotation_pdf_eligible() did not
+		reject an Aprobada Quotation), not the real PDF bytes."""
+		name = self._new_quotation()
+		self._send_to_billing(name)
+		self._approve(name)
+
+		with fx.as_user(self.facturacion):
+			url = cotizaciones.get_fabrigray_quotation_pdf_view_url(name)
+			self.assertIn(name, url)
+
+			from frappe.utils import print_format as print_format_module
+
+			original = print_format_module.download_pdf
+			print_format_module.download_pdf = lambda **kwargs: None
+			try:
+				cotizaciones.download_fabrigray_quotation_pdf(name)  # must not raise
+			finally:
+				print_format_module.download_pdf = original
+			self.assertEqual(frappe.local.response.filename, f"Cotizacion-Fabrigray-{name}.pdf")
+
+	# -- V: editar una Aprobada conserva el comportamiento 25.13 -------------
+
+	def test_v_editing_an_approved_quotation_keeps_invalidating_the_approval(self):
+		name = self._new_quotation()
+		self._send_to_billing(name)
+		self._approve(name)
+
+		with fx.as_user(self.vendedora):
+			before = cotizaciones.get_quotation_summary()
+			result = cotizaciones.modify_submitted_quotation(
+				name=name, customer=self.customer.name, items=[{"item_code": self.item.name, "qty": 2}]
+			)
+		self.world.track_existing("Quotation", result["name"])
+		with fx.as_user(self.vendedora):
+			after = cotizaciones.get_quotation_summary()
+			new_qtn = frappe.get_doc("Quotation", result["name"])
+
+		self.assertEqual(new_qtn.get("fg_billing_review_status"), "Borrador")  # _reset_billing_review_on_edit()
+		self.assertEqual(after["aprobadas"], before["aprobadas"] - 1)
+		self.assertEqual(after["pendientes"], before["pendientes"])
+
+	# -- W/X: Vencidas / Cotizaciones de hoy -- unchanged by this commit -----
+
+	def test_w_vencidas_still_derives_from_valid_till_never_from_billing_review(self):
+		name = self._new_quotation()
+		self._send_to_billing(name)
+		self._approve(name)  # Aprobada...
+		frappe.db.set_value(
+			"Quotation", name, {"valid_till": add_days(nowdate(), -1), "status": "Expired"}
+		)  # ...AND vencida at once -- section 10's own explicit scenario.
+
+		with fx.as_user(self.vendedora):
+			summary = cotizaciones.get_quotation_summary()
+			q = next(row for row in cotizaciones.get_my_quotations(limit=500) if row["name"] == name)
+
+		self.assertEqual(q["status"], "Expired")
+		self.assertEqual(q["fg_billing_review_status"], "Aprobada")  # never overwritten by expiry
+		self.assertGreaterEqual(summary["vencidas"], 1)
+		self.assertTrue(self._matches_aprobadas(q))  # still counted in Aprobadas despite being expired
+
+	def test_x_cotizaciones_de_hoy_still_derives_from_transaction_date(self):
+		with fx.as_user(self.vendedora):
+			before = cotizaciones.get_quotation_summary()
+		self._new_quotation()  # transaction_date defaults to today, no billing review involved
+		with fx.as_user(self.vendedora):
+			after = cotizaciones.get_quotation_summary()
+		self.assertEqual(after["cotizaciones_hoy"], before["cotizaciones_hoy"] + 1)
+
+
+# -- A/B/C/D, R/S: static UI-contract checks on cotizaciones.js itself -- no
+# JS test runner in this app (same convention as test_cotizaciones_pdf.py's
+# own TestQuotationPdfUiContract/test_cotizaciones_billing_review.py's own
+# UI-contract classes).
+class TestQuotationCardBadgeUiContract(IntegrationTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		with open(_COTIZACIONES_JS_PATH, encoding="utf-8") as f:
+			cls.js = f.read()
+
+	@staticmethod
+	def _function_body(source, function_name):
+		m = re.search(r"\nfunction " + re.escape(function_name) + r"\([^)]*\)\s*\{", source)
+		assert m, f"function {function_name!r} not found"
+		start = m.end()
+		next_decl = re.search(r"\n(function |const )[a-zA-Z_]", source[start:])
+		end = start + next_decl.start() if next_decl else len(source)
+		return source[start:end]
+
+	def test_a_aprobada_maps_to_the_aprobada_badge(self):
+		body = self._function_body(self.js, "quotation_review_badge_meta")
+		self.assertRegex(body, r'Aprobada:\s*\{\s*label:\s*__\("Aprobada"\)')
+
+	def test_b_top_badge_is_never_sourced_from_native_quotation_status_anymore(self):
+		"""The exact regression this commit fixes: the top-right badge span
+		must read from quotation_review_badge_meta()'s own output, never
+		quotation_status_meta(q.status) (which is what produced a
+		contradictory "Pendiente" on an Aprobada card)."""
+		top_row = re.search(r'fg-quotation-card-id.*?\n\s*<span class="fg-badge fg-badge--\$\{([a-zA-Z_.]+)\}', self.js, re.S)
+		self.assertIsNotNone(top_row)
+		self.assertEqual(top_row.group(1), "top_badge.mod")
+		self.assertNotIn("const status = quotation_status_meta(q.status)", self.js)
+
+	def test_c_pendiente_maps_to_the_pendiente_badge(self):
+		body = self._function_body(self.js, "quotation_review_badge_meta")
+		self.assertRegex(body, r'"Pendiente de Facturación":\s*\{\s*label:\s*__\("Pendiente"\)')
+
+	def test_d_devuelta_maps_to_the_devuelta_badge(self):
+		body = self._function_body(self.js, "quotation_review_badge_meta")
+		self.assertRegex(body, r'Devuelta:\s*\{\s*label:\s*__\("Devuelta"\)')
+
+	def test_r_con_pedido_generado_no_longer_appears(self):
+		self.assertNotIn("Con pedido generado", self.js)
+
+	def test_s_por_facturacion_appears_as_the_aprobadas_kpi_subtitle(self):
+		self.assertRegex(self.js, r'key:\s*"aprobadas".*?sub:\s*__\("Por Facturación"\)')
+
+	def test_cancelled_amendment_never_shows_a_stale_aprobada_or_pendiente_badge(self):
+		body = self._function_body(self.js, "quotation_review_badge_meta")
+		# docstatus===2/Cancelled must be the FIRST check in the function --
+		# confirmed by requiring it to appear before the fg_billing_review_
+		# status map lookup in source order.
+		cancelled_pos = body.index('mod: "review-cancelled"')
+		map_pos = body.index("const map = {")
+		self.assertLess(cancelled_pos, map_pos)
+
+	def test_pendientes_filter_uses_billing_review_status_not_native_status(self):
+		# quotation_matches_filter is a method, not a top-level function --
+		# extracted by hand here since _function_body() only matches
+		# column-0 `function` declarations.
+		m = re.search(r"quotation_matches_filter\(q, filter\)\s*\{", self.js)
+		self.assertIsNotNone(m)
+		start = m.end()
+		end = self.js.index("\n\t}", start)
+		method_body = self.js[start:end]
+		self.assertIn('"Pendiente de Facturación"', method_body)
+		self.assertIn('"Aprobada"', method_body)
+		self.assertNotIn('q.status === "Open"', method_body)
+		self.assertNotIn('"Ordered", "Partially Ordered"', method_body)
