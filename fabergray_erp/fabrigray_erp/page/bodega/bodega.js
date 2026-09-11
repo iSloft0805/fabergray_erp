@@ -134,18 +134,31 @@ fabergray_erp.Bodega = class Bodega {
 	}
 
 	load_detail(pick_list) {
+		// Commit 25.20.3 -- an in-place refresh of an ALREADY-open detail for
+		// the SAME pick_list (qty +/-, reportar faltante, or the manual
+		// "Actualizar" tap while already viewing it) is now treated
+		// differently from a fresh navigation into a detail: no skeleton --
+		// the operator's current cards stay on screen, untouched, for the
+		// whole round trip (never the height-collapsing flash that made
+		// Hotfix 25.20.2's fix a no-op) -- and scroll is captured/restored
+		// against whatever the REAL scrollable ancestor turns out to be at
+		// runtime (see get_detail_scroll_container()'s own docstring).
+		// Auto-detected from state rather than a new caller-supplied option
+		// (none of sync_row()/open_report_shortage_dialog()/
+		// refresh_active_section() need to change) -- state.pick_list still
+		// pointing at the SAME pick_list while state.view is already
+		// "detail" IS the refresh signal.
+		const is_refresh = this.state.view === "detail" && this.state.pick_list === pick_list && !!this.state.detail;
 		this.set_shell_busy(true);
-		// Commit 25.20.2 -- captured BEFORE render_skeleton_detail() wipes the
-		// current cards (the item card this measures must still be on screen).
-		const scroll_anchor = this.capture_detail_scroll_anchor();
-		if (this.$body) this.render_skeleton_detail();
+		const scroll_ctx = is_refresh ? this.capture_detail_scroll_anchor() : null;
+		if (!is_refresh && this.$body) this.render_skeleton_detail();
 		return this.call("get_pick_list", { name: pick_list })
 			.then((data) => {
 				this.state.view = "detail";
 				this.state.pick_list = pick_list;
 				this.state.detail = data;
 				this.render_body();
-				this.restore_detail_scroll_anchor(scroll_anchor);
+				if (is_refresh) this.restore_detail_scroll_anchor(scroll_ctx);
 			})
 			.finally(() => this.set_shell_busy(false));
 	}
@@ -1367,45 +1380,93 @@ fabergray_erp.Bodega = class Bodega {
 	}
 
 	// -------------------------------------------------------------------
-	// Commit 25.20.2 -- scroll-position preservation across an in-place
-	// detail refresh (load_detail() always fully replaces .fg-body's
-	// innerHTML -- via a much-shorter skeleton first, see
-	// render_skeleton_detail() -- so the operator's window scroll
-	// position, an absolute pixel offset, ends up pointing at whatever
-	// happens to be there after the content's height changes; that is
-	// the entire cause of the "jumps back to the top of the pedido"
-	// symptom, never an explicit scrollTo/location.reload/set_route --
-	// this page has none of those).
+	// Commit 25.20.3 -- Hotfix 25.20.2's own window.scrollBy() fix did NOT
+	// work (confirmed by the user): this Frappe Desk build renders every
+	// Page's body inside `.main-section` (frappe/www/desk.html -- `<div
+	// class="main-section"> ... <div id="body"></div> ... </div>`), and
+	// frappe/public/scss/desk/main.scss gives that element `height: 100vh;
+	// overflow: scroll; overflow-x: hidden;` -- per the CSS Overflow spec,
+	// pairing a non-"visible" overflow-x with an "overflow-y: visible" on
+	// the same box makes overflow-y COMPUTE to "auto", so `.main-section`
+	// is genuinely the element that scrolls internally, and `window`
+	// itself never scrolls at all in this Desk build. That is the real,
+	// structurally-confirmed root cause of why the previous hotfix's fix
+	// was a no-op against the wrong target -- not a timing issue.
 	//
-	// This page has no internal scrollable container of its own --
-	// .fg-bodega/.fg-header/.fg-body all carry no overflow/fixed-height
-	// rule (confirmed against bodega.css) -- so the real scroll happens
-	// on `window` itself, on both desktop and mobile; that is what these
-	// two methods measure and correct.
-	//
+	// Rather than hardcode `.main-section` (fragile across Frappe
+	// versions/themes), get_detail_scroll_container() discovers the real
+	// scrollable ancestor at runtime: the first ancestor, walking up from
+	// .fg-body, whose computed overflow-y is auto/scroll AND whose content
+	// actually overflows (scrollHeight > clientHeight) -- falling back to
+	// document.scrollingElement (the standard cross-browser way to address
+	// "the page's own scroll") if none is found.
+	get_detail_scroll_container() {
+		let el = this.$body ? this.$body.get(0) : null;
+		while (el && el !== document.documentElement) {
+			const style = window.getComputedStyle(el);
+			if ((style.overflowY === "auto" || style.overflowY === "scroll") && el.scrollHeight > el.clientHeight) {
+				return el;
+			}
+			el = el.parentElement;
+		}
+		return document.scrollingElement || document.documentElement;
+	}
+
 	// Anchor identity is `row.row_name` -- the real Pick List Item child
 	// row name, already the `data-row` attribute on every .fg-item-card
 	// (render_item_card() below) -- never a visual index, which could
 	// point at a different product if the server ever returns rows in a
 	// different order. `this.last_changed_row` is the same field
 	// render_item_card()'s own (pre-existing, unrelated) flash-highlight
-	// check reads -- set by request/sync_row() and
-	// open_report_shortage_dialog()'s primary_action right before they
-	// call load_detail() to re-sync from the server.
+	// check reads -- set by sync_row() and open_report_shortage_dialog()'s
+	// primary_action right before they call load_detail() to re-sync from
+	// the server. Also captures the container's own raw scrollTop as a
+	// fallback (see restore below) for the rare case where that exact row
+	// can no longer be found after the render.
 	capture_detail_scroll_anchor() {
+		if (!this.$body) return null;
+		const container = this.get_detail_scroll_container();
+		const container_scroll_top = container.scrollTop;
 		const row_name = this.last_changed_row;
-		if (!row_name || this.state.view !== "detail" || !this.$body) return null;
-		const el = this.find_item_card_el(row_name);
-		if (!el) return null;
-		return { row_name, top: el.getBoundingClientRect().top };
+		const el = row_name ? this.find_item_card_el(row_name) : null;
+		if (!el) return { row_name: null, anchor_top: null, container_scroll_top };
+		const container_top = container === document.scrollingElement ? 0 : container.getBoundingClientRect().top;
+		return {
+			row_name,
+			anchor_top: el.getBoundingClientRect().top - container_top,
+			container_scroll_top,
+		};
 	}
 
-	restore_detail_scroll_anchor(anchor) {
-		if (!anchor) return;
-		const el = this.find_item_card_el(anchor.row_name);
-		if (!el) return;
-		const delta = el.getBoundingClientRect().top - anchor.top;
-		if (delta) window.scrollBy(0, delta);
+	// Waits two animation frames before measuring/correcting -- not
+	// immediately after this.$body.html() -- since Frappe Desk's own
+	// chrome can still recompute layout on the frame right after a large
+	// DOM swap; two frames is the standard, safe way to measure
+	// post-layout geometry without depending on any one particular Desk
+	// internal event.
+	restore_detail_scroll_anchor(ctx) {
+		if (!ctx) return;
+		requestAnimationFrame(() => {
+			requestAnimationFrame(() => {
+				const container = this.get_detail_scroll_container();
+				if (ctx.row_name) {
+					const el = this.find_item_card_el(ctx.row_name);
+					if (el) {
+						const container_top =
+							container === document.scrollingElement ? 0 : container.getBoundingClientRect().top;
+						const new_top = el.getBoundingClientRect().top - container_top;
+						const delta = new_top - ctx.anchor_top;
+						if (delta) container.scrollTop += delta;
+						return;
+					}
+				}
+				// Fallback: the row is gone for some reason -- restore the
+				// raw scrollTop instead of jumping to the top.
+				if (container.scrollTop !== ctx.container_scroll_top) {
+					container.scrollTop = ctx.container_scroll_top;
+				}
+			});
+		});
 	}
 
 	find_item_card_el(row_name) {
