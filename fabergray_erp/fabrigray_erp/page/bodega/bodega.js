@@ -135,6 +135,9 @@ fabergray_erp.Bodega = class Bodega {
 
 	load_detail(pick_list) {
 		this.set_shell_busy(true);
+		// Commit 25.20.2 -- captured BEFORE render_skeleton_detail() wipes the
+		// current cards (the item card this measures must still be on screen).
+		const scroll_anchor = this.capture_detail_scroll_anchor();
 		if (this.$body) this.render_skeleton_detail();
 		return this.call("get_pick_list", { name: pick_list })
 			.then((data) => {
@@ -142,6 +145,7 @@ fabergray_erp.Bodega = class Bodega {
 				this.state.pick_list = pick_list;
 				this.state.detail = data;
 				this.render_body();
+				this.restore_detail_scroll_anchor(scroll_anchor);
 			})
 			.finally(() => this.set_shell_busy(false));
 	}
@@ -1360,6 +1364,57 @@ fabergray_erp.Bodega = class Bodega {
 				this.$body.find(".fg-inventory-list").html(this.render_inventory_rows_html());
 			});
 		}
+	}
+
+	// -------------------------------------------------------------------
+	// Commit 25.20.2 -- scroll-position preservation across an in-place
+	// detail refresh (load_detail() always fully replaces .fg-body's
+	// innerHTML -- via a much-shorter skeleton first, see
+	// render_skeleton_detail() -- so the operator's window scroll
+	// position, an absolute pixel offset, ends up pointing at whatever
+	// happens to be there after the content's height changes; that is
+	// the entire cause of the "jumps back to the top of the pedido"
+	// symptom, never an explicit scrollTo/location.reload/set_route --
+	// this page has none of those).
+	//
+	// This page has no internal scrollable container of its own --
+	// .fg-bodega/.fg-header/.fg-body all carry no overflow/fixed-height
+	// rule (confirmed against bodega.css) -- so the real scroll happens
+	// on `window` itself, on both desktop and mobile; that is what these
+	// two methods measure and correct.
+	//
+	// Anchor identity is `row.row_name` -- the real Pick List Item child
+	// row name, already the `data-row` attribute on every .fg-item-card
+	// (render_item_card() below) -- never a visual index, which could
+	// point at a different product if the server ever returns rows in a
+	// different order. `this.last_changed_row` is the same field
+	// render_item_card()'s own (pre-existing, unrelated) flash-highlight
+	// check reads -- set by request/sync_row() and
+	// open_report_shortage_dialog()'s primary_action right before they
+	// call load_detail() to re-sync from the server.
+	capture_detail_scroll_anchor() {
+		const row_name = this.last_changed_row;
+		if (!row_name || this.state.view !== "detail" || !this.$body) return null;
+		const el = this.find_item_card_el(row_name);
+		if (!el) return null;
+		return { row_name, top: el.getBoundingClientRect().top };
+	}
+
+	restore_detail_scroll_anchor(anchor) {
+		if (!anchor) return;
+		const el = this.find_item_card_el(anchor.row_name);
+		if (!el) return;
+		const delta = el.getBoundingClientRect().top - anchor.top;
+		if (delta) window.scrollBy(0, delta);
+	}
+
+	find_item_card_el(row_name) {
+		if (!row_name || !this.$body) return null;
+		const cards = this.$body.get(0).querySelectorAll(".fg-item-card");
+		for (const el of cards) {
+			if (el.dataset.row === row_name) return el;
+		}
+		return null;
 	}
 
 	// -------------------------------------------------------------------
