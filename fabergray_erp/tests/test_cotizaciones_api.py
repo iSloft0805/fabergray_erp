@@ -219,6 +219,9 @@ class TestCotizacionesApi(IntegrationTestCase):
 			# Commit 25.13
 			"fg_billing_review_status",
 			"fg_billing_review_note",
+			# Commit 25.17 -- {"name", "status"} of the linked Sales Order
+			# (or None), never an economic field.
+			"sales_order",
 		}
 		for row in mine:
 			self.assertTrue(set(row.keys()).issubset(allowed), row.keys())
@@ -256,6 +259,8 @@ class TestCotizacionesApi(IntegrationTestCase):
 			# Commit 25.13
 			"fg_billing_review_status",
 			"fg_billing_review_note",
+			# Commit 25.17 -- same convention as get_my_quotations() above.
+			"sales_order",
 		}
 		allowed_item = {"item_code", "item_name", "qty", "stock_uom"}
 		self.assertTrue(set(detail.keys()).issubset(allowed_top))

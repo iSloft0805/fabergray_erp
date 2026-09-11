@@ -273,6 +273,16 @@ fabergray_erp.Ventas = class Ventas {
 		const obs = o.observations
 			? `<div class="fg-order-card-obs">${icon("file-text", "fg-icon-sm")} ${frappe.utils.escape_html(o.observations)}</div>`
 			: "";
+		// Commit 25.17 -- native Quotation<->Sales Order link
+		// (`o.quotation`, get_my_orders()/get_order_detail(), read off
+		// Sales Order Item's own `prevdoc_docname`, set by ERPNext's
+		// native `make_sales_order()` mapper) -- `null`/absent for the
+		// overwhelming majority of orders (built directly, never from a
+		// Quotation), same "nothing to show -> nothing rendered"
+		// convention `obs` above already establishes.
+		const quotation_origin_html = o.quotation
+			? `<div class="fg-order-card-quotation-origin">${icon("file-text", "fg-icon-sm")} ${__("Cotización")} #${frappe.utils.escape_html(o.quotation)}</div>`
+			: "";
 		// Commit 25.12 -- only ever rendered for a genuinely cancelled card
 		// (o.status === "Cancelled"); `o.cancellation_reason` is `null` for
 		// any Sales Order cancelled before this commit, or cancelled
@@ -305,6 +315,7 @@ fabergray_erp.Ventas = class Ventas {
 					<span class="fg-badge fg-badge--${status.mod}">${status.label}</span>
 				</div>
 				<div class="fg-order-card-customer">${icon("user", "fg-icon-sm")} ${customer_label}</div>
+				${quotation_origin_html}
 				<div class="fg-order-card-meta">
 					<span>${icon("calendar", "fg-icon-sm")} ${frappe.datetime.str_to_user(o.transaction_date)}</span>
 					<span>${icon("truck", "fg-icon-sm")} ${__("Entrega")}: ${entrega}</span>
@@ -633,6 +644,11 @@ fabergray_erp.Ventas = class Ventas {
 				<div class="fg-order-detail-customer">
 					${icon("user", "fg-icon-sm")} ${frappe.utils.escape_html(detail.customer_name || detail.customer || "—")}
 				</div>
+				${
+					detail.quotation
+						? `<div class="fg-order-card-quotation-origin">${icon("file-text", "fg-icon-sm")} ${__("Cotización")} #${frappe.utils.escape_html(detail.quotation)}</div>`
+						: ""
+				}
 				<div class="fg-order-detail-meta">
 					<span>${icon("calendar", "fg-icon-sm")} ${frappe.datetime.str_to_user(detail.transaction_date)}</span>
 					<span>${icon("truck", "fg-icon-sm")} ${__("Entrega")}: ${entrega}</span>

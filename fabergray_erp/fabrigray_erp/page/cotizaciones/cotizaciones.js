@@ -288,6 +288,26 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 				`
 				: "";
 
+		// Commit 25.17 -- "PEDIDO CREADO" info strip, own row, same
+		// "info block outside the actions row" convention returned_note
+		// above already establishes -- shown only once a Sales Order
+		// actually exists for this exact, vigente Quotation (see
+		// render_quotation_card_actions()'s own comment for the button
+		// half of this: ENVIAR A PEDIDOS / VER PEDIDO are mutually
+		// exclusive with each other, this strip only ever appears
+		// alongside VER PEDIDO, never alongside ENVIAR A PEDIDOS).
+		const pedido_creado_html = q.sales_order
+			? `
+				<div class="fg-quotation-card-pedido-note">
+					${icon("check-circle", "fg-icon-sm")}
+					<div>
+						<strong>${__("PEDIDO CREADO")}</strong>
+						<div>${frappe.utils.escape_html(q.sales_order.name)}</div>
+					</div>
+				</div>
+			`
+			: "";
+
 		return `
 			<div class="fg-quotation-card">
 				<div class="fg-quotation-card-top">
@@ -305,6 +325,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 					<span>${format_qty(q.total_qty)} ${__("unidades")}</span>
 				</div>
 				${returned_note}
+				${pedido_creado_html}
 				${this.render_quotation_card_actions(q)}
 			</div>
 		`;
@@ -389,7 +410,30 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 				`
 			: "";
 
-		return `<div class="fg-quotation-card-actions">${view_btn}${edit_btn}${send_btn}${pdf_btns}</div>`;
+		// Commit 25.17 -- "ENVIAR A PEDIDOS" is the commercial CTA once
+		// Aprobada+vigente (section 2), same eligibility as pdf_btns above
+		// -- deliberately reusing `aprobada_vigente`, never a second,
+		// slightly-different condition that could drift out of sync with
+		// it. Mutually exclusive with itself: `q.sales_order` (set by
+		// get_my_quotations()/get_quotation_detail(), Commit 25.17) means
+		// a Sales Order already traces back to this exact Quotation --
+		// "VER PEDIDO" replaces "ENVIAR A PEDIDOS" entirely, section 12's
+		// own explicit requirement, never both buttons at once.
+		const pedido_btn = aprobada_vigente
+			? q.sales_order
+				? `
+					<button type="button" class="fg-order-card-action fg-quotation-card-view-pedido" ${name_attr} data-sales-order="${frappe.utils.escape_html(q.sales_order.name)}">
+						${icon("eye", "fg-icon-sm")} ${__("VER PEDIDO")}
+					</button>
+				`
+				: `
+					<button type="button" class="fg-order-card-action fg-quotation-card-send-pedido fg-quotation-card-cta" ${name_attr}>
+						${icon("send", "fg-icon-sm")} ${__("ENVIAR A PEDIDOS")}
+					</button>
+				`
+			: "";
+
+		return `<div class="fg-quotation-card-actions">${view_btn}${edit_btn}${send_btn}${pdf_btns}${pedido_btn}</div>`;
 	}
 
 	bind_dashboard_events() {
@@ -434,6 +478,12 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		this.$body.find(".fg-quotation-card-download-pdf").on("click", (e) => {
 			download_fabrigray_quotation_pdf($(e.currentTarget).data("quotation-name"));
 		});
+		this.$body.find(".fg-quotation-card-send-pedido").on("click", (e) => {
+			this.confirm_send_to_pedidos($(e.currentTarget).data("quotation-name"));
+		});
+		this.$body.find(".fg-quotation-card-view-pedido").on("click", (e) => {
+			open_sales_order_form($(e.currentTarget).data("sales-order"));
+		});
 	}
 
 	// Commit 25.13 -- "ENVIAR A FACTURACIÓN". A plain frappe.confirm() is
@@ -457,6 +507,103 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 				})
 				.finally(() => this.set_busy(false));
 		});
+	}
+
+	// Commit 25.17 -- "ENVIAR A PEDIDOS". `q` is read straight out of
+	// `this.quotations` (already loaded for the dashboard/card list) --
+	// customer_name/item_count/total_qty are all already-fetched,
+	// non-economic operational fields (see get_my_quotations()'s own
+	// docstring), so this dialog needs no extra round-trip. Deliberately
+	// NO total/price/discount anywhere in this dialog -- this whole
+	// module's own standing "Vendedora never sees an economic field"
+	// policy applies here too, confirmed explicitly for this exact screen
+	// (Commit 25.17 review) rather than assumed.
+	confirm_send_to_pedidos(name) {
+		if (!name) return;
+		const q = (this.quotations || []).find((row) => row.name === name);
+		if (!q) return;
+
+		const customer_label = frappe.utils.escape_html(q.customer_name || q.customer || "—");
+
+		const d = new frappe.ui.Dialog({
+			title: __("Enviar cotización a pedidos"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					options: `
+						<div class="fg-pedido-confirm">
+							<div class="fg-pedido-confirm-row">
+								<span>${__("Cliente")}</span>
+								<strong>${customer_label}</strong>
+							</div>
+							<div class="fg-pedido-confirm-row">
+								<span>${__("Referencias")}</span>
+								<strong>${q.item_count}</strong>
+							</div>
+							<div class="fg-pedido-confirm-row">
+								<span>${__("Unidades")}</span>
+								<strong>${format_qty(q.total_qty)}</strong>
+							</div>
+							<p class="fg-pedido-confirm-msg">
+								${__(
+									"Se creará un pedido de venta con los productos y valores aprobados por Facturación y será enviado al flujo de alistamiento."
+								)}
+							</p>
+						</div>
+					`,
+				},
+			],
+			primary_action_label: __("CREAR PEDIDO"),
+			primary_action: () => {
+				d.hide();
+				this.set_busy(true);
+				this.call("create_sales_order_from_quotation", { quotation_name: name })
+					.then((result) => this.load_dashboard().then(() => this.open_pedido_success_dialog(result)))
+					.catch(() => {
+						// The server already showed the real validation error via its
+						// own default frappe.call error dialog.
+					})
+					.finally(() => this.set_busy(false));
+			},
+			secondary_action_label: __("CANCELAR"),
+			secondary_action: () => d.hide(),
+		});
+		d.show();
+	}
+
+	// Commit 25.17, section 19 -- shown once, right after a successful
+	// (or idempotent-repeat, `already_exists: true` -- same dialog either
+	// way, there is nothing different to tell her) create_sales_order_
+	// from_quotation() call. load_dashboard() (called BEFORE this, see
+	// confirm_send_to_pedidos() above) has already refreshed the card
+	// itself in place -- ENVIAR A PEDIDOS is already gone/replaced by VER
+	// PEDIDO underneath this dialog by the time it opens, no full page
+	// reload anywhere in this flow (section 19's own explicit ask).
+	open_pedido_success_dialog(result) {
+		const d = new frappe.ui.Dialog({
+			title: __("Pedido creado correctamente"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					options: `
+						<div class="fg-pedido-confirm">
+							<div class="fg-pedido-confirm-row">
+								<span>${__("Pedido")}</span>
+								<strong>${frappe.utils.escape_html(result.sales_order)}</strong>
+							</div>
+						</div>
+					`,
+				},
+			],
+			primary_action_label: __("VER PEDIDO"),
+			primary_action: () => {
+				d.hide();
+				open_sales_order_form(result.sales_order);
+			},
+			secondary_action_label: __("CERRAR"),
+			secondary_action: () => d.hide(),
+		});
+		d.show();
 	}
 
 	// =====================================================================
@@ -1256,6 +1403,22 @@ function download_fabrigray_quotation_pdf(name) {
 				encodeURIComponent(name)
 		)
 	);
+}
+
+// Commit 25.17 -- "VER PEDIDO". Opens the native Desk Form for the Sales
+// Order directly (`frappe.set_route("Form", "Sales Order", name)`) --
+// deliberately NOT a new, custom deep-link into Page Ventas' own
+// dashboard state (that page has no route/URL-param mechanism to open a
+// specific order today, and section 22's own "no modificar arquitectura
+// general de Ventas" explicitly rules out adding one for this commit).
+// Vendedora already holds native read on Sales Order (the same Custom
+// DocPerm get_order_detail()/get_my_orders() already rely on) -- the
+// Module Profile that hides standard Workspace/Desk navigation for her
+// (see hooks.py's own "Home Fabrigray" comment) blocks sidebar/workspace
+// browsing only, never a direct doctype Form route.
+function open_sales_order_form(name) {
+	if (!name) return;
+	frappe.set_route("Form", "Sales Order", name);
 }
 
 function get_initials(name) {

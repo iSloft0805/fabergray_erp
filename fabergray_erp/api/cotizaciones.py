@@ -12,9 +12,18 @@ permission on Quotation (Commit 20.1); Commit 25.1 dropped the original
 `if_owner=1` scoping -- "el rol controla el área, no el owner" -- so this
 is now shared across every Vendedora of the same Company, Company
 isolation enforced by `fabergray_erp/permission_conditions.py` instead.
-No Pick List/Reporte de Faltante/Fulfillment Engine/Sales Order/Material
-Request involvement at all -- this module has nothing to bypass a
-permission for, unlike api/ventas.py.
+No Pick List/Reporte de Faltante/Fulfillment Engine/Material Request
+involvement at all -- this module has nothing to bypass a permission for,
+unlike api/ventas.py. Commit 25.17 is the ONE deliberate exception:
+`create_sales_order_from_quotation()`, at the very bottom of this file,
+converts an already-Aprobada Quotation into a real Sales Order via
+ERPNext's own native `make_sales_order()` mapper (never a hand-built
+mapping) -- see that function's own docstring for the full design. It
+still creates zero Pick List/Reporte de Faltante/Material Request of its
+own: `.submit()` alone triggers the exact same `Sales Order.on_submit`
+Fulfillment Engine hook (hooks.py) every OTHER Sales Order in this app
+already goes through, api/ventas.py's own `create_and_submit_sales_order()`
+included -- there is no second, parallel pipeline.
 
 `search_customers()`/`search_items()` are NOT duplicated here -- both are
 already generic, carry nothing Sales-Order-specific, and are already
@@ -61,7 +70,7 @@ only, see `_reference_selling_rates()`'s own docstring.
 
 import frappe
 from frappe import _
-from frappe.utils import cint, flt, now_datetime, nowdate
+from frappe.utils import add_days, cint, flt, now_datetime, nowdate
 
 from erpnext.setup.doctype.brand.brand import get_brand_defaults
 from erpnext.setup.doctype.item_group.item_group import get_item_group_defaults
@@ -69,6 +78,7 @@ from erpnext.stock.doctype.item.item import get_item_defaults
 from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
 from fabergray_erp.api.bodega import _require_login
+from fabergray_erp.api.ventas import DEFAULT_DELIVERY_LEAD_DAYS
 from fabergray_erp.permission_conditions import assert_same_company
 
 # The only two fields a Quotation Item line may carry in from the client,
@@ -350,6 +360,14 @@ def get_my_quotations(limit=50):
                 # identically to "Borrador" (no review yet).
                 "fg_billing_review_status": qtn.get("fg_billing_review_status") or None,
                 "fg_billing_review_note": qtn.get("fg_billing_review_note") or None,
+                # Commit 25.17 -- the ONE fact "ENVIAR A PEDIDOS" needs to
+                # decide whether to show that button or "PEDIDO CREADO"
+                # instead, see `_existing_sales_order_for_quotation()`'s
+                # own docstring. Never an economic field -- just the
+                # linked Sales Order's own name/status, read off the
+                # native `prevdoc_docname` link `make_sales_order()`
+                # itself already sets, no custom field involved.
+                "sales_order": _existing_sales_order_for_quotation(qtn.name),
             }
         )
 
@@ -392,6 +410,8 @@ def get_quotation_detail(name):
         # get_my_quotations() above.
         "fg_billing_review_status": qtn.get("fg_billing_review_status") or None,
         "fg_billing_review_note": qtn.get("fg_billing_review_note") or None,
+        # Commit 25.17 -- same convention as get_my_quotations() above.
+        "sales_order": _existing_sales_order_for_quotation(qtn.name),
         "items": [
             {
                 "item_code": row.item_code,
@@ -1954,3 +1974,191 @@ def download_fabrigray_quotation_pdf(quotation_name):
 
     safe_name = quotation_name.replace(" ", "-").replace("/", "-")
     frappe.local.response.filename = f"Cotizacion-Fabrigray-{safe_name}.pdf"
+
+
+# =============================================================================
+# Commit 25.17 -- "ENVIAR A PEDIDOS": converts an Aprobada Quotation into a
+# real Sales Order, reusing ERPNext's own native Quotation -> Sales Order
+# mapper (`erpnext.selling.doctype.quotation.quotation.make_sales_order()`)
+# end to end -- never a hand-built field-by-field mapping. Confirmed live,
+# by reading that mapper directly, that it already does everything this
+# commit's brief asks for, natively:
+#   - `get_mapped_doc()`'s own default same-fieldname copy carries `rate`/
+#     `price_list_rate`/`discount_percentage`/`amount`/`item_code`/
+#     `item_name`/`description`/`qty`/`uom`/`conversion_factor`/`warehouse`/
+#     `company`/`customer`/`transaction_date`/`currency`/`conversion_rate`/
+#     `selling_price_list` from Quotation (Item) to Sales Order (Item)
+#     automatically -- nothing here re-specifies any of it.
+#   - `Quotation Item -> Sales Order Item` sets `prevdoc_docname` (parent
+#     Quotation name) and `quotation_item` (source row name) on every Sales
+#     Order Item -- ERPNext's own NATIVE Quotation<->Sales Order link, the
+#     same one `Quotation.get_ordered_status()` itself already reads. No
+#     Custom Field is added for this relationship.
+#   - `Sales Taxes and Charges` rows are copied too (`"reset_value": True`).
+#   - the linked Customer is reused as-is (`_make_customer()`, internal to
+#     the mapper: `quotation_to == "Customer"` -- true for every Quotation
+#     this app ever creates, see `create_and_submit_quotation()` -- returns
+#     the EXISTING `frappe.get_doc("Customer", party_name)` directly, never
+#     creates one).
+#   - the already-copied `rate`/`price_list_rate`/`discount_percentage` are
+#     NEVER overwritten by the mapper's own trailing `calculate_taxes_and_
+#     totals()` call -- confirmed by reading `AccountsController.
+#     set_missing_item_details()` directly: a field already set (non-None)
+#     on the target row is left untouched unless its name is in that
+#     function's own `force_item_fields` tuple, which contains
+#     `item_group`/`brand`/`stock_uom`/`is_fixed_asset`/`pricing_rules`/
+#     `weight_per_unit`/`weight_uom`/`total_weight`/`valuation_rate` --
+#     `rate`/`price_list_rate`/`discount_percentage` are NOT in that tuple.
+#     So the already-Aprobada rate is the one and only number that ends up
+#     on the Sales Order -- no fresh Item Price lookup, no re-applied
+#     10/15/20/25% discount, no compounding.
+# =============================================================================
+
+
+def _existing_sales_order_for_quotation(quotation_name):
+    """The ONE idempotency check `create_sales_order_from_quotation()` (and
+    every card read, `get_my_quotations()`/`get_quotation_detail()` above)
+    relies on -- a single indexed lookup on `Sales Order Item.
+    prevdoc_docname` (the native link `make_sales_order()` itself sets),
+    filtered to `docstatus != 2` so a genuinely CANCELLED Sales Order never
+    blocks a fresh one from being created again (Frappe mirrors a parent's
+    own `docstatus` onto every one of its child rows automatically -- no
+    join back to the Sales Order itself needed). Same raw-`frappe.db`
+    "does a related document already exist" convention `get_my_orders()`
+    already uses for its own amend-chain-tip check
+    (`frappe.db.exists("Sales Order", {"amended_from": name})`) -- existence
+    only, never any economic content. Returns `{"name", "status"}` or
+    `None`."""
+    so_name = frappe.db.get_value(
+        "Sales Order Item", {"prevdoc_docname": quotation_name, "docstatus": ["!=", 2]}, "parent"
+    )
+    if not so_name:
+        return None
+    return {"name": so_name, "status": frappe.db.get_value("Sales Order", so_name, "status")}
+
+
+@frappe.whitelist()
+def create_sales_order_from_quotation(quotation_name):
+    """Commit 25.17 -- "ENVIAR A PEDIDOS". Server-side only: the client
+    sends nothing but `quotation_name` -- no `customer`/`items`/`rate`/
+    `discount`/`tax` of any kind is ever accepted here (there is no such
+    parameter to accept), matching this whole module's own standing
+    "Vendedora never sends an economic field" convention. Every value that
+    ends up on the Sales Order comes from re-reading the Quotation itself,
+    fresh, server-side, via the native mapper -- see this section's own
+    module-level comment above for the full audit of what that mapper
+    already does and why nothing here duplicates it.
+
+    Validations, all re-derived from the document itself, never trusted
+    from a hidden button/stale client state (same "the button being
+    hidden is not the security boundary" convention `send_quotation_to_
+    billing()`/`approve_quotation_billing()` already establish):
+    Quotation exists (`frappe.get_doc()` raises `DoesNotExistError`
+    otherwise) -> `check_permission("read")` -> `assert_same_company()` ->
+    `docstatus == 1` (never a Draft, never an old, cancelled amendment --
+    section 7's own explicit concern: an old `docstatus == 2` version of a
+    Quotation can never reach this far, its own `fg_billing_review_status`
+    might still misleadingly read "Aprobada", frozen from before it was
+    superseded, but `docstatus` alone already excludes it here) ->
+    `fg_billing_review_status == "Aprobada"` -> has a customer -> has at
+    least one item -> every qty > 0.
+
+    Idempotency (section 6): `_existing_sales_order_for_quotation()` runs
+    BEFORE the mapper is ever touched -- if a non-cancelled Sales Order
+    already traces back to this exact Quotation, it is returned as-is
+    (`already_exists: true`), the mapper is never called a second time, no
+    second Sales Order is ever created. A residual, narrow race (two
+    genuinely concurrent requests both passing this check before either
+    finishes inserting) is not closed by an explicit lock here -- same
+    honest "not solved by a custom lock" note `confirm_order()`
+    (api/ventas.py) already carries for its own, analogous race, for the
+    identical reason: Frappe's own `Document.insert()`/`.submit()` still
+    run under real permission/validation checks either way, and a genuine
+    double-click in practice reaches this function sequentially, not
+    concurrently.
+
+    No stock/availability validation of any kind (section 15 -- Bodega
+    determines physical shortages during picking, not this endpoint, same
+    policy `create_and_submit_quotation()`/`create_and_submit_sales_order()`
+    already establish); no Material Request; no `Bin` read or write.
+
+    `.insert()` then `.submit()` -- never `ignore_permissions`, never a
+    `db_set`/manual `docstatus` write. `.submit()` alone is what triggers
+    `Sales Order.on_submit` (hooks.py) -> the exact same Fulfillment Engine
+    entrypoint (`process_sales_order_for_confirmation()`) every other
+    Sales Order in this app already goes through -- Bodega sees this order
+    exactly like any other, no second pipeline.
+
+    `fg_billing_review_status` is never touched here (section 13) -- the
+    Quotation stays "Aprobada", permanently, as its own historical/auditable
+    commercial record, completely independent of whether a Sales Order was
+    ever created from it.
+
+    Returns `{"quotation", "sales_order", "status", "already_exists"}` --
+    no economic field, matching section 18's own proposed shape.
+    """
+    _require_login()
+    frappe.has_permission("Sales Order", "create", throw=True)
+
+    qtn = frappe.get_doc("Quotation", quotation_name)
+    qtn.check_permission("read")
+    assert_same_company(qtn)
+
+    if qtn.docstatus != 1:
+        frappe.throw(_("Solo se puede enviar a pedidos una cotización sometida y vigente."))
+    if qtn.get("fg_billing_review_status") != BILLING_REVIEW_APPROVED:
+        frappe.throw(_("La cotización debe estar aprobada por Facturación antes de enviarla a pedidos."))
+    if not qtn.party_name:
+        frappe.throw(_("La cotización debe tener un cliente."))
+    if not qtn.items:
+        frappe.throw(_("La cotización debe tener al menos un producto."))
+    for row in qtn.items:
+        if flt(row.qty) <= 0:
+            frappe.throw(_("La cantidad debe ser mayor a cero para {0}.").format(row.item_code))
+
+    existing = _existing_sales_order_for_quotation(qtn.name)
+    if existing:
+        return {
+            "quotation": qtn.name,
+            "sales_order": existing["name"],
+            "status": existing["status"],
+            "already_exists": True,
+        }
+
+    from erpnext.selling.doctype.quotation.quotation import make_sales_order
+
+    so = make_sales_order(qtn.name)
+    # Quotation Item's own `warehouse` is never set (Vendedora's item
+    # allowlist is `{"item_code", "qty"}` only, see `create_and_submit_
+    # quotation()`) -- but `get_mapped_doc()`'s default same-fieldname
+    # copy still carries that EMPTY STRING over onto the Sales Order Item
+    # row verbatim. That matters: native `set_missing_item_details()`
+    # only fills a field whose current value `is None` -- an empty
+    # string reads as "already set" and is left alone, so the warehouse
+    # native precedence chain `create_and_submit_sales_order()` already
+    # relies on (Item Default -> Item Group -> Brand -> Stock Settings)
+    # would otherwise never run at all, and `.insert()` would reject the
+    # row outright ("Source warehouse required for stock item ...").
+    # Normalizing "" -> None here, before `.insert()` (which re-runs
+    # `set_missing_item_details()` natively on its own, same as any other
+    # Sales Order in this app), is what lets that same native resolution
+    # actually happen -- never a hand-picked warehouse of this function's
+    # own choosing.
+    for row in so.items:
+        if not row.warehouse:
+            row.warehouse = None
+    # Quotation has no `delivery_date` field of its own -- the mapper's own
+    # default same-fieldname copy leaves the mapped Sales Order's
+    # `delivery_date` unset, which native `validate_delivery_date()`
+    # otherwise rejects outright ("Please enter Delivery Date"). Same
+    # `DEFAULT_DELIVERY_LEAD_DAYS` (7) lead time api/ventas.py's own
+    # `create_and_submit_sales_order()` already uses, computed off the
+    # mapped Sales Order's own `transaction_date` (copied from the
+    # Quotation, possibly long in the past) rather than `nowdate()` -- so
+    # this can never fail native's own "delivery date must be after the
+    # order date" check regardless of how old the approved Quotation is.
+    so.delivery_date = add_days(so.transaction_date, DEFAULT_DELIVERY_LEAD_DAYS)
+    so.insert()  # no ignore_permissions
+    so.submit()  # triggers on_submit -> process_sales_order_for_confirmation() (Fulfillment Engine)
+
+    return {"quotation": qtn.name, "sales_order": so.name, "status": so.status, "already_exists": False}

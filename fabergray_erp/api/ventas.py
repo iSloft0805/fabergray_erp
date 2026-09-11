@@ -624,6 +624,16 @@ def get_my_orders(limit=50, view="active"):
                 # above.
                 "cancellation_reason": so.fg_cancellation_reason or None,
                 "cancellation_note": so.fg_cancellation_note or None,
+                # Commit 25.17 -- native Quotation<->Sales Order link
+                # (`Sales Order Item.prevdoc_docname`, set by ERPNext's own
+                # `make_sales_order()` mapper, see api/cotizaciones.py's
+                # `create_sales_order_from_quotation()`) -- `None` for
+                # every Sales Order NOT created that way (the overwhelming
+                # majority, built directly by create_and_submit_sales_
+                # order()/create_draft_sales_order() instead, which never
+                # set it). Every row of a mapped order shares the same
+                # value, so the first is enough; no new Custom Field.
+                "quotation": so.items[0].get("prevdoc_docname") or None if so.items else None,
             }
         )
 
@@ -667,6 +677,8 @@ def get_order_detail(name):
         "item_count": len(so.items),
         "total_qty": so.total_qty,
         "observations": so.fg_observations,
+        # Commit 25.17 -- same native-link convention as get_my_orders() above.
+        "quotation": so.items[0].get("prevdoc_docname") or None if so.items else None,
         "items": [
             {
                 "item_code": row.item_code,

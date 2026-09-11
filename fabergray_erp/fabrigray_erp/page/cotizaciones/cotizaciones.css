@@ -340,6 +340,75 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Commit 25.17 -- "PEDIDO CREADO" info strip (same shape as the         */
+/* returned-note above, success colors instead) and the "ENVIAR A       */
+/* PEDIDOS" CTA -- section 2's own "debe ser el CTA comercial principal  */
+/* una vez aprobada": solid fill, not the tinted outline every other     */
+/* .fg-order-card-action uses, so it visually stands out from VER/       */
+/* EDITAR/VER PDF/DESCARGAR PDF on the same card.                        */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-quotation-card-pedido-note {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	font-size: 0.8rem;
+	color: var(--fg-success-dark);
+	background: var(--fg-success-tint);
+	border-radius: var(--fg-radius-sm);
+	padding: 10px 12px;
+}
+
+.fg-cotizaciones .fg-quotation-card-cta {
+	background: var(--fg-success);
+	border-color: var(--fg-success);
+	color: #ffffff;
+	flex-basis: 100%;
+}
+
+.fg-cotizaciones .fg-quotation-card-cta:hover {
+	background: var(--fg-success-dark);
+	border-color: var(--fg-success-dark);
+	color: #ffffff;
+}
+
+.fg-cotizaciones .fg-quotation-card-view-pedido {
+	color: var(--fg-success-dark);
+	border-color: var(--fg-success-tint);
+	background: var(--fg-success-tint);
+}
+
+.fg-cotizaciones .fg-quotation-card-view-pedido:hover {
+	background: #d7f5e1;
+	color: var(--fg-success-dark);
+}
+
+/* Confirmation/success dialog body (frappe.ui.Dialog HTML field) -- plain
+   rows, no table, matches the dialog's own native padding/typography. */
+.fg-pedido-confirm-row {
+	display: flex;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 6px 0;
+	border-bottom: 1px solid var(--fg-border);
+	font-size: 0.88rem;
+}
+
+.fg-pedido-confirm-row:last-of-type {
+	border-bottom: none;
+}
+
+.fg-pedido-confirm-row span {
+	color: var(--fg-text-muted);
+}
+
+.fg-pedido-confirm-msg {
+	margin-top: 12px;
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+	line-height: 1.5;
+}
+
+/* ------------------------------------------------------------------ */
 /* Nueva cotización -- header, sections                                */
 /* ------------------------------------------------------------------ */
 .fg-cotizaciones .fg-np-header {

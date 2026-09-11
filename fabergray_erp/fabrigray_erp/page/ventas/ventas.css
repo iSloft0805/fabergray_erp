@@ -198,6 +198,23 @@
 	padding: 8px 10px;
 }
 
+/* Commit 25.17 -- "Cotización #X" origin reference, own small tinted
+   line so it reads as provenance metadata, distinct from .fg-order-card-obs
+   (a free-text note) -- only ever rendered for a Sales Order the native
+   Quotation -> Sales Order mapper created (see ventas.js's own comment). */
+.fg-ventas .fg-order-card-quotation-origin {
+	font-size: 0.78rem;
+	font-weight: 600;
+	color: var(--fg-primary-dark);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	background: var(--fg-primary-tint);
+	border-radius: var(--fg-radius-sm);
+	padding: 4px 8px;
+	width: fit-content;
+}
+
 /* Commit 25.12 -- Razón/Detalle de cancelación, same visual weight as
    .fg-order-card-obs above (muted, own background block), only ever
    rendered on a Cancelled card. */

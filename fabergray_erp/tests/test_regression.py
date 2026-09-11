@@ -556,6 +556,9 @@ class TestStaticGuardrails(IntegrationTestCase):
 			"item_name",
 			"qty",
 			"stock_uom",
+			# Commit 25.17 -- native Quotation<->Sales Order link
+			# (`Sales Order Item.prevdoc_docname`), never an economic field.
+			"quotation",
 		}
 		economic_keys = {
 			"rate",
