@@ -479,6 +479,152 @@ def parse_quick_order(text):
     return {"lines": lines, "line_count": len(lines)}
 
 
+# =============================================================================
+# Commit 25.18 -- "EN RUTA"/"ENTREGADO" logistics status shown in Page Ventas.
+#
+# Audit performed before writing any code here (module docstring convention,
+# see api/recorridos.py's own top docstring for the original precedent):
+#
+# 1. Reused, never reinvented: the Recorridos module (Commit 24.x) already
+#    owns two real, persisted fields for exactly this --
+#    `Recorrido.status` (Select: Borrador/Planificado/En Ruta/Completado/
+#    Cancelado, fabrigray_erp/doctype/recorrido/recorrido.json) and
+#    `Recorrido Parada.status` (Select: Pendiente/Entregado/No Entregado,
+#    fabrigray_erp/doctype/recorrido_parada/recorrido_parada.json), the
+#    latter carrying its own `sales_order` Link (set at parada-creation
+#    time in api/recorridos.py::_resolve_pick_list_snapshot(), never here).
+#    No Custom Field was added anywhere for this commit -- both fields
+#    already existed.
+#
+# 2. IMPORTANT, confirmed live by reading api/recorridos.py end to end:
+#    as of this commit, NO whitelisted function anywhere in this app ever
+#    sets `Recorrido.status = "En Ruta"` or `Recorrido Parada.status =
+#    "Entregado"` -- `plan_route()` only reaches "Planificado"; the
+#    "Planificado -> En Ruta" dispatch action and the driver-side delivery
+#    confirmation are both future commits (api/recorridos.py's own
+#    ACTIVE_ROUTE_STATUSES comment: "once delivery is implemented (24.6+)").
+#    The Select options and `Recorrido Parada.delivered_on`/`arrived_on`
+#    fields already exist in the schema for exactly this purpose (forward
+#    design), so wiring to them now is reading real fields, not inventing
+#    a state -- it simply reads as empty (0 orders) in this environment
+#    today until Recorridos' own dispatch/delivery commits ship, exactly
+#    like any other not-yet-populated field in this app. Never treat "0
+#    results today" as a bug in this commit.
+#
+# 3. No `received_by`/"recibido por" field exists anywhere on Recorrido
+#    Parada (only `delivery_note`, a free Small Text whose intended
+#    semantics were never established by the commit that added it) --
+#    section 7's own "si esa información ya existe" is explicitly NOT
+#    satisfied for "Recibido por", so it is never exposed here.
+#
+# 4. Cross-module read pattern: Vendedora holds no Custom DocPerm grant on
+#    Recorrido/Recorrido Parada (that is Recorridos/driver territory) --
+#    exactly the same situation `get_my_orders()`'s own pre-existing
+#    `amended_from` lookup and `create_sales_order_from_quotation()`'s own
+#    `_existing_sales_order_for_quotation()` (Commit 25.17) already solve
+#    with a raw `frappe.db.get_value()` read: existence/status only, never
+#    Recorrido content she has no permission to see, and never
+#    `frappe.get_all()` (this module's own static guardrail,
+#    test_regression.py, bans that specific call outright).
+# =============================================================================
+
+_ROUTE_STATUS_IN_ROUTE = "En Ruta"
+_PARADA_STATUS_DELIVERED = "Entregado"
+
+
+def _resolve_sales_order_logistics_status(so_name):
+    """The ONE function every logistics read in this module calls --
+    get_my_orders()/get_order_detail() (per-row) and get_sales_summary()
+    (aggregated) all call this exact function, never a second, slightly
+    different query, so the KPI count and the card/filter it drills into
+    can never disagree (section 4's own explicit requirement).
+
+    Priority, section 11's own explicit rule: a Recorrido Parada whose own
+    `status == "Entregado"` wins outright, regardless of whatever route
+    it belongs to -- checked FIRST, in its own query, before ever looking
+    at "is there an active route". Only if no delivered parada exists does
+    this fall through to checking whether the (most recently touched)
+    parada's own parent Recorrido is currently `status == "En Ruta"`.
+    Returns `None` when neither is true -- the existing native `Sales
+    Order.status` badge already tells that part of the story, nothing new
+    to compute or invent.
+
+    Returns a dict: `{"logistics_status": "DELIVERED"|"IN_ROUTE",
+    "route_name", "driver_name", "dispatched_on"|None,
+    "delivered_on"|None}` or `None`.
+    """
+    delivered_parada = frappe.db.get_value(
+        "Recorrido Parada",
+        {"sales_order": so_name, "status": _PARADA_STATUS_DELIVERED},
+        ["recorrido", "delivered_on"],
+        as_dict=True,
+        order_by="delivered_on desc",
+    )
+    if delivered_parada:
+        route = frappe.db.get_value(
+            "Recorrido", delivered_parada.recorrido, ["name", "driver"], as_dict=True
+        )
+        driver_name = (
+            frappe.db.get_value("Driver", route.driver, "full_name") if route and route.driver else None
+        )
+        return {
+            "logistics_status": "DELIVERED",
+            "route_name": route.name if route else None,
+            "driver_name": driver_name,
+            "dispatched_on": None,
+            "delivered_on": delivered_parada.delivered_on,
+        }
+
+    parada = frappe.db.get_value(
+        "Recorrido Parada",
+        {"sales_order": so_name},
+        ["recorrido"],
+        as_dict=True,
+        order_by="modified desc",
+    )
+    if not parada:
+        return None
+
+    route = frappe.db.get_value(
+        "Recorrido", parada.recorrido, ["name", "status", "driver", "started_on"], as_dict=True
+    )
+    if not route or route.status != _ROUTE_STATUS_IN_ROUTE:
+        return None
+
+    driver_name = frappe.db.get_value("Driver", route.driver, "full_name") if route.driver else None
+    return {
+        "logistics_status": "IN_ROUTE",
+        "route_name": route.name,
+        "driver_name": driver_name,
+        "dispatched_on": route.started_on,
+        "delivered_on": None,
+    }
+
+
+def _logistics_fields(so_name):
+    """Flattens `_resolve_sales_order_logistics_status()`'s own dict-or-
+    `None` into the fixed five-key response shape get_my_orders()/
+    get_order_detail() both return -- `None` for every key when there is
+    no logistics status yet, never a missing key (so the client-side
+    allowlist/contract stays the same shape regardless)."""
+    logistics = _resolve_sales_order_logistics_status(so_name)
+    if not logistics:
+        return {
+            "logistics_status": None,
+            "route_name": None,
+            "driver_name": None,
+            "dispatched_on": None,
+            "delivered_on": None,
+        }
+    return {
+        "logistics_status": logistics["logistics_status"],
+        "route_name": logistics["route_name"],
+        "driver_name": logistics["driver_name"],
+        "dispatched_on": logistics["dispatched_on"],
+        "delivered_on": logistics["delivered_on"],
+    }
+
+
 @frappe.whitelist()
 def get_my_orders(limit=50, view="active"):
     """All of Fabrigray's Sales Orders (Commit 25.1: "el rol controla el
@@ -634,6 +780,12 @@ def get_my_orders(limit=50, view="active"):
                 # set it). Every row of a mapped order shares the same
                 # value, so the first is enough; no new Custom Field.
                 "quotation": so.items[0].get("prevdoc_docname") or None if so.items else None,
+                # Commit 25.18 -- logistics status (Recorridos), same
+                # convention as `quotation` above: `None` for the vast
+                # majority of orders that never reached a route yet, real
+                # data (never invented) once `_resolve_sales_order_
+                # logistics_status()`'s own docstring conditions are met.
+                **_logistics_fields(so.name),
             }
         )
 
@@ -679,6 +831,8 @@ def get_order_detail(name):
         "observations": so.fg_observations,
         # Commit 25.17 -- same native-link convention as get_my_orders() above.
         "quotation": so.items[0].get("prevdoc_docname") or None if so.items else None,
+        # Commit 25.18 -- same convention as get_my_orders() above.
+        **_logistics_fields(so.name),
         "items": [
             {
                 "item_code": row.item_code,
@@ -730,11 +884,37 @@ def get_sales_summary():
     entregados = frappe.get_list("Sales Order", filters={"status": "Completed"}, pluck="name")
     cancelados = frappe.get_list("Sales Order", filters={"status": "Cancelled"}, pluck="name")
 
+    # Commit 25.18 -- `en_ruta`/`entregados_logistica`, deliberately distinct
+    # key names from the native `entregados` bucket above (native "Completed"
+    # is an entirely different, ERPNext-internal concept -- delivered+billed
+    # -- never confused with Recorridos' own delivery confirmation). Company
+    # isolation is inherited from the `active_names` list itself, which
+    # already went through `frappe.get_list()`'s own `permission_query_
+    # conditions` -- `_resolve_sales_order_logistics_status()` only ever
+    # narrows that already-authorized set further (Recorrido/Recorrido
+    # Parada are read via raw `frappe.db.get_value()`, never exposed
+    # wholesale, see that function's own docstring), so a cancelled/
+    # superseded amendment (docstatus == 2, excluded from `active_names`
+    # here) can never inflate either count -- section 12/13.K's own concern.
+    active_names = frappe.get_list("Sales Order", filters={"docstatus": ["!=", 2]}, pluck="name")
+    en_ruta = 0
+    entregados_logistica = 0
+    for name in active_names:
+        logistics = _resolve_sales_order_logistics_status(name)
+        if not logistics:
+            continue
+        if logistics["logistics_status"] == "DELIVERED":
+            entregados_logistica += 1
+        elif logistics["logistics_status"] == "IN_ROUTE":
+            en_ruta += 1
+
     return {
         "pedidos_hoy": len(pedidos_hoy),
         "pendientes": len(pendientes),
         "entregados": len(entregados),
         "cancelados": len(cancelados),
+        "en_ruta": en_ruta,
+        "entregados_logistica": entregados_logistica,
     }
 
 

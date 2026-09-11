@@ -559,6 +559,13 @@ class TestStaticGuardrails(IntegrationTestCase):
 			# Commit 25.17 -- native Quotation<->Sales Order link
 			# (`Sales Order Item.prevdoc_docname`), never an economic field.
 			"quotation",
+			# Commit 25.18 -- Recorridos logistics status (Recorrido/
+			# Recorrido Parada, real fields, never an economic one).
+			"logistics_status",
+			"route_name",
+			"driver_name",
+			"dispatched_on",
+			"delivered_on",
 		}
 		economic_keys = {
 			"rate",

@@ -191,6 +191,20 @@ fabergray_erp.Ventas = class Ventas {
 		const cards = [
 			{ key: "pedidos_hoy", label: __("Pedidos de hoy"), sub: __("Pedidos creados hoy"), i: "calendar", mod: "ventas-hoy" },
 			{ key: "pendientes", label: __("Pendientes"), sub: __("Pedidos por completar"), i: "clock", mod: "ventas-pendientes" },
+			// Commit 25.18 -- "en_ruta"/"entregados_logistica" (Recorridos),
+			// deliberately distinct keys from the native "entregados" card
+			// below (a different, ERPNext-internal concept, kept unchanged --
+			// section 3's own "mantener los KPIs actuales"). Sub-labels call
+			// out the distinction explicitly so the two "Entregados"-sounding
+			// cards are never confused with each other.
+			{ key: "en_ruta", label: __("En ruta"), sub: __("Despachados"), i: "truck", mod: "ventas-en-ruta" },
+			{
+				key: "entregados_logistica",
+				label: __("Entregados"),
+				sub: __("Confirmado en recorrido"),
+				i: "check-circle",
+				mod: "ventas-entregados-logistica",
+			},
 			{ key: "entregados", label: __("Entregados"), sub: __("Completados"), i: "check", mod: "ventas-entregados" },
 			{ key: "cancelados", label: __("Cancelados"), sub: __("Pedidos cancelados"), i: "x", mod: "ventas-cancelados" },
 		];
@@ -231,6 +245,15 @@ fabergray_erp.Ventas = class Ventas {
 		if (filter === "pedidos_hoy") return o.transaction_date === frappe.datetime.nowdate();
 		if (filter === "pendientes") return ["To Deliver and Bill", "To Deliver"].includes(o.status);
 		if (filter === "entregados") return o.status === "Completed";
+		// Commit 25.18 -- "en_ruta"/"entregados_logistica" read `o.
+		// logistics_status` directly, the exact value get_sales_summary()'s
+		// own per-order classification already produced server-side
+		// (_resolve_sales_order_logistics_status(), api/ventas.py) -- never
+		// re-derived from `o.status`/any other native field here. Section
+		// 15's own explicit "frontend no inventa estado desde Sales Order.
+		// status".
+		if (filter === "en_ruta") return o.logistics_status === "IN_ROUTE";
+		if (filter === "entregados_logistica") return o.logistics_status === "DELIVERED";
 		return true;
 	}
 
@@ -244,6 +267,8 @@ fabergray_erp.Ventas = class Ventas {
 			pendientes: __("Pendientes"),
 			entregados: __("Entregados"),
 			cancelados: __("Cancelados"),
+			en_ruta: __("En ruta"),
+			entregados_logistica: __("Entregados (recorrido)"),
 		};
 		const chip = this.order_filter
 			? `
@@ -283,6 +308,7 @@ fabergray_erp.Ventas = class Ventas {
 		const quotation_origin_html = o.quotation
 			? `<div class="fg-order-card-quotation-origin">${icon("file-text", "fg-icon-sm")} ${__("Cotización")} #${frappe.utils.escape_html(o.quotation)}</div>`
 			: "";
+		const logistics = render_logistics_block(o);
 		// Commit 25.12 -- only ever rendered for a genuinely cancelled card
 		// (o.status === "Cancelled"); `o.cancellation_reason` is `null` for
 		// any Sales Order cancelled before this commit, or cancelled
@@ -313,6 +339,7 @@ fabergray_erp.Ventas = class Ventas {
 				<div class="fg-order-card-top">
 					<div class="fg-order-card-id">#${frappe.utils.escape_html(o.commercial_name || o.name)}</div>
 					<span class="fg-badge fg-badge--${status.mod}">${status.label}</span>
+					${logistics.badge_html}
 				</div>
 				<div class="fg-order-card-customer">${icon("user", "fg-icon-sm")} ${customer_label}</div>
 				${quotation_origin_html}
@@ -324,6 +351,7 @@ fabergray_erp.Ventas = class Ventas {
 					<span>${o.item_count} ${o.item_count === 1 ? __("referencia") : __("referencias")}</span>
 					<span>${format_qty(o.total_qty)} ${__("unidades")}</span>
 				</div>
+				${logistics.info_html}
 				${obs}
 				${cancellation_html}
 				${this.render_order_card_actions(o)}
@@ -614,6 +642,7 @@ fabergray_erp.Ventas = class Ventas {
 		}
 
 		const status = status_meta(detail.status);
+		const logistics = render_logistics_block(detail);
 		const entrega = detail.delivery_date ? frappe.datetime.str_to_user(detail.delivery_date) : "—";
 		const obs = detail.observations
 			? `<div class="fg-order-detail-obs">${icon("file-text", "fg-icon-sm")} ${frappe.utils.escape_html(
@@ -639,6 +668,7 @@ fabergray_erp.Ventas = class Ventas {
 				<div class="fg-order-detail-header">
 					<div class="fg-order-detail-id">#${frappe.utils.escape_html(detail.commercial_name || detail.name)}</div>
 					<span class="fg-badge fg-badge--${status.mod}">${status.label}</span>
+					${logistics.badge_html}
 					<button type="button" class="fg-order-detail-close" title="${__("Cerrar")}">${icon("x")}</button>
 				</div>
 				<div class="fg-order-detail-customer">
@@ -653,6 +683,7 @@ fabergray_erp.Ventas = class Ventas {
 					<span>${icon("calendar", "fg-icon-sm")} ${frappe.datetime.str_to_user(detail.transaction_date)}</span>
 					<span>${icon("truck", "fg-icon-sm")} ${__("Entrega")}: ${entrega}</span>
 				</div>
+				${logistics.info_html}
 				${obs}
 				<div class="fg-order-detail-section-title">${__("Productos")}</div>
 				<div class="fg-order-detail-lines">
@@ -1998,6 +2029,57 @@ function css_escape(v) {
 // the Commit 18 design phase) to a Spanish label + badge color. Never
 // changes which orders are counted where -- that is entirely
 // get_sales_summary()'s job on the server.
+// Commit 25.18 -- shared between render_order_card() and the "VER PEDIDO"
+// detail overlay, so the card and the detail view can never show a
+// different logistics story for the same order (single source of layout
+// logic, mirroring _resolve_sales_order_logistics_status()'s own "single
+// source of classification logic" on the server). `o`/`detail` both carry
+// the exact same five fields (get_my_orders()/get_order_detail(), api/
+// ventas.py) -- this function only ever reads `logistics_status`/
+// `route_name`/`driver_name`/`dispatched_on`/`delivered_on`, never `status`
+// (section 15.O -- never re-derive from Sales Order.status client-side).
+function render_logistics_block(o) {
+	const meta =
+		o.logistics_status === "DELIVERED"
+			? { label: __("ENTREGADO"), mod: "logistics-delivered", icon: "check-circle" }
+			: o.logistics_status === "IN_ROUTE"
+				? { label: __("EN RUTA"), mod: "logistics-in-route", icon: "truck" }
+				: null;
+
+	if (!meta) {
+		return { badge_html: "", info_html: "" };
+	}
+
+	const badge_html = `<span class="fg-badge fg-badge--${meta.mod} fg-order-card-logistics-badge">${meta.label}</span>`;
+
+	// Section 6/7 -- route/driver/date lines, each rendered ONLY when that
+	// specific field actually came back populated (never guessed/invented)
+	// -- "si no hay repartidor/fecha persistidos, mostrar solo EN RUTA/
+	// ENTREGADO".
+	const info_html = `
+		<div class="fg-order-card-logistics fg-order-card-logistics--${meta.mod === "logistics-delivered" ? "delivered" : "in-route"}">
+			${icon(meta.icon, "fg-icon-sm")}
+			<div>
+				<strong>${meta.label}</strong>
+				${o.route_name ? `<div>${__("Recorrido")}: ${frappe.utils.escape_html(o.route_name)}</div>` : ""}
+				${o.driver_name ? `<div>${__("Repartidor")}: ${frappe.utils.escape_html(o.driver_name)}</div>` : ""}
+				${
+					o.logistics_status === "IN_ROUTE" && o.dispatched_on
+						? `<div>${__("Fecha de salida")}: ${frappe.datetime.str_to_user(o.dispatched_on)}</div>`
+						: ""
+				}
+				${
+					o.logistics_status === "DELIVERED" && o.delivered_on
+						? `<div>${__("Fecha de entrega")}: ${frappe.datetime.str_to_user(o.delivered_on)}</div>`
+						: ""
+				}
+			</div>
+		</div>
+	`;
+
+	return { badge_html, info_html };
+}
+
 function status_meta(status) {
 	const map = {
 		Draft: { label: __("Borrador"), mod: "so-draft" },

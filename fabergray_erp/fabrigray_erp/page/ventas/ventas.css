@@ -79,6 +79,17 @@
 	--fg-kpi-tint: var(--fg-danger-tint);
 }
 
+/* Commit 25.18 -- "en_ruta"/"entregados_logistica" (Recorridos). */
+.fg-ventas .fg-kpi--ventas-en-ruta {
+	--fg-kpi-color: var(--fg-primary-dark);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-ventas .fg-kpi--ventas-entregados-logistica {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
 .fg-ventas .fg-kpi-sub {
 	font-size: 0.76rem;
 	color: var(--fg-text-faint);
@@ -86,7 +97,7 @@
 }
 
 .fg-ventas.fg-shell .fg-kpis--ventas {
-	grid-template-columns: repeat(4, 1fr);
+	grid-template-columns: repeat(3, 1fr);
 }
 
 /* ------------------------------------------------------------------ */
@@ -321,6 +332,44 @@
 .fg-ventas .fg-badge--so-cancelled {
 	background: var(--fg-danger-tint);
 	color: var(--fg-danger);
+}
+
+/* ------------------------------------------------------------------ */
+/* Commit 25.18 -- logistics badge (Recorridos), a SEPARATE operational */
+/* badge alongside the commercial status badge above -- section 5's own */
+/* suggested colors: "En ruta" blue, "Entregado" green.                 */
+/* ------------------------------------------------------------------ */
+.fg-ventas .fg-badge--logistics-in-route {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-ventas .fg-badge--logistics-delivered {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+/* Route/driver/date info block, own row below the meta/counts section --
+   same shape/gap as .fg-order-card-cancellation, tinted per logistics
+   state via its own modifier class (set in ventas.js's own
+   render_logistics_block()). */
+.fg-ventas .fg-order-card-logistics {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	font-size: 0.8rem;
+	border-radius: var(--fg-radius-sm);
+	padding: 10px 12px;
+}
+
+.fg-ventas .fg-order-card-logistics--in-route {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-ventas .fg-order-card-logistics--delivered {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
 }
 
 /* ------------------------------------------------------------------ */
