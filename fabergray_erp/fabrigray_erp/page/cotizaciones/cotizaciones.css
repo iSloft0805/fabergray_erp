@@ -269,6 +269,45 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Commit 25.13 -- fg_billing_review_status badges, own row below the  */
+/* native-status badge above (a card can show both at once).           */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-badge--billing-draft {
+	background: #f1f5f9;
+	color: #475569;
+	margin-top: 6px;
+}
+
+.fg-cotizaciones .fg-badge--billing-pending {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+	margin-top: 6px;
+}
+
+.fg-cotizaciones .fg-badge--billing-approved {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+	margin-top: 6px;
+}
+
+.fg-cotizaciones .fg-badge--billing-returned {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+	margin-top: 6px;
+}
+
+.fg-cotizaciones .fg-quotation-card-returned-note {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	font-size: 0.8rem;
+	color: var(--fg-danger);
+	background: var(--fg-danger-tint);
+	border-radius: var(--fg-radius-sm);
+	padding: 10px 12px;
+}
+
+/* ------------------------------------------------------------------ */
 /* Nueva cotización -- header, sections                                */
 /* ------------------------------------------------------------------ */
 .fg-cotizaciones .fg-np-header {

@@ -54,6 +54,12 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 	blank_nueva_cotizacion_state() {
 		return {
 			editing_quotation_name: null, // Commit 20.6: null -> "Nueva cotización"; a Draft Quotation name -> "Editar cotización"
+			// Commit 25.13: a SUBMITTED Quotation name -> "Editar cotización"
+			// via modify_submitted_quotation() (cancel+amend) instead of
+			// update_draft_quotation() -- mutually exclusive with
+			// editing_quotation_name above, see confirm_quotation()'s own
+			// dispatch.
+			modifying_quotation_name: null,
 			customer: null, // {name, customer_name}
 			cart: new Map(), // item_code -> {item_code, item_name, stock_uom, qty}
 			customer_results: [],
@@ -243,8 +249,23 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 
 	render_quotation_card(q) {
 		const status = quotation_status_meta(q.status);
+		// Commit 25.13 -- null/"" (historical, pre-this-commit Quotation)
+		// treated identically to "Borrador" here, section 14's own rule.
+		const billing = billing_review_status_meta(q.fg_billing_review_status || "Borrador");
 		const customer_label = frappe.utils.escape_html(q.customer_name || q.customer || "—");
 		const vigencia = q.valid_till ? frappe.datetime.str_to_user(q.valid_till) : "—";
+		const returned_note =
+			q.fg_billing_review_status === "Devuelta" && q.fg_billing_review_note
+				? `
+					<div class="fg-quotation-card-returned-note">
+						${icon("alert-triangle", "fg-icon-sm")}
+						<div>
+							<strong>${__("DEVUELTA POR FACTURACIÓN")}</strong>
+							<div>${frappe.utils.escape_html(q.fg_billing_review_note)}</div>
+						</div>
+					</div>
+				`
+				: "";
 
 		return `
 			<div class="fg-quotation-card">
@@ -252,6 +273,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 					<div class="fg-quotation-card-id">#${frappe.utils.escape_html(q.name)}</div>
 					<span class="fg-badge fg-badge--${status.mod}">${status.label}</span>
 				</div>
+				<span class="fg-badge fg-badge--${billing.mod}">${billing.label}</span>
 				<div class="fg-quotation-card-customer">${icon("user", "fg-icon-sm")} ${customer_label}</div>
 				<div class="fg-quotation-card-meta">
 					<span>${icon("calendar", "fg-icon-sm")} ${frappe.datetime.str_to_user(q.transaction_date)}</span>
@@ -261,17 +283,28 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 					<span>${q.item_count} ${q.item_count === 1 ? __("referencia") : __("referencias")}</span>
 					<span>${format_qty(q.total_qty)} ${__("unidades")}</span>
 				</div>
+				${returned_note}
 				${this.render_quotation_card_actions(q)}
 			</div>
 		`;
 	}
 
-	// Commit 20.6: VER COTIZACIÓN always shows; EDITAR only for a Draft
-	// (`q.status` is the native Quotation.status string already returned
-	// by get_my_quotations() -- no new field needed to tell it apart, same
-	// convention as render_order_card_actions() in Ventas). Eliminar/
-	// Cancelar are Commits 20.7, not built yet -- omitted entirely, not
-	// shown disabled.
+	// Commit 20.6: VER COTIZACIÓN always shows. Commit 25.13 -- EDITAR/
+	// ENVIAR A FACTURACIÓN now depend on `fg_billing_review_status`
+	// (billing review), not just native `q.status`:
+	//   - "Pendiente de Facturación": VER only -- section 5's own explicit
+	//     "no permitir reenviar/editar mientras está pendiente" (also
+	//     enforced server-side, this is only the UI half).
+	//   - a real orphaned Draft (`q.status === "Draft"`, docstatus=0,
+	//     Commit 20.6's own rare edge case): EDITAR via
+	//     open_edit_cotizacion() (update_draft_quotation()), unchanged.
+	//   - every other case (null/"Borrador"/"Devuelta"/"Aprobada" on an
+	//     already-submitted Quotation): EDITAR via open_modify_cotizacion()
+	//     (modify_submitted_quotation(), this commit's own cancel+amend);
+	//     "Borrador"/"Devuelta" ALSO get "ENVIAR A FACTURACIÓN" --
+	//     "Aprobada" does not (server rejects a direct re-send while
+	//     already Aprobada -- she must edit first, which is exactly what
+	//     invalidates the old approval, section 12).
 	render_quotation_card_actions(q) {
 		const name_attr = `data-quotation-name="${frappe.utils.escape_html(q.name)}"`;
 		const view_btn = `
@@ -280,18 +313,61 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 			</button>
 		`;
 
-		if (q.status !== "Draft") {
+		const billing_status = q.fg_billing_review_status || "Borrador";
+
+		if (billing_status === "Pendiente de Facturación") {
 			return `<div class="fg-quotation-card-actions">${view_btn}</div>`;
 		}
 
-		return `
-			<div class="fg-quotation-card-actions">
-				${view_btn}
-				<button type="button" class="fg-order-card-action fg-quotation-card-edit" ${name_attr}>
-					${icon("pencil", "fg-icon-sm")} ${__("EDITAR")}
-				</button>
-			</div>
+		if (q.status === "Draft") {
+			return `
+				<div class="fg-quotation-card-actions">
+					${view_btn}
+					<button type="button" class="fg-order-card-action fg-quotation-card-edit" ${name_attr}>
+						${icon("pencil", "fg-icon-sm")} ${__("EDITAR")}
+					</button>
+				</div>
+			`;
+		}
+
+		const edit_btn = `
+			<button type="button" class="fg-order-card-action fg-quotation-card-modify" ${name_attr}>
+				${icon("pencil", "fg-icon-sm")} ${__("EDITAR")}
+			</button>
 		`;
+		const send_btn =
+			billing_status === "Borrador" || billing_status === "Devuelta"
+				? `
+					<button type="button" class="fg-order-card-action fg-quotation-card-send-billing" ${name_attr}>
+						${icon("send", "fg-icon-sm")} ${__("ENVIAR A FACTURACIÓN")}
+					</button>
+				`
+				: "";
+
+		// Commit 25.15, section 21 -- VER PDF/DESCARGAR PDF ONLY for the
+		// vigente (docstatus != 2), Aprobada version. `docstatus` guards
+		// against the exact scenario section 20 warns about: editing an
+		// already-Aprobada Quotation (allowed, Commit 25.13's own design)
+		// cancels it and creates a new amendment reset to "Borrador" -- the
+		// OLD, now-cancelled one keeps `fg_billing_review_status ==
+		// "Aprobada"` frozen forever (nothing ever re-reads/rewrites it
+		// after cancel), so `billing_status` ALONE is not enough here.
+		// Never shown for Borrador/Pendiente de Facturación/Devuelta
+		// (already excluded above/by billing_status) or Cancelled
+		// (`q.status === "Cancelled"`, native field, independent check).
+		const pdf_btns =
+			billing_status === "Aprobada" && q.docstatus !== 2 && q.status !== "Cancelled"
+				? `
+					<button type="button" class="fg-order-card-action fg-quotation-card-view-pdf" ${name_attr}>
+						${icon("file-text", "fg-icon-sm")} ${__("VER PDF")}
+					</button>
+					<button type="button" class="fg-order-card-action fg-quotation-card-download-pdf" ${name_attr}>
+						${icon("download", "fg-icon-sm")} ${__("DESCARGAR PDF")}
+					</button>
+				`
+				: "";
+
+		return `<div class="fg-quotation-card-actions">${view_btn}${edit_btn}${send_btn}${pdf_btns}</div>`;
 	}
 
 	bind_dashboard_events() {
@@ -323,6 +399,41 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		});
 		this.$body.find(".fg-quotation-card-edit").on("click", (e) => {
 			this.open_edit_cotizacion($(e.currentTarget).data("quotation-name"));
+		});
+		this.$body.find(".fg-quotation-card-modify").on("click", (e) => {
+			this.open_modify_cotizacion($(e.currentTarget).data("quotation-name"));
+		});
+		this.$body.find(".fg-quotation-card-send-billing").on("click", (e) => {
+			this.confirm_send_to_billing($(e.currentTarget).data("quotation-name"));
+		});
+		this.$body.find(".fg-quotation-card-view-pdf").on("click", (e) => {
+			open_fabrigray_quotation_pdf($(e.currentTarget).data("quotation-name"));
+		});
+		this.$body.find(".fg-quotation-card-download-pdf").on("click", (e) => {
+			download_fabrigray_quotation_pdf($(e.currentTarget).data("quotation-name"));
+		});
+	}
+
+	// Commit 25.13 -- "ENVIAR A FACTURACIÓN". A plain frappe.confirm() is
+	// enough here (unlike Ventas' own cancel dialog, Commit 25.12) --
+	// there is no reason/note to collect on THIS side, only a yes/no
+	// commitment; every real validation (customer/items/qty/rate) is
+	// server-side in send_quotation_to_billing() itself, re-derived from
+	// the document, never trusted from this confirm alone.
+	confirm_send_to_billing(name) {
+		if (!name) return;
+		frappe.confirm(__("¿Enviar esta cotización a Facturación para su revisión?"), () => {
+			this.set_busy(true);
+			this.call("send_quotation_to_billing", { quotation_name: name })
+				.then(() => {
+					frappe.show_alert({ message: __("Cotización enviada a Facturación."), indicator: "green" }, 5);
+					this.load_dashboard();
+				})
+				.catch(() => {
+					// The server already showed the real validation error via its
+					// own default frappe.call error dialog.
+				})
+				.finally(() => this.set_busy(false));
 		});
 	}
 
@@ -455,12 +566,48 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 			.finally(() => this.set_busy(false));
 	}
 
+	// Commit 25.13 -- reuses the same "Nueva cotización" screen too, but
+	// for an already-SUBMITTED Quotation (real docstatus=1 -- the normal
+	// case: create_and_submit_quotation() always submits immediately, see
+	// this file's own top comment). Prefilled via get_quotation_detail()
+	// (never get_editable_quotation(), which requires docstatus==0 and
+	// would reject this) -- same non-economic response shape either way.
+	// Saving dispatches to save_submitted_modification() ->
+	// modify_submitted_quotation() (cancel+amend), never
+	// update_draft_quotation() -- see confirm_quotation()'s own dispatch.
+	open_modify_cotizacion(name) {
+		if (!name) return;
+		this.nc = this.blank_nueva_cotizacion_state();
+		this._item_info_cache = new Map();
+		this.state.view = "nueva_cotizacion";
+		this.set_busy(true);
+
+		this.call("get_quotation_detail", { name: name })
+			.then((detail) => {
+				this.nc.modifying_quotation_name = detail.name;
+				this.nc.customer = { name: detail.customer, customer_name: detail.customer_name };
+				this.nc.valid_till = detail.valid_till || "";
+				this.nc.terms = detail.observations || "";
+				for (const item of detail.items || []) {
+					this.nc.cart.set(item.item_code, {
+						item_code: item.item_code,
+						item_name: item.item_name,
+						stock_uom: item.stock_uom,
+						qty: item.qty,
+					});
+				}
+				this.render_nueva_cotizacion();
+			})
+			.catch(() => this.back_to_dashboard())
+			.finally(() => this.set_busy(false));
+	}
+
 	back_to_dashboard() {
 		this.load_dashboard();
 	}
 
 	render_nueva_cotizacion() {
-		const editing = !!this.nc.editing_quotation_name;
+		const editing = !!this.nc.editing_quotation_name || !!this.nc.modifying_quotation_name;
 		const title = editing ? __("Editar cotización") : __("Nueva cotización");
 		this.$body.html(`
 			<div class="fg-np-header">
@@ -797,7 +944,11 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 				)}">${frappe.utils.escape_html(this.nc.terms || "")}</textarea>
 			</div>
 			<button type="button" class="fg-btn fg-btn--solid-primary fg-btn--lg fg-confirm-btn" disabled>
-				${icon("check")} ${this.nc.editing_quotation_name ? __("GUARDAR CAMBIOS") : __("CREAR COTIZACIÓN")}
+				${icon("check")} ${
+					this.nc.editing_quotation_name || this.nc.modifying_quotation_name
+						? __("GUARDAR CAMBIOS")
+						: __("CREAR COTIZACIÓN")
+				}
 			</button>
 		`);
 
@@ -892,6 +1043,16 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 			return;
 		}
 
+		if (this.nc.modifying_quotation_name) {
+			// Commit 25.13 -- same "no confirmation dialog" convention as
+			// save_draft_edit() above -- straight to
+			// modify_submitted_quotation(), which does the real
+			// cancel+amend server-side (and invalidates any previous
+			// billing-review approval as a side effect, section 12).
+			this.save_submitted_modification(payload);
+			return;
+		}
+
 		this.busy = true;
 		const $btn = this.$body.find(".fg-confirm-btn").prop("disabled", true).addClass("fg-btn--loading");
 
@@ -966,6 +1127,46 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 				this.refresh_confirm_state();
 			});
 	}
+
+	// Commit 25.13 -- modify_submitted_quotation() does the real
+	// cancel+amend server-side; a stale billing-review approval never
+	// survives it (section 12, enforced server-side -- this is only the
+	// client half of that already-real guarantee).
+	save_submitted_modification(payload) {
+		this.busy = true;
+		const $btn = this.$body.find(".fg-confirm-btn").prop("disabled", true).addClass("fg-btn--loading");
+
+		this.call("modify_submitted_quotation", {
+			name: this.nc.modifying_quotation_name,
+			customer: payload.customer,
+			items: payload.items,
+			valid_till: payload.valid_till,
+			terms: payload.terms,
+		})
+			.then((result) => {
+				frappe.show_alert(
+					{
+						message: `${icon("check", "fg-icon-sm")} ${__("Cambios guardados")} — ${frappe.utils.escape_html(
+							result.name
+						)}`,
+						indicator: "green",
+					},
+					5
+				);
+				this.back_to_dashboard();
+			})
+			.catch(() => {
+				// same reasoning as confirm_quotation()'s own .catch() -- the
+				// server's default error dialog already showed the real message
+				// (e.g. "pendiente de revisión de Facturación y no puede
+				// editarse mientras tanto").
+			})
+			.finally(() => {
+				this.busy = false;
+				$btn.prop("disabled", false).removeClass("fg-btn--loading");
+				this.refresh_confirm_state();
+			});
+	}
 };
 
 // -------------------------------------------------------------------------
@@ -976,6 +1177,63 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 // -------------------------------------------------------------------------
 function icon(name, extra_class) {
 	return `<svg class="fg-icon ${extra_class || ""}"><use href="#icon-${name}"></use></svg>`;
+}
+
+// Commit 25.15 review fix, section 2/4 -- NEITHER of these freely builds
+// a `/printview`/`download_pdf` URL from just a `name` any more (that
+// WOULD skip server-side validation up front, relying only on the
+// `before_print` hook firing correctly downstream -- exactly what the
+// review explicitly ruled out as "JS must never be the only defense").
+//
+// VER PDF calls `get_fabrigray_quotation_pdf_view_url()` FIRST (a real
+// `frappe.call()`, runs the full "Aprobada"/not-cancelled/same-Company
+// check server-side, api/cotizaciones.py) and only navigates to the URL
+// it hands back. A blank tab is opened SYNCHRONOUSLY, on the click itself
+// (`window.open("about:blank")`, before the async call even starts) and
+// only its own `.location` is set once the server responds -- opening a
+// new tab from inside a `.then()` callback, after an AJAX round trip,
+// gets silently blocked as a popup by most browsers; a tab opened
+// synchronously on the original click gesture does not.
+//
+// DESCARGAR PDF still navigates directly to its own endpoint
+// (`download_fabrigray_quotation_pdf`, a whitelisted GET) -- that
+// endpoint now ALSO runs the full eligibility check itself, first, before
+// generating anything (same function, same check, no longer relying
+// solely on `before_print` either) -- see its own docstring. The format
+// name is hardcoded server-side in BOTH endpoints; neither ever accepts
+// one from the client, so nothing here could smuggle in a different
+// print format even if it wanted to.
+function open_fabrigray_quotation_pdf(name) {
+	if (!name) return;
+	const tab = window.open("about:blank");
+	// frappe.xcall() -- unlike a bare frappe.call(), returns a REAL
+	// Promise (confirmed by reading frappe/public/js/frappe/request.js
+	// directly) that resolves straight to `r.message`, already unwrapped.
+	frappe
+		.xcall("fabergray_erp.api.cotizaciones.get_fabrigray_quotation_pdf_view_url", { quotation_name: name })
+		.then((url) => {
+			if (url && tab) {
+				tab.location = url;
+			} else if (tab) {
+				tab.close();
+			}
+		})
+		.catch(() => {
+			// The server already showed the real error via frappe.call()'s
+			// own default error dialog (e.g. "La cotización debe estar
+			// aprobada...") -- nothing here assumes it succeeded.
+			if (tab) tab.close();
+		});
+}
+
+function download_fabrigray_quotation_pdf(name) {
+	if (!name) return;
+	window.open(
+		frappe.urllib.get_full_url(
+			"/api/method/fabergray_erp.api.cotizaciones.download_fabrigray_quotation_pdf?quotation_name=" +
+				encodeURIComponent(name)
+		)
+	);
 }
 
 function get_initials(name) {
@@ -1016,4 +1274,19 @@ function quotation_status_meta(status) {
 		Expired: { label: __("Vencida"), mod: "qtn-expired" },
 	};
 	return map[status] || { label: status || "—", mod: "qtn-draft" };
+}
+
+// Commit 25.13 -- fg_billing_review_status is a SEPARATE workflow from
+// Quotation.status above, own badge. A historical Quotation (created
+// before this commit) has null/"" here -- section 14's own explicit rule:
+// treated identically to "Borrador", never shown as a raw blank badge,
+// never inferred/backfilled as Aprobada.
+function billing_review_status_meta(status) {
+	const map = {
+		Borrador: { label: __("Sin enviar a Facturación"), mod: "billing-draft" },
+		"Pendiente de Facturación": { label: __("Pendiente de Facturación"), mod: "billing-pending" },
+		Aprobada: { label: __("Aprobada por Facturación"), mod: "billing-approved" },
+		Devuelta: { label: __("Devuelta por Facturación"), mod: "billing-returned" },
+	};
+	return map[status] || map["Borrador"];
 }

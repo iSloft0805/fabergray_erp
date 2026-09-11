@@ -985,3 +985,634 @@
 		margin-top: 4px;
 	}
 }
+
+/* ------------------------------------------------------------------ */
+/* Commit 25.13 -- "Cotizaciones pendientes" (Facturación billing       */
+/* review of Quotation). Own section below the Pick List queue above,   */
+/* reusing the exact same card/table visual language, scoped separately */
+/* so nothing here can be confused with fg_invoicing_status.            */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-fact-billing-section {
+	margin-top: 28px;
+}
+
+.fg-facturacion .fg-fact-billing-count {
+	font-size: 0.8rem;
+	font-weight: 700;
+	color: var(--fg-text-muted);
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-pill);
+	padding: 2px 10px;
+}
+
+.fg-facturacion .fg-fact-billing-cards {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	margin-top: 12px;
+}
+
+.fg-facturacion .fg-fact-billing-card {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px 20px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.fg-facturacion .fg-fact-billing-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.fg-facturacion .fg-fact-billing-card-id {
+	font-weight: 700;
+	font-size: 1rem;
+}
+
+.fg-facturacion .fg-fact-billing-card-customer {
+	font-size: 0.88rem;
+	color: var(--fg-text);
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.fg-facturacion .fg-fact-billing-card-meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 16px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-facturacion .fg-fact-billing-card-meta span {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.fg-facturacion .fg-fact-billing-card-counts {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+	font-weight: 600;
+}
+
+.fg-facturacion .fg-fact-billing-review-btn {
+	align-self: flex-start;
+}
+
+.fg-facturacion .fg-badge--billing-pending {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+/* ===================================================================== */
+/* Commit 25.13.1 -- "Revisar cotización" dialog, FULL rewrite.           */
+/*                                                                         */
+/* ROOT CAUSE of the broken layout this fixes: every rule below used to   */
+/* be written as `.fg-facturacion .fg-fact-billing-*` -- but              */
+/* `frappe.ui.Dialog` renders its whole modal OUTSIDE `.fg-facturacion`   */
+/* (appended straight to <body>, exactly like `.fg-fact-review-dialog`'s  */
+/* own comment already documents above for the sibling Pick List review   */
+/* dialog) so `.fg-facturacion .fg-fact-billing-*` never matched ANYTHING */
+/* inside this dialog -- not the table grid, not the max-width, not the   */
+/* icon sizing. The dialog rendered as completely unstyled Bootstrap      */
+/* defaults plus every `<svg class="fg-icon">` at its raw intrinsic size  */
+/* (no explicit width/height -- the "iconos enormes" symptom): confirmed  */
+/* live by inspecting the rendered DOM during this fix's own audit, not   */
+/* assumed. Every selector below is scoped under `.fg-fact-billing-       */
+/* review-dialog` (the class this dialog's own `$wrapper` already         */
+/* carries, set in facturacion.js) instead -- including this dialog's OWN */
+/* content classes, not just the Bootstrap/`.fg-icon` ones, per this      */
+/* commit's own explicit "no bare svg{}/img{}/button{}/table{}/.modal{}"  */
+/* instruction: nothing here can leak outside this one dialog.            */
+/* ===================================================================== */
+
+.fg-facturacion .fg-badge--billing-pending {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-fact-billing-review-dialog .modal-dialog {
+	width: min(1100px, calc(100vw - 40px));
+	max-width: 1100px;
+}
+
+.fg-fact-billing-review-dialog .modal-content {
+	border-radius: 20px;
+	border: none;
+	box-shadow: 0 20px 60px rgba(16, 24, 40, 0.18), 0 4px 12px rgba(16, 24, 40, 0.08);
+	max-height: 90vh;
+	display: flex;
+	flex-direction: column;
+}
+
+.fg-fact-billing-review-dialog .modal-header {
+	padding: 20px 26px;
+	border-bottom: 1px solid var(--fg-border, #e5e9f0);
+	flex-shrink: 0;
+}
+
+.fg-fact-billing-review-dialog .modal-title {
+	font-size: 1.2rem;
+	font-weight: 800;
+	color: var(--fg-text, #101828);
+}
+
+.fg-fact-billing-review-dialog .modal-body {
+	padding: 22px 26px;
+	overflow-y: auto;
+}
+
+.fg-fact-billing-review-dialog .modal-footer {
+	padding: 14px 26px;
+	border-top: 1px solid var(--fg-border, #e5e9f0);
+	background: var(--fg-bg, #f8fafc);
+	flex-shrink: 0;
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+/* Every `<svg class="fg-icon">` inside this dialog, sized/stroked
+ * explicitly -- without this rule (scoped correctly this time) icons
+ * fall back to their raw intrinsic SVG size, exactly the bug this whole
+ * fix exists for. Mirrors `.fg-fact-review-dialog .fg-icon` verbatim. */
+.fg-fact-billing-review-dialog .fg-icon {
+	width: 18px;
+	height: 18px;
+	stroke: currentColor;
+	fill: none;
+	flex-shrink: 0;
+}
+
+.fg-fact-billing-review-dialog .fg-icon-sm {
+	width: 15px;
+	height: 15px;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-review-loading {
+	text-align: center;
+	padding: 60px 0;
+	color: var(--fg-text-muted, #667085);
+}
+
+/* -- Header: #COTIZACION-N + 4-column info grid ----------------------- */
+.fg-fact-billing-review-dialog .fg-fact-billing-review-id {
+	font-weight: 800;
+	font-size: 1.1rem;
+	color: var(--fg-text, #101828);
+	margin-bottom: 16px;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-info-grid {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	gap: 12px;
+	margin-bottom: 18px;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-info-card {
+	background: var(--fg-bg, #f8fafc);
+	border: 1px solid var(--fg-border, #e5e9f0);
+	border-radius: 12px;
+	padding: 12px 14px;
+	min-width: 0;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-info-label {
+	font-size: 0.72rem;
+	font-weight: 700;
+	color: var(--fg-text-muted, #667085);
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	margin-bottom: 4px;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-info-value {
+	font-size: 0.92rem;
+	font-weight: 700;
+	color: var(--fg-text, #101828);
+	overflow-wrap: anywhere;
+}
+
+/* -- Disponibilidad ERP banner + price list note ----------------------- */
+.fg-fact-billing-review-dialog .fg-fact-billing-review-note {
+	display: flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: 6px;
+	background: var(--fg-primary-tint, #eaf2fd);
+	color: var(--fg-primary-dark, #1e63c4);
+	border-radius: 10px;
+	padding: 10px 14px;
+	font-size: 0.82rem;
+	line-height: 1.4;
+	margin-bottom: 10px;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-note strong {
+	font-weight: 700;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-pricelist {
+	font-size: 0.78rem;
+	color: var(--fg-text-muted, #667085);
+	margin-bottom: 16px;
+}
+
+/* -- Commit 25.14 -- "PRECIOS AJUSTADOS" segmented control + preview --- */
+.fg-fact-billing-review-dialog .fg-fact-billing-review-pricemode {
+	background: var(--fg-bg, #f8fafc);
+	border: 1px solid var(--fg-border, #e5e9f0);
+	border-radius: 14px;
+	padding: 16px 18px;
+	margin-bottom: 18px;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-pricemode-title {
+	font-size: 0.78rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--fg-text-muted, #667085);
+	margin-bottom: 10px;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-pricemode-row {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 14px;
+	flex-wrap: wrap;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-pricemode-options {
+	display: inline-flex;
+	background: var(--fg-card, #fff);
+	border: 1px solid var(--fg-border, #e5e9f0);
+	border-radius: 10px;
+	padding: 3px;
+	gap: 3px;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-pricemode-btn {
+	border: none;
+	background: transparent;
+	border-radius: 8px;
+	padding: 8px 14px;
+	font-size: 0.82rem;
+	font-weight: 700;
+	color: var(--fg-text-muted, #667085);
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-pricemode-btn:hover {
+	background: var(--fg-bg, #f8fafc);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-pricemode-btn.is-active {
+	background: var(--fg-primary, #2b7be4);
+	color: #fff;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-apply-price-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	height: 38px;
+	padding: 0 16px;
+	border-radius: 10px;
+	font-weight: 700;
+	font-size: 0.82rem;
+	white-space: nowrap;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-apply-price-btn.disabled {
+	opacity: 0.5;
+	pointer-events: none;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-pricemode-preview {
+	display: flex;
+	align-items: baseline;
+	flex-wrap: wrap;
+	gap: 10px;
+	margin-top: 12px;
+	font-size: 0.85rem;
+	color: var(--fg-text, #101828);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-pricemode-note {
+	font-size: 0.76rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-pricemode-custom {
+	margin-top: 12px;
+	font-size: 0.82rem;
+	font-style: italic;
+	color: var(--fg-text-muted, #667085);
+}
+
+/* -- Product table (desktop: real grid) -------------------------------- */
+.fg-fact-billing-review-dialog .fg-fact-billing-review-table {
+	border: 1px solid var(--fg-border, #e5e9f0);
+	border-radius: 14px;
+	overflow: hidden;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-thead,
+.fg-fact-billing-review-dialog .fg-fact-billing-review-row {
+	display: grid;
+	grid-template-columns: minmax(160px, 1.8fr) 56px 90px 90px 110px 90px minmax(160px, 1.2fr);
+	gap: 10px;
+	align-items: center;
+	padding: 12px 16px;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-thead {
+	background: var(--fg-bg, #f8fafc);
+	border-bottom: 1px solid var(--fg-border, #e5e9f0);
+	font-size: 0.72rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-tbody {
+	max-height: 320px;
+	overflow-y: auto;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-row {
+	border-top: 1px solid var(--fg-border, #e5e9f0);
+	font-size: 0.85rem;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-row:first-child {
+	border-top: none;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-cell {
+	min-width: 0;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-row-name {
+	font-weight: 700;
+	color: var(--fg-text, #101828);
+	overflow-wrap: anywhere;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-row-code {
+	font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+	font-size: 0.76rem;
+	color: var(--fg-primary, #2b7be4);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-muted {
+	color: var(--fg-text-muted, #667085);
+	font-style: italic;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-diff {
+	font-weight: 700;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-diff.is-above {
+	color: var(--fg-danger, #d92d20);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-diff.is-below {
+	color: var(--fg-warning-dark, #b54708);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-diff.is-neutral {
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+/* -- "Ajustado" cell: preview rate + discount %/monto (Commit 25.14) --- */
+.fg-fact-billing-review-dialog .fg-fact-billing-review-adjusted-rate {
+	font-weight: 700;
+	color: var(--fg-primary-dark, #1e63c4);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-adjusted-meta {
+	font-size: 0.74rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+/* -- Availability cell: lines + badge + warehouse ----------------------- */
+.fg-fact-billing-review-dialog .fg-fact-billing-review-cell-avail {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-avail-line {
+	font-size: 0.78rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-review-warehouse {
+	font-size: 0.76rem;
+	color: var(--fg-text-muted, #667085);
+	margin-top: 2px;
+}
+
+.fg-fact-billing-review-dialog .fg-badge--billing-avail-ok {
+	background: var(--fg-success-tint, #e9f9ee);
+	color: var(--fg-success-dark, #1f9c46);
+	width: fit-content;
+}
+
+.fg-fact-billing-review-dialog .fg-badge--billing-avail-short {
+	background: var(--fg-danger-tint, #fde8e6);
+	color: var(--fg-danger, #d92d20);
+	width: fit-content;
+}
+
+.fg-fact-billing-review-dialog .fg-badge--billing-avail-neutral {
+	background: var(--fg-bg, #f1f5f9);
+	color: var(--fg-text-muted, #667085);
+	width: fit-content;
+}
+
+/* -- Footer buttons: normal-sized, icon + label, DEVOLVER added via the  */
+/* native `dialog.add_custom_action()` (.custom-actions) so it lives in   */
+/* the SAME footer as CERRAR/APROBAR -- never a button injected into the  */
+/* modal BODY (this dialog's own first draft's mistake: that put DEVOLVER */
+/* A VENDEDORA in a completely different section of the modal than        */
+/* CERRAR/APROBAR, one of this fix's own reported symptoms). Positioned   */
+/* left via `order: -1` + `margin-right: auto` below, not DOM order.      */
+.fg-fact-billing-review-dialog .btn-modal-secondary,
+.fg-fact-billing-review-dialog .btn-primary,
+.fg-fact-billing-review-dialog .fg-fact-billing-return-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	height: 40px;
+	padding: 0 18px;
+	border-radius: 10px;
+	font-weight: 700;
+	font-size: 0.85rem;
+	white-space: nowrap;
+}
+
+.fg-fact-billing-review-dialog .btn-primary {
+	background: var(--fg-primary, #2b7be4);
+	border-color: var(--fg-primary, #2b7be4);
+}
+
+.fg-fact-billing-review-dialog .btn-primary:hover:not(.disabled) {
+	background: var(--fg-primary-dark, #1e63c4);
+	border-color: var(--fg-primary-dark, #1e63c4);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-return-btn {
+	color: var(--fg-danger, #d92d20);
+	background: #fff;
+	border: 1.5px solid var(--fg-danger, #d92d20);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-return-btn:hover {
+	background: var(--fg-danger-tint, #fde8e6);
+}
+
+/* `.standard-actions` (Cerrar + Aprobar) and `.custom-actions` (Devolver,
+ * via `dialog.add_custom_action()`) are two SEPARATE sibling containers
+ * inside `.modal-footer` -- `display: contents` dissolves both boxes so
+ * their three buttons become direct flex items of `.modal-footer` itself,
+ * letting `order` position all three freely as one group regardless of
+ * which of the two containers Frappe's own template happens to place
+ * first in the DOM. Desktop: `.modal-footer` is `justify-content: flex-end`
+ * (below) with Devolver's own `order: -1` + `margin-right: auto` pinning
+ * it to the left, Cerrar/Aprobar staying right; mobile: all three
+ * restacked via `order` alone, see the media query. */
+.fg-fact-billing-review-dialog .standard-actions,
+.fg-fact-billing-review-dialog .custom-actions {
+	display: contents;
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-return-btn {
+	order: -1;
+	margin-right: auto;
+}
+
+/* ------------------------------------------------------------------ */
+/* Responsive -- table collapses to one card per product at <=860px,    */
+/* same "same DOM, CSS-only, data-label ::before" technique the sibling */
+/* .fg-fact-review-row already established above.                       */
+/* ------------------------------------------------------------------ */
+@media (max-width: 860px) {
+	.fg-fact-billing-review-dialog .modal-dialog {
+		width: calc(100vw - 24px);
+	}
+
+	.fg-fact-billing-review-dialog .fg-fact-billing-review-info-grid {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	/* Commit 25.14 -- segmented control + APLICAR PRECIOS stack full-width
+	 * rather than fight for space on a narrow screen. */
+	.fg-fact-billing-review-dialog .fg-fact-billing-review-pricemode-row {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.fg-fact-billing-review-dialog .fg-fact-billing-review-pricemode-options {
+		justify-content: space-between;
+	}
+
+	.fg-fact-billing-review-dialog .fg-fact-billing-pricemode-btn {
+		flex: 1;
+	}
+
+	.fg-fact-billing-review-dialog .fg-fact-billing-apply-price-btn {
+		justify-content: center;
+	}
+
+	.fg-fact-billing-review-dialog .fg-fact-billing-review-thead {
+		display: none;
+	}
+
+	.fg-fact-billing-review-dialog .fg-fact-billing-review-tbody {
+		max-height: none;
+	}
+
+	.fg-fact-billing-review-dialog .fg-fact-billing-review-row {
+		grid-template-columns: 1fr;
+		gap: 4px;
+		padding: 14px;
+		border: 1px solid var(--fg-border, #e5e9f0);
+		border-radius: 12px;
+		margin: 10px 0;
+	}
+
+	.fg-fact-billing-review-dialog .fg-fact-billing-review-row:first-child {
+		border-top: 1px solid var(--fg-border, #e5e9f0);
+		margin-top: 0;
+	}
+
+	.fg-fact-billing-review-dialog .fg-fact-billing-review-cell::before {
+		content: attr(data-label);
+		display: block;
+		font-size: 0.68rem;
+		font-weight: 700;
+		text-transform: uppercase;
+		letter-spacing: 0.02em;
+		color: var(--fg-text-muted, #667085);
+		margin-bottom: 2px;
+	}
+
+	.fg-fact-billing-review-dialog .fg-fact-billing-review-cell-product::before {
+		content: none;
+	}
+
+	/* Mobile footer: [Aprobar] / [Devolver a vendedora] / [Cerrar], each
+	 * full-width -- `.standard-actions`/`.custom-actions` stay
+	 * `display: contents` (set above, unchanged at this width), so
+	 * `.modal-footer`'s own `flex-direction: column` + explicit `order`
+	 * on each of the three actual buttons is what places them, regardless
+	 * of which of the two now-invisible wrapper containers each button
+	 * happens to live inside. */
+	.fg-fact-billing-review-dialog .modal-footer {
+		flex-direction: column;
+		align-items: stretch;
+	}
+
+	.fg-fact-billing-review-dialog .btn-primary {
+		order: 1;
+	}
+
+	.fg-fact-billing-review-dialog .fg-fact-billing-return-btn {
+		order: 2;
+		margin-right: 0;
+	}
+
+	.fg-fact-billing-review-dialog .btn-modal-secondary {
+		order: 3;
+	}
+
+	.fg-fact-billing-review-dialog .btn-modal-secondary,
+	.fg-fact-billing-review-dialog .btn-primary,
+	.fg-fact-billing-review-dialog .fg-fact-billing-return-btn {
+		width: 100%;
+		justify-content: center;
+	}
+}

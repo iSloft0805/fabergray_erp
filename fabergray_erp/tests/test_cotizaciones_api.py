@@ -118,7 +118,21 @@ class TestCotizacionesApi(IntegrationTestCase):
 
 			summary = cotizaciones.get_quotation_summary()
 
-		self.assertEqual(set(summary.keys()), {"cotizaciones_hoy", "pendientes", "aprobadas", "vencidas"})
+		self.assertEqual(
+			set(summary.keys()),
+			{
+				"cotizaciones_hoy",
+				"pendientes",
+				"aprobadas",
+				"vencidas",
+				# Commit 25.13 -- fg_billing_review_status buckets, distinct
+				# from the native-status ones above.
+				"borradores_facturacion",
+				"pendientes_facturacion",
+				"aprobadas_facturacion",
+				"devueltas_facturacion",
+			},
+		)
 		self.assertGreaterEqual(summary["cotizaciones_hoy"], 2)
 		self.assertGreaterEqual(summary["pendientes"], 1)
 		self.assertEqual(summary["aprobadas"], 0)  # no conversion phase yet -- always 0 until built
@@ -170,9 +184,16 @@ class TestCotizacionesApi(IntegrationTestCase):
 			"transaction_date",
 			"valid_till",
 			"status",
+			# Commit 25.15 -- lifecycle flag only (never economic), lets the
+			# UI tell a live Aprobada Quotation apart from a stale,
+			# superseded one whose review status is frozen at "Aprobada".
+			"docstatus",
 			"item_count",
 			"total_qty",
 			"observations",
+			# Commit 25.13
+			"fg_billing_review_status",
+			"fg_billing_review_note",
 		}
 		for row in mine:
 			self.assertTrue(set(row.keys()).issubset(allowed), row.keys())
@@ -207,6 +228,9 @@ class TestCotizacionesApi(IntegrationTestCase):
 			"total_qty",
 			"observations",
 			"items",
+			# Commit 25.13
+			"fg_billing_review_status",
+			"fg_billing_review_note",
 		}
 		allowed_item = {"item_code", "item_name", "qty", "stock_uom"}
 		self.assertTrue(set(detail.keys()).issubset(allowed_top))

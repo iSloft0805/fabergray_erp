@@ -203,6 +203,32 @@ doc_events = {
 	"Purchase Receipt": {
 		"on_submit": "fabergray_erp.fulfillment.purchase_receipt_hooks.on_submit",
 	},
+	# Commit 25.14 audit fix -- Facturación's Quotation Custom DocPerm
+	# grants `create: 1` (unavoidable: needed for apply_quotation_price_
+	# mode()'s own controlled cancel+amend insert, see api/cotizaciones.py
+	# ::_facturacion_billing_review_gate()'s own docstring for the full
+	# reasoning). That grant is coarse -- Frappe has no declarative way to
+	# say "create, but only as a price-mode amendment" -- so this
+	# before_insert hook closes the gap for every insert path this app's
+	# own whitelisted functions don't already gate (Desk's "New
+	# Quotation"/"Amend", a raw API insert call).
+	"Quotation": {
+		"before_insert": "fabergray_erp.api.cotizaciones.guard_facturacion_quotation_insert",
+		# Commit 25.15 (review fix) -- display-field preparation for the
+		# "Fabrigray Cotización Comercial" Print Format, AND a SECOND,
+		# defense-in-depth "Aprobada"+not-cancelled+same-Company check --
+		# the PRIMARY gate is now the two dedicated, explicitly-controlled
+		# endpoints (get_fabrigray_quotation_pdf_view_url()/download_
+		# fabrigray_quotation_pdf(), api/cotizaciones.py), which validate
+		# BEFORE ever touching Frappe's print pipeline; this hook still
+		# covers any OTHER path into that pipeline neither endpoint does
+		# (e.g. Desk's own native print preview). See
+		# prepare_and_guard_quotation_pdf()'s own docstring for the full
+		# reasoning, including why scoping to ONLY this one format (via
+		# `frappe.form_dict.get("format")`) is robust -- every other print
+		# of Quotation, with any other format, is completely untouched.
+		"before_print": "fabergray_erp.api.cotizaciones.prepare_and_guard_quotation_pdf",
+	},
 	# Home Fabrigray -- Desk-navigation profile only (never a Doctype
 	# permission). See fabergray_erp/user_hooks.py's own module docstring
 	# for why this is safe against a save -> hook -> save loop.
@@ -445,6 +471,18 @@ fixtures = [
 					# free-text detail) captured by cancel_sales_order().
 					"fg_cancellation_reason",
 					"fg_cancellation_note",
+					# Commit 25.13 -- Facturación billing-review workflow on
+					# Quotation. See api/cotizaciones.py.
+					"fg_billing_review_status",
+					"fg_billing_reviewed_by",
+					"fg_billing_reviewed_on",
+					"fg_billing_review_note",
+					"fg_billing_review_revision",
+					# Commit 25.14 -- price-mode adjustment audit trail.
+					# See apply_quotation_price_mode() in api/cotizaciones.py.
+					"fg_billing_price_mode",
+					"fg_billing_price_adjusted_by",
+					"fg_billing_price_adjusted_on",
 				],
 			]
 		],
@@ -504,6 +542,15 @@ fixtures = [
 		# mechanism available for it.
 		"dt": "Custom HTML Block",
 		"filters": [["name", "=", "Fabrigray Home"]],
+	},
+	{
+		# Commit 25.15 -- the customer-facing commercial PDF for an Aprobada
+		# Quotation. See api/cotizaciones.py's own "Commit 25.15" section
+		# header for the full design (security gate + display-field prep
+		# both live in the Quotation `before_print` doc_event above, never
+		# in this Print Format's own HTML/CSS, which is pure presentation).
+		"dt": "Print Format",
+		"filters": [["name", "=", "Fabrigray Cotización Comercial"]],
 	},
 ]
 

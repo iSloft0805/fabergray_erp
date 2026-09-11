@@ -39,6 +39,7 @@ fabergray_erp.Facturacion = class Facturacion {
 	constructor(page) {
 		this.page = page;
 		this.method_prefix = "fabergray_erp.api.facturacion.";
+		this.cotizaciones_method_prefix = "fabergray_erp.api.cotizaciones.";
 		this.busy = false;
 
 		this.summary = null;
@@ -56,6 +57,24 @@ fabergray_erp.Facturacion = class Facturacion {
 		this._review_pick_list = null;
 		this._review_detail = null;
 		this._review_saving_rows = new Set(); // row_name -> in-flight set_invoicing_item_checked() call
+
+		// Commit 25.13 -- "COTIZACIONES PENDIENTES" (billing review of
+		// Quotation, entirely separate from the Pick List invoicing queue
+		// above -- different document, different API module
+		// (fabergray_erp.api.cotizaciones), own dialog state).
+		this.billing_summary = null;
+		this.billing_quotations = [];
+		this._billing_review_dialog = null;
+		this._billing_review_quotation = null;
+		this._billing_review_detail = null;
+		// Commit 25.14 -- "PRECIOS AJUSTADOS". `null` means "no mode
+		// selected/detected" (the "Precio personalizado / sin ajustar"
+		// state, section 3) -- set on every dialog open/refresh by
+		// detect_billing_price_mode(), and again by the user's own click
+		// on one of the 3 segmented-control buttons. Purely client-side
+		// preview state until "APLICAR PRECIOS" is pressed -- never sent
+		// to the server just by changing this.
+		this._billing_review_selected_mode = null;
 
 		this.$app = $('<div class="fg-shell fg-facturacion">').appendTo(this.page.body);
 		this.render_shell();
@@ -84,6 +103,10 @@ fabergray_erp.Facturacion = class Facturacion {
 
 	call(method, args) {
 		return this._frappe_call(this.method_prefix + method, args);
+	}
+
+	call_cotizaciones(method, args) {
+		return this._frappe_call(this.cotizaciones_method_prefix + method, args);
 	}
 
 	// -------------------------------------------------------------------
@@ -125,7 +148,7 @@ fabergray_erp.Facturacion = class Facturacion {
 	load_all() {
 		this.set_busy(true);
 		this.render_skeleton();
-		return Promise.all([this.call("get_invoicing_summary"), this.load_queue()])
+		return Promise.all([this.call("get_invoicing_summary"), this.load_queue(), this.load_billing_queue()])
 			.then(([summary]) => {
 				this.summary = summary;
 				this.render_body();
@@ -134,6 +157,32 @@ fabergray_erp.Facturacion = class Facturacion {
 				// The server already showed the real error via frappe.call()'s
 				// own default error dialog -- nothing to improvise here.
 			})
+			.finally(() => this.set_busy(false));
+	}
+
+	// Commit 25.13 -- "COTIZACIONES PENDIENTES". Fetched every load_all()
+	// alongside the existing Pick List queue -- small, single-page list
+	// (no server-side pagination like get_invoicing_queue() has, matching
+	// get_pending_billing_review_quotations()'s own "cheap, everything at
+	// once" shape, same as page/ventas/ventas.js's own Cancelados list).
+	load_billing_queue() {
+		return Promise.all([
+			this.call_cotizaciones("get_quotation_billing_summary"),
+			this.call_cotizaciones("get_pending_billing_review_quotations"),
+		]).then(([summary, quotations]) => {
+			this.billing_summary = summary;
+			this.billing_quotations = quotations || [];
+		});
+	}
+
+	refresh_billing_queue() {
+		this.set_busy(true);
+		return this.load_billing_queue()
+			.then(() => {
+				this.$body.find(".fg-fact-billing-section").replaceWith(this.render_billing_queue_section());
+				this.bind_billing_queue_events();
+			})
+			.catch(() => {})
 			.finally(() => this.set_busy(false));
 	}
 
@@ -201,8 +250,67 @@ fabergray_erp.Facturacion = class Facturacion {
 				<div class="fg-fact-queue-cards">${this.render_cards_html()}</div>
 				<div class="fg-fact-queue-pagination">${this.render_queue_pagination_html()}</div>
 			</div>
+			${this.render_billing_queue_section()}
 		`);
 		this.bind_body_events();
+		this.bind_billing_queue_events();
+	}
+
+	// =====================================================================
+	// Commit 25.13 -- "COTIZACIONES PENDIENTES" (billing review of
+	// Quotation). Own section, own cards, own dialog -- entirely separate
+	// from the Pick List invoicing queue above (different document,
+	// different API module).
+	// =====================================================================
+	render_billing_queue_section() {
+		const pendientes = (this.billing_summary || {}).cotizaciones_pendientes ?? 0;
+		const cards = this.billing_quotations.length
+			? this.billing_quotations.map((q) => this.render_billing_queue_card(q)).join("")
+			: `<div class="fg-empty">${__("No hay cotizaciones pendientes de revisión.")}</div>`;
+
+		return `
+			<div class="fg-fact-billing-section">
+				<div class="fg-section-head">
+					<div class="fg-section-title">${__("Cotizaciones pendientes")}</div>
+					<span class="fg-fact-billing-count">${pendientes}</span>
+				</div>
+				<div class="fg-fact-billing-cards">${cards}</div>
+			</div>
+		`;
+	}
+
+	render_billing_queue_card(q) {
+		const customer_label = frappe.utils.escape_html(q.customer_name || q.customer || "—");
+		const asesora_label = frappe.utils.escape_html(q.owner_fullname || q.owner || "—");
+		const total_label = frappe.format(q.grand_total, { fieldtype: "Currency" });
+
+		return `
+			<div class="fg-fact-billing-card" data-name="${frappe.utils.escape_html(q.name)}">
+				<div class="fg-fact-billing-card-top">
+					<div class="fg-fact-billing-card-id">#${frappe.utils.escape_html(q.name)}</div>
+					<span class="fg-badge fg-badge--billing-pending">${__("Pendiente de Facturación")}</span>
+				</div>
+				<div class="fg-fact-billing-card-customer">${icon("user", "fg-icon-sm")} ${customer_label}</div>
+				<div class="fg-fact-billing-card-meta">
+					<span>${icon("user-check", "fg-icon-sm")} ${__("Asesora")}: ${asesora_label}</span>
+					<span>${icon("calendar", "fg-icon-sm")} ${frappe.datetime.str_to_user(q.transaction_date)}</span>
+				</div>
+				<div class="fg-fact-billing-card-counts">
+					<span>${q.item_count} ${q.item_count === 1 ? __("referencia") : __("referencias")}</span>
+					<span>${total_label}</span>
+				</div>
+				<button type="button" class="fg-btn fg-btn--solid-primary fg-fact-billing-review-btn">
+					${icon("clipboard-check", "fg-icon-sm")} ${__("REVISAR")}
+				</button>
+			</div>
+		`;
+	}
+
+	bind_billing_queue_events() {
+		this.$body.find(".fg-fact-billing-cards").on("click", ".fg-fact-billing-review-btn", (e) => {
+			const name = $(e.currentTarget).closest(".fg-fact-billing-card").data("name");
+			this.open_billing_review_dialog(name);
+		});
 	}
 
 	// Purely informational -- never clickable. Filtering happens only
@@ -742,6 +850,476 @@ fabergray_erp.Facturacion = class Facturacion {
 			})
 			.finally(() => this.set_busy(false));
 	}
+
+	// =====================================================================
+	// Commit 25.13 -- Revisar cotización (Facturación). Same "HTML field
+	// dialog, content rendered server-response-driven, no full-modal
+	// re-render on a small action" convention as open_review_dialog()/
+	// render_review_dialog_body() above, applied to
+	// get_quotation_billing_detail()'s own response instead of
+	// get_invoicing_detail()'s.
+	// =====================================================================
+	// Commit 25.13.1 -- full visual rewrite of this dialog. Root cause of
+	// the broken layout (giant icons, table rendered as running text,
+	// DEVOLVER A VENDEDORA oversized, huge empty gaps): EVERY rule this
+	// dialog's content relied on was written as `.fg-facturacion .fg-fact-
+	// billing-*` in facturacion.css -- but `frappe.ui.Dialog` renders its
+	// modal OUTSIDE `.fg-facturacion` (appended straight to `<body>`,
+	// exactly like the sibling "Revisar pedido" dialog's own long-standing
+	// comment already documents in facturacion.css) so NONE of that CSS
+	// ever matched anything in here, `.fg-icon` sizing included -- the
+	// dialog rendered as fully unstyled Bootstrap defaults. Every class
+	// used below is now styled under `.fg-fact-billing-review-dialog`
+	// (this dialog's own `$wrapper` class) in facturacion.css -- see that
+	// file's own matching comment for the full audit.
+	//
+	// "DEVOLVER A VENDEDORA" is now added via the native
+	// `dialog.add_custom_action()` (confirmed by reading frappe/public/js/
+	// frappe/ui/dialog.js directly: it appends into the SAME `.modal-
+	// footer` as the framework's own CERRAR/APROBAR buttons, `.custom-
+	// actions` alongside `.standard-actions`) -- never injected into the
+	// modal BODY as a giant standalone element, this fix's own first
+	// draft's mistake.
+	open_billing_review_dialog(name) {
+		if (!name) return;
+
+		this._billing_review_quotation = name;
+		this._billing_review_detail = null;
+		this._billing_review_selected_mode = null;
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("Revisar cotización"),
+			size: "large",
+			fields: [{ fieldtype: "HTML", fieldname: "billing_review_html" }],
+			primary_action_label: `${icon("check", "fg-icon-sm")} ${__("Aprobar")}`,
+			primary_action: () => this.confirm_approve_from_dialog(),
+			secondary_action_label: __("Cerrar"),
+			secondary_action: () => dialog.hide(),
+		});
+		dialog.$wrapper.addClass("fg-fact-billing-review-dialog");
+		dialog.add_custom_action(
+			`${icon("corner-up-left", "fg-icon-sm")} ${__("Devolver a vendedora")}`,
+			// Commit 25.14 -- reads `this._billing_review_quotation`, NEVER
+			// the closure-captured `name` parameter: apply_billing_price_
+			// mode() re-points that to a NEW (amended) document name after
+			// a successful price adjustment, and DEVOLVER must always act
+			// on whatever is CURRENTLY open in this dialog, not the
+			// original, possibly already-cancelled one.
+			() => this.open_return_quotation_dialog(this._billing_review_quotation),
+			"fg-fact-billing-return-btn"
+		);
+		dialog.fields_dict.billing_review_html.$wrapper.html(
+			`<div class="fg-fact-review-loading">${__("Cargando...")}</div>`
+		);
+		dialog.show();
+		this._billing_review_dialog = dialog;
+
+		this.call_cotizaciones("get_quotation_billing_detail", { name: name })
+			.then((detail) => {
+				if (this._billing_review_quotation !== name) return; // dialog closed/reopened meanwhile
+				this._billing_review_detail = detail;
+				// Section 3 -- detected FROM the actual rate/reference_rate on
+				// each line, never simply trusted from `fg_billing_price_mode`
+				// alone (that field can be stale/blank for a historical
+				// Quotation never adjusted through this mechanism) -- opening
+				// the dialog NEVER changes a single price, only reads.
+				this._billing_review_selected_mode = this.detect_billing_price_mode(detail);
+				this.render_billing_review_dialog_body();
+			})
+			.catch(() => dialog.hide());
+	}
+
+	// Header (#COTIZACION-N + Cliente/Asesora/Fecha/Total mini-cards),
+	// Disponibilidad ERP banner, price-list note, then the product table
+	// -- section 7/8's own explicit column list. "Disponibilidad ERP" is
+	// spelled out exactly that way everywhere (never "física") -- this is
+	// informational-only, never a substitute for Bodega's later physical
+	// check. Desktop renders `.fg-fact-billing-review-table` as a real
+	// grid; the SAME row markup collapses to a stacked card at <=860px
+	// via `facturacion.css`'s own media query (`data-label` attributes
+	// below feed that, same technique the sibling review dialog's own
+	// `.fg-fact-review-row` already established) -- one render, no
+	// separate mobile branch here.
+	render_billing_review_dialog_body() {
+		const dialog = this._billing_review_dialog;
+		const d = this._billing_review_detail;
+		if (!dialog || !d) return;
+
+		const customer_label = frappe.utils.escape_html(d.customer_name || d.customer || __("Sin cliente"));
+		const asesora_label = frappe.utils.escape_html(d.owner_fullname || d.owner || "—");
+		const total_label = frappe.format(d.grand_total, { fieldtype: "Currency" });
+		const price_list_label = frappe.utils.escape_html((d.items && d.items[0] && d.items[0].price_list) || "—");
+
+		const info_cards = [
+			{ label: __("Cliente"), value: customer_label },
+			{ label: __("Asesora"), value: asesora_label },
+			{ label: __("Fecha"), value: frappe.datetime.str_to_user(d.transaction_date) },
+			{ label: __("Total"), value: total_label },
+		]
+			.map(
+				(c) => `
+					<div class="fg-fact-billing-review-info-card">
+						<div class="fg-fact-billing-review-info-label">${c.label}</div>
+						<div class="fg-fact-billing-review-info-value">${c.value}</div>
+					</div>
+				`
+			)
+			.join("");
+
+		const selected_mode = this._billing_review_selected_mode;
+		const rows_html = (d.items || []).map((item) => this.render_billing_review_row(item, selected_mode)).join("");
+
+		dialog.fields_dict.billing_review_html.$wrapper.html(`
+			<div class="fg-fact-billing-review-id">#${frappe.utils.escape_html(d.name)}</div>
+			<div class="fg-fact-billing-review-info-grid">${info_cards}</div>
+			<div class="fg-fact-billing-review-note">
+				<strong>${__("Disponibilidad ERP")}</strong>
+				<span>${__("Información de referencia. No reemplaza la validación física posterior de Bodega.")}</span>
+			</div>
+			<div class="fg-fact-billing-review-pricelist">
+				${__("Lista de precios de referencia")}: <strong>${price_list_label}</strong>
+			</div>
+			${this.render_billing_price_mode_section(d, selected_mode)}
+			<div class="fg-fact-billing-review-table">
+				<div class="fg-fact-billing-review-thead">
+					<span>${__("Producto")}</span>
+					<span>${__("Cant.")}</span>
+					<span>${__("Base")}</span>
+					<span>${__("Actual")}</span>
+					<span>${__("Ajustado")}</span>
+					<span>${__("Diferencia")}</span>
+					<span>${__("Disponibilidad ERP")}</span>
+				</div>
+				<div class="fg-fact-billing-review-tbody">${rows_html}</div>
+			</div>
+		`);
+
+		dialog.$wrapper.find(".fg-fact-billing-pricemode-btn").on("click", (e) => {
+			this.select_billing_price_mode($(e.currentTarget).data("mode"));
+		});
+		dialog.$wrapper.find(".fg-fact-billing-apply-price-btn").on("click", () => {
+			this.apply_billing_price_mode();
+		});
+	}
+
+	// Commit 25.14 -- "PRECIOS AJUSTADOS" segmented control + live preview
+	// summary. Purely a render helper (called from render_billing_review_
+	// dialog_body() above) -- no state of its own, no server call.
+	// "Precio personalizado / sin ajustar" (section 3's own exact wording)
+	// shows whenever `selected_mode` is null -- either nothing matched on
+	// open (detect_billing_price_mode()) or nothing has been explicitly
+	// clicked yet; APLICAR PRECIOS stays disabled in that state (never
+	// lets a click apply "nothing").
+	render_billing_price_mode_section(d, selected_mode) {
+		const options = [
+			{ mode: "FULL", label: __("Precio completo") },
+			{ mode: "DISCOUNT_10", label: __("-10%") },
+			{ mode: "DISCOUNT_15", label: __("-15%") },
+			{ mode: "DISCOUNT_20", label: __("-20%") },
+			{ mode: "DISCOUNT_25", label: __("-25%") },
+		]
+			.map(
+				(o) => `
+					<button type="button" class="fg-fact-billing-pricemode-btn ${
+						selected_mode === o.mode ? "is-active" : ""
+					}" data-mode="${o.mode}">
+						${o.label}
+					</button>
+				`
+			)
+			.join("");
+
+		const items_with_reference = (d.items || []).filter((item) => item.reference_rate != null);
+		const state_html = selected_mode
+			? (() => {
+					const multiplier = PRICE_MODE_MULTIPLIERS[selected_mode];
+					const preview_subtotal = items_with_reference.reduce(
+						(sum, item) => sum + flt(item.reference_rate) * multiplier * flt(item.qty),
+						0
+					);
+					return `
+						<div class="fg-fact-billing-review-pricemode-preview">
+							<span>${__("Subtotal estimado")}: <strong>${frappe.format(preview_subtotal, {
+						fieldtype: "Currency",
+					})}</strong></span>
+							<span class="fg-fact-billing-review-pricemode-note">${__("Impuestos se recalculan al aplicar.")}</span>
+						</div>
+					`;
+			  })()
+			: `<div class="fg-fact-billing-review-pricemode-custom">${__("Precio personalizado / sin ajustar")}</div>`;
+
+		return `
+			<div class="fg-fact-billing-review-pricemode">
+				<div class="fg-fact-billing-review-pricemode-title">${__("Precios ajustados")}</div>
+				<div class="fg-fact-billing-review-pricemode-row">
+					<div class="fg-fact-billing-review-pricemode-options">${options}</div>
+					<button type="button" class="fg-btn fg-btn--solid-primary fg-fact-billing-apply-price-btn" ${
+						selected_mode ? "" : "disabled"
+					}>
+						${icon("tag", "fg-icon-sm")} ${__("APLICAR PRECIOS")}
+					</button>
+				</div>
+				${state_html}
+			</div>
+		`;
+	}
+
+	// Selecting a mode is a pure client-side preview (section 4's own
+	// "no persistir todavía solo por cambiar visualmente el selector") --
+	// re-renders the SAME already-fetched detail with a new
+	// `selected_mode`, never a server round-trip. `apply_billing_price_
+	// mode()` (below) is the only path that ever calls the server.
+	select_billing_price_mode(mode) {
+		if (!this._billing_review_detail) return;
+		this._billing_review_selected_mode = mode;
+		this.render_billing_review_dialog_body();
+	}
+
+	// Section 3 -- "si la cotización coincide con [modo] -> seleccionar
+	// [modo]; si no coincide con ninguno -> personalizado". Compares every
+	// line's own already-quoted `rate` against `reference_rate *
+	// multiplier` for each of the 5 modes, in order -- ONLY a Quotation
+	// where every priced line matches the SAME mode counts as that mode; a
+	// mix, or nothing with a reference price at all, is "personalizado"
+	// (null). Never trusts the persisted `fg_billing_price_mode` alone --
+	// that field can be blank/stale for a historical Quotation this
+	// mechanism never touched.
+	detect_billing_price_mode(detail) {
+		const items = (detail.items || []).filter((item) => item.reference_rate != null);
+		if (!items.length) return null;
+		for (const mode of ["FULL", "DISCOUNT_10", "DISCOUNT_15", "DISCOUNT_20", "DISCOUNT_25"]) {
+			const multiplier = PRICE_MODE_MULTIPLIERS[mode];
+			const all_match = items.every((item) => Math.abs(flt(item.rate) - flt(item.reference_rate) * multiplier) < 0.01);
+			if (all_match) return mode;
+		}
+		return null;
+	}
+
+	// One line of the product table. Price: `null` reference_rate shows an
+	// explicit "Sin precio de referencia" sentence (never a bare "N/D"),
+	// diff==0 is styled neutral/success, otherwise visibly colored -- never
+	// blocking APROBAR on its own (section 7's own explicit instruction).
+	// "Ajustado" (Commit 25.14): the CLIENT-computed preview for whichever
+	// mode is currently selected -- `reference_rate * multiplier`, plus
+	// the resulting discount % and adjusted amount (`qty * adjusted_rate`)
+	// -- "—" whenever no mode is selected or this line has no reference
+	// price to adjust from (never a fabricated number). Availability: no
+	// warehouse resolved shows a neutral "Almacén sin definir" badge
+	// (never fabricated Disponible/Faltante numbers next to it); otherwise
+	// a success badge when fully available, a warning/danger badge when
+	// short -- always with real Solicitado/Disponible/Faltante numbers and
+	// the warehouse name, never a bare "N/D".
+	render_billing_review_row(item, selected_mode) {
+		const rate_label = frappe.format(item.rate, { fieldtype: "Currency" });
+
+		let reference_html;
+		let diff_html;
+		if (item.reference_rate == null) {
+			reference_html = `<span class="fg-fact-billing-review-muted">${__("Sin precio de referencia")}</span>`;
+			diff_html = `<span class="fg-fact-billing-review-muted">—</span>`;
+		} else {
+			reference_html = frappe.format(item.reference_rate, { fieldtype: "Currency" });
+			const diff = flt(item.rate_difference);
+			const diff_class = diff === 0 ? "is-neutral" : diff > 0 ? "is-above" : "is-below";
+			diff_html = `<span class="fg-fact-billing-review-diff ${diff_class}">${frappe.format(diff, {
+				fieldtype: "Currency",
+			})}</span>`;
+		}
+
+		let adjusted_html;
+		if (!selected_mode || item.reference_rate == null) {
+			adjusted_html = `<span class="fg-fact-billing-review-muted">—</span>`;
+		} else {
+			const multiplier = PRICE_MODE_MULTIPLIERS[selected_mode];
+			const discount_pct = PRICE_MODE_DISCOUNTS[selected_mode];
+			const adjusted_rate = flt(item.reference_rate) * multiplier;
+			const adjusted_amount = adjusted_rate * flt(item.qty);
+			adjusted_html = `
+				<div class="fg-fact-billing-review-adjusted-rate">${frappe.format(adjusted_rate, { fieldtype: "Currency" })}</div>
+				<div class="fg-fact-billing-review-adjusted-meta">${discount_pct}% · ${frappe.format(adjusted_amount, {
+				fieldtype: "Currency",
+			})}</div>
+			`;
+		}
+
+		let availability_html;
+		if (!item.warehouse) {
+			availability_html = `
+				<div class="fg-fact-billing-review-avail-line">${__("Solicitado")}: ${format_qty(item.requested_qty)}</div>
+				<span class="fg-badge fg-badge--billing-avail-neutral">${__("Almacén sin definir")}</span>
+			`;
+		} else {
+			const has_shortage = flt(item.shortage_qty) > 0;
+			const badge_class = has_shortage ? "fg-badge--billing-avail-short" : "fg-badge--billing-avail-ok";
+			const badge_label = has_shortage ? __("Faltante") : __("Disponible");
+			availability_html = `
+				<div class="fg-fact-billing-review-avail-line">${__("Solicitado")}: ${format_qty(item.requested_qty)}</div>
+				<div class="fg-fact-billing-review-avail-line">${__("Disponible")}: ${format_qty(item.available_qty)}</div>
+				<div class="fg-fact-billing-review-avail-line">${__("Faltante")}: ${format_qty(item.shortage_qty)}</div>
+				<span class="fg-badge ${badge_class}">${badge_label}</span>
+				<div class="fg-fact-billing-review-warehouse">${frappe.utils.escape_html(item.warehouse)}</div>
+			`;
+		}
+
+		return `
+			<div class="fg-fact-billing-review-row">
+				<div class="fg-fact-billing-review-cell fg-fact-billing-review-cell-product" data-label="${__("Producto")}">
+					<div class="fg-fact-billing-review-row-name">${frappe.utils.escape_html(item.item_name)}</div>
+					<div class="fg-fact-billing-review-row-code">${frappe.utils.escape_html(item.item_code)}</div>
+				</div>
+				<div class="fg-fact-billing-review-cell" data-label="${__("Cant.")}">${format_qty(item.qty)} ${frappe.utils.escape_html(
+			item.stock_uom || ""
+		)}</div>
+				<div class="fg-fact-billing-review-cell" data-label="${__("Base")}">${reference_html}</div>
+				<div class="fg-fact-billing-review-cell" data-label="${__("Actual")}">${rate_label}</div>
+				<div class="fg-fact-billing-review-cell" data-label="${__("Ajustado")}">${adjusted_html}</div>
+				<div class="fg-fact-billing-review-cell" data-label="${__("Diferencia")}">${diff_html}</div>
+				<div class="fg-fact-billing-review-cell fg-fact-billing-review-cell-avail" data-label="${__(
+					"Disponibilidad ERP"
+				)}">${availability_html}</div>
+			</div>
+		`;
+	}
+
+	// Commit 25.14, section 5/17 -- APLICAR PRECIOS. Confirmation text is
+	// exactly the brief's own wording per mode; success re-fetches the
+	// dialog's content from the server under the NEW (amended) name --
+	// apply_quotation_price_mode() always cancels the original and
+	// creates a fresh document, section 9's own cancel+amend requirement
+	// -- and refreshes the tray in the background so its own card (still
+	// "Pendiente de Facturación") reflects the new totals too. Never
+	// calls approve_quotation_billing() -- section 5's own explicit "NO
+	// aprobar automáticamente por ajustar precios".
+	apply_billing_price_mode() {
+		const d = this._billing_review_detail;
+		const mode = this._billing_review_selected_mode;
+		if (!d || !mode) return;
+
+		const confirm_messages = {
+			FULL: __("Se restaurarán los precios de venta completos de todos los productos."),
+			DISCOUNT_10: __(
+				"Se aplicará un descuento del 10% sobre el precio de venta de todos los productos de esta cotización. ¿Deseas continuar?"
+			),
+			DISCOUNT_15: __(
+				"Se aplicará un descuento del 15% sobre el precio de venta de todos los productos de esta cotización. ¿Deseas continuar?"
+			),
+			DISCOUNT_20: __(
+				"Se aplicará un descuento del 20% sobre el precio de venta de todos los productos de esta cotización. ¿Deseas continuar?"
+			),
+			DISCOUNT_25: __(
+				"Se aplicará un descuento del 25% sobre el precio de venta de todos los productos de esta cotización. ¿Deseas continuar?"
+			),
+		};
+
+		frappe.confirm(confirm_messages[mode], () => {
+			this.set_busy(true);
+			this.call_cotizaciones("apply_quotation_price_mode", { quotation_name: d.name, price_mode: mode })
+				.then((result) => {
+					frappe.show_alert({ message: __("Precios actualizados correctamente."), indicator: "green" }, 5);
+					this._billing_review_quotation = result.name;
+					return this.call_cotizaciones("get_quotation_billing_detail", { name: result.name });
+				})
+				.then((detail) => {
+					this._billing_review_detail = detail;
+					this._billing_review_selected_mode = this.detect_billing_price_mode(detail);
+					this.render_billing_review_dialog_body();
+					return this.refresh_billing_queue();
+				})
+				.catch(() => {
+					// The server already showed the real error via frappe.call()'s
+					// own default error dialog (e.g. "El producto X no tiene
+					// precio de referencia..." -- section 12) -- nothing here
+					// assumes the write succeeded.
+				})
+				.finally(() => this.set_busy(false));
+		});
+	}
+
+	confirm_approve_from_dialog() {
+		const d = this._billing_review_detail;
+		if (!d) return;
+		this.approve_billing_review(d.name);
+	}
+
+	// APROBAR -- no note collected inline here (the brief's own optional
+	// "note" parameter on approve_quotation_billing() is left null from
+	// this button; nothing in the brief asks for a UI text box on the
+	// approve path specifically, unlike DEVOLVER's own mandatory reason).
+	// Never creates a Sales Order -- this only calls
+	// approve_quotation_billing(), nothing else.
+	approve_billing_review(name) {
+		if (!name) return;
+		this.set_busy(true);
+		if (this._billing_review_dialog) this._billing_review_dialog.disable_primary_action();
+
+		this.call_cotizaciones("approve_quotation_billing", { quotation_name: name })
+			.then((result) => {
+				if (this._billing_review_dialog) this._billing_review_dialog.hide();
+				frappe.show_alert({ message: "✓ " + __("Cotización aprobada correctamente."), indicator: "green" }, 5);
+				// Commit 25.15, section 22 -- `result.name` is ALWAYS the
+				// NEW, vigente, just-approved document: if a price
+				// adjustment created an amendment earlier in this same
+				// review (apply_billing_price_mode() already re-pointed
+				// `name` -- the parameter this function received -- to
+				// it), approve_quotation_billing() approved THAT
+				// document, never the original, now-superseded one.
+				frappe.msgprint({
+					title: __("Cotización aprobada"),
+					message: __("La cotización quedó aprobada correctamente."),
+					primary_action: {
+						label: __("VER PDF"),
+						action: () => open_fabrigray_quotation_pdf(result.name),
+					},
+				});
+				return this.refresh_billing_queue();
+			})
+			.catch(() => {
+				if (this._billing_review_dialog) this._billing_review_dialog.enable_primary_action();
+			})
+			.finally(() => this.set_busy(false));
+	}
+
+	// DEVOLVER A VENDEDORA -- reason is `reqd: 1` (section 10's own
+	// "reason obligatorio"), and Dialog.get_values() itself already
+	// refuses to invoke primary_action at all while it is empty
+	// (confirmed by reading frappe/public/js/frappe/ui/dialog.js directly
+	// -- same guarantee Commit 25.12's own cancel-reason dialog in
+	// page/ventas/ventas.js relies on) -- return_quotation_from_billing()
+	// re-validates server-side regardless, never trusting this alone.
+	open_return_quotation_dialog(name) {
+		if (!name) return;
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("Devolver cotización a la Vendedora"),
+			fields: [
+				{
+					fieldtype: "Small Text",
+					fieldname: "reason",
+					label: __("Motivo de la devolución"),
+					reqd: 1,
+				},
+			],
+			primary_action_label: __("Devolver"),
+			primary_action: (values) => {
+				dialog.disable_primary_action();
+				this.call_cotizaciones("return_quotation_from_billing", {
+					quotation_name: name,
+					reason: values.reason,
+				})
+					.then(() => {
+						dialog.hide();
+						if (this._billing_review_dialog) this._billing_review_dialog.hide();
+						frappe.show_alert({ message: __("Cotización devuelta a la Vendedora."), indicator: "orange" }, 5);
+						return this.refresh_billing_queue();
+					})
+					.catch(() => dialog.enable_primary_action());
+			},
+			secondary_action_label: __("Cancelar"),
+			secondary_action: () => dialog.hide(),
+		});
+
+		dialog.show();
+	}
 };
 
 // -------------------------------------------------------------------------
@@ -753,8 +1331,52 @@ fabergray_erp.Facturacion = class Facturacion {
 // -------------------------------------------------------------------------
 const PAGE_SIZE = 10;
 
+// Commit 25.14 -- CLIENT-SIDE PREVIEW ONLY. Mirrors api/cotizaciones.py's
+// own `PRICE_MODE_DISCOUNTS` exactly (0/5/10), but this copy never
+// decides what actually gets persisted -- apply_quotation_price_mode()
+// re-resolves and re-validates everything server-side regardless of
+// what this preview showed (section 6's own "no confiar en reference_
+// rate enviado desde browser", generalized to the whole preview).
+// Commit 25.15 review fix, section 6 -- final closed set is FULL/10%/15%/
+// 20%/25%; "DISCOUNT_5" (5%) never shipped to a committed state and is
+// removed here, matching api/cotizaciones.py's own PRICE_MODE_DISCOUNTS.
+const PRICE_MODE_DISCOUNTS = { FULL: 0, DISCOUNT_10: 10, DISCOUNT_15: 15, DISCOUNT_20: 20, DISCOUNT_25: 25 };
+const PRICE_MODE_MULTIPLIERS = { FULL: 1, DISCOUNT_10: 0.9, DISCOUNT_15: 0.85, DISCOUNT_20: 0.8, DISCOUNT_25: 0.75 };
+
 function icon(name, extra_class) {
 	return `<svg class="fg-icon ${extra_class || ""}"><use href="#icon-${name}"></use></svg>`;
+}
+
+// Commit 25.15 review fix, section 2/4 -- NEVER builds the `/printview`
+// URL from just a `name` any more (that would skip server-side
+// validation up front) -- calls `get_fabrigray_quotation_pdf_view_url()`
+// FIRST (a real server-side "Aprobada"/not-cancelled/same-Company check,
+// api/cotizaciones.py), and only navigates to the URL it hands back. A
+// blank tab is opened SYNCHRONOUSLY on the click itself, before the async
+// call starts, and only its own `.location` is set once the server
+// responds -- a tab opened later, inside a `.then()` callback, gets
+// silently blocked as a popup by most browsers. Intentionally duplicated
+// from page/cotizaciones/cotizaciones.js's own identical helper -- same
+// "each Page's asset loading stays independent" convention as every
+// other small render helper in this file.
+function open_fabrigray_quotation_pdf(name) {
+	if (!name) return;
+	const tab = window.open("about:blank");
+	// frappe.xcall() -- unlike a bare frappe.call(), returns a REAL
+	// Promise (confirmed by reading frappe/public/js/frappe/request.js
+	// directly) that resolves straight to `r.message`, already unwrapped.
+	frappe
+		.xcall("fabergray_erp.api.cotizaciones.get_fabrigray_quotation_pdf_view_url", { quotation_name: name })
+		.then((url) => {
+			if (url && tab) {
+				tab.location = url;
+			} else if (tab) {
+				tab.close();
+			}
+		})
+		.catch(() => {
+			if (tab) tab.close();
+		});
 }
 
 function get_initials(name) {

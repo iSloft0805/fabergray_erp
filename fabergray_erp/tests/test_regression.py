@@ -1143,3 +1143,42 @@ class TestFabrigrayWorkspace(IntegrationTestCase):
 			with self.subTest(page=page_name), fx.as_user(self.users[role]):
 				page = frappe.get_doc("Page", page_name)
 				self.assertTrue(page.is_permitted())
+
+
+class TestFixtureIntegrity(IntegrationTestCase):
+	"""Commit 25.15 review fix -- `bench export-fixtures` silently
+	OVERWRITES `fixtures/custom_field.json` when hooks.py's own `fixtures`
+	list has more than one `{"dt": "Custom Field", ...}` block without a
+	distinct `prefix` (confirmed live during 25.15: the app has exactly two
+	such blocks -- the main 21-fieldname list, and the 3-field "Pick List
+	Item-fg_invoicing_checked*" block -- both write to the same
+	`custom_field.json`, and only the LAST one processed survived,
+	silently dropping 24 real, still-live Custom Fields from the committed
+	fixture). This guardrail catches that class of regression BEFORE it
+	reaches a commit: every `fg_`-prefixed Custom Field that actually
+	exists in the live DB (the real signal `export-fixtures` reads from)
+	must also be present in the committed `fixtures/custom_field.json` --
+	if a future `export-fixtures` run (or a manual edit) drops any of
+	them, this fails immediately, independent of whether anyone notices
+	the `git diff` by eye."""
+
+	def test_custom_field_fixture_matches_every_fg_prefixed_field_in_the_db(self):
+		import json
+
+		fixture_path = frappe.get_app_path("fabergray_erp", "fixtures", "custom_field.json")
+		with open(fixture_path, encoding="utf-8") as f:
+			fixture_names = {r["name"] for r in json.load(f)}
+
+		db_names = set(
+			frappe.get_list("Custom Field", filters={"fieldname": ["like", "fg\\_%"]}, pluck="name")
+		)
+
+		missing_from_fixture = db_names - fixture_names
+		self.assertEqual(
+			missing_from_fixture,
+			set(),
+			"Custom Field(s) exist live in the DB but are missing from fixtures/custom_field.json -- "
+			"likely export-fixtures silently truncated the file (see this test's own docstring). "
+			"Never fix by re-running export-fixtures blindly -- reconstruct the file preserving every "
+			"existing record.",
+		)

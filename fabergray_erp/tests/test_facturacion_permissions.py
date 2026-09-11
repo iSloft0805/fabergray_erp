@@ -60,7 +60,12 @@ IGNORE_TEST_RECORD_DEPENDENCIES = []
 # Per the brief: never grant these unless a real test fails specifically
 # because of one -- none did in this commit.
 _STILL_DENIED_DOCTYPES = (
-	"Item Price",
+	# Commit 25.13 -- "Item Price" removed from this list: Facturación now
+	# has a real, read-only Custom DocPerm grant on it (billing review's
+	# own reference selling price, see api/cotizaciones.py's
+	# _reference_selling_rates()) -- see test_facturacion_can_read_item_
+	# price_read_only_for_billing_review() below for the positive half of
+	# that change.
 	"Cost Center",
 	"Sales Taxes and Charges Template",
 	"Item Tax Template",
@@ -75,20 +80,35 @@ class TestFacturacionRoleExists(IntegrationTestCase):
 	def test_role_exists(self):
 		self.assertTrue(frappe.db.exists("Role", "Facturación"))
 
-	def test_exactly_six_custom_docperm_rows_for_facturacion(self):
-		"""Unchanged from Commit 21.1 -- Reporte de Faltante access (Commit
-		21.2) is a native DocPerm row on the doctype's own JSON, never a
-		Custom DocPerm row (see this module's docstring for why)."""
+	def test_exactly_eight_custom_docperm_rows_for_facturacion(self):
+		"""Commit 21.1's own 6 rows, PLUS Commit 25.13's two new ones
+		(Quotation, Item Price) for the billing review workflow -- Reporte
+		de Faltante access (Commit 21.2) is still a native DocPerm row on
+		the doctype's own JSON, never a Custom DocPerm row (see this
+		module's docstring for why)."""
 		rows = frappe.get_all(
 			"Custom DocPerm", filters={"role": "Facturación"}, fields=["parent", "if_owner"]
 		)
-		self.assertEqual(len(rows), 6, rows)
+		self.assertEqual(len(rows), 8, rows)
 		for row in rows:
 			self.assertEqual(row.if_owner, 0, f"{row.parent} must not be if_owner -- shared queue")
 		parents = {row.parent for row in rows}
 		self.assertEqual(
-			parents, {"Sales Invoice", "Pick List", "Sales Order", "Customer", "Item", "Account"}
+			parents,
+			{"Sales Invoice", "Pick List", "Sales Order", "Customer", "Item", "Account", "Quotation", "Item Price"},
 		)
+
+	def test_facturacion_can_read_item_price_read_only_for_billing_review(self):
+		"""Commit 25.13 -- Facturación's own Item Price grant is strictly
+		read-only (never write/create), matching the brief's own "solo
+		necesita información comercial de venta" -- she can see the
+		reference selling price, never change one."""
+		row = frappe.get_doc("Custom DocPerm", "fg2513itempricefact")
+		self.assertEqual(row.parent, "Item Price")
+		self.assertEqual(row.role, "Facturación")
+		self.assertEqual(row.read, 1)
+		self.assertEqual(row.write, 0)
+		self.assertEqual(row.create, 0)
 
 	def test_reporte_de_faltante_grant_is_native_docperm_not_custom_docperm(self):
 		"""The specific regression this commit found and fixed: Reporte de
