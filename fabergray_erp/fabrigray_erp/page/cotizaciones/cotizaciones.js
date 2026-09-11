@@ -35,6 +35,10 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		this.summary = null;
 		this.quotations = null;
 		this.quotation_filter = null; // null | "cotizaciones_hoy" | "pendientes" | "aprobadas" | "vencidas"
+		// Commit 25.20 -- free-text search, ALWAYS applied AFTER
+		// quotation_filter (section 13's own "mantener" the existing
+		// filters), never a replacement for it.
+		this.quotation_search = "";
 
 		// "Nueva cotización" (view: "nueva_cotizacion") working state -- reset
 		// every time open_nueva_cotizacion() runs, never persisted across
@@ -142,7 +146,11 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		this.set_busy(true);
 		this.state.view = "dashboard";
 		this.render_skeleton_dashboard();
-		return Promise.all([this.call("get_quotation_summary"), this.call("get_my_quotations")])
+		// Commit 25.20 -- limit: 500, same reasoning ventas.js's own
+		// load_dashboard() now carries: the search bar filters this list
+		// client-side, so it must not silently be limited to the server's
+		// own default 50.
+		return Promise.all([this.call("get_quotation_summary"), this.call("get_my_quotations", { limit: 500 })])
 			.then(([summary, quotations]) => {
 				this.summary = summary;
 				this.quotations = quotations;
@@ -233,9 +241,20 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		return true;
 	}
 
-	render_quotations_section() {
+	// Commit 25.20 -- client-side (this.quotations already fully fetched,
+	// limit: 500, see load_dashboard()) -- the ONE shared matcher
+	// (fg_search.js) every operational Page's search bar calls.
+	quotation_matches_search(q) {
+		return fabergray_erp.search.matches_operational_search(q, this.quotation_search, {
+			text_fields: ["customer_name", "customer"],
+			date_fields: ["transaction_date"],
+		});
+	}
+
+	render_quotations_results_html() {
 		const all = this.quotations || [];
-		const list = all.filter((q) => this.quotation_matches_filter(q, this.quotation_filter));
+		const filtered = all.filter((q) => this.quotation_matches_filter(q, this.quotation_filter));
+		const list = filtered.filter((q) => this.quotation_matches_search(q));
 
 		const filter_labels = {
 			cotizaciones_hoy: __("Cotizaciones de hoy"),
@@ -253,14 +272,20 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 
 		const cards = list.length
 			? list.map((q) => this.render_quotation_card(q)).join("")
-			: `<div class="fg-empty">${__("No tienes cotizaciones para mostrar.")}</div>`;
+			: this.quotation_search
+				? render_search_empty_html()
+				: `<div class="fg-empty">${__("No tienes cotizaciones para mostrar.")}</div>`;
 
+		return `${chip}<div class="fg-quotation-list">${cards}</div>`;
+	}
+
+	render_quotations_section() {
 		return `
 			<div class="fg-section-head">
 				<div class="fg-section-title">${__("Cotizaciones")}</div>
 			</div>
-			${chip}
-			<div class="fg-quotation-list">${cards}</div>
+			${render_search_bar_html(this.quotation_search)}
+			<div class="fg-quotations-results">${this.render_quotations_results_html()}</div>
 		`;
 	}
 
@@ -452,7 +477,24 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		this.bind_quotations_section_events();
 	}
 
-	bind_quotations_section_events() {
+	// Commit 25.20 -- bound ONCE per full render_quotations_section() --
+	// never re-bound by the search `input` handler itself (see ventas.js's
+	// own bind_orders_search_events() for why that matters).
+	bind_quotations_search_events() {
+		this.$body.find(".fg-search-input").on("input", (e) => {
+			this.quotation_search = $(e.currentTarget).val();
+			this.$body.find(".fg-search-clear").toggleClass("is-visible", !!this.quotation_search.trim());
+			this.$body.find(".fg-quotations-results").html(this.render_quotations_results_html());
+			this.bind_quotations_results_events();
+		});
+		this.$body.find(".fg-search-clear").on("click", () => {
+			this.quotation_search = "";
+			this.$body.find(".fg-quotations-section").html(this.render_quotations_section());
+			this.bind_quotations_section_events();
+		});
+	}
+
+	bind_quotations_results_events() {
 		this.$body.find(".fg-filter-chip-clear").on("click", () => {
 			this.quotation_filter = null;
 			this.$body.find(".fg-kpi").removeClass("is-active");
@@ -484,6 +526,11 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		this.$body.find(".fg-quotation-card-view-pedido").on("click", (e) => {
 			open_sales_order_form($(e.currentTarget).data("sales-order"));
 		});
+	}
+
+	bind_quotations_section_events() {
+		this.bind_quotations_search_events();
+		this.bind_quotations_results_events();
 	}
 
 	// Commit 25.13 -- "ENVIAR A FACTURACIÓN". A plain frappe.confirm() is
@@ -793,7 +840,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 				<div class="fg-np-section-title">${__("2. Agregar productos")}</div>
 				<div class="fg-search-box">
 					${icon("search")}
-					<input type="text" class="fg-search-input fg-item-search-input" placeholder="${__("Buscar producto...")}">
+					<input type="text" class="fg-search-box-input fg-item-search-input" placeholder="${__("Buscar producto...")}">
 				</div>
 				<div class="fg-item-results"></div>
 			</div>
@@ -870,7 +917,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		$area.html(`
 			<div class="fg-search-box">
 				${icon("search")}
-				<input type="text" class="fg-search-input fg-customer-search-input" placeholder="${__("Buscar cliente...")}">
+				<input type="text" class="fg-search-box-input fg-customer-search-input" placeholder="${__("Buscar cliente...")}">
 			</div>
 			<div class="fg-search-dropdown"></div>
 		`);
@@ -1419,6 +1466,32 @@ function download_fabrigray_quotation_pdf(name) {
 function open_sales_order_form(name) {
 	if (!name) return;
 	frappe.set_route("Form", "Sales Order", name);
+}
+
+// Commit 25.20 -- unified search bar markup, same shape/classes as every
+// other operational Page's own copy (page/ventas/ventas.js's own
+// render_search_bar_html() carries the full "why reproduced, not
+// imported" comment).
+function render_search_bar_html(value) {
+	const has_value = !!(value && value.trim());
+	return `
+		<div class="fg-search-bar">
+			${icon("search", "fg-search-icon")}
+			<input type="text" class="fg-search-input" placeholder="${__("Buscar por cliente o fecha...")}" value="${frappe.utils.escape_html(
+				value || ""
+			)}">
+			<button type="button" class="fg-search-clear ${has_value ? "is-visible" : ""}" title="${__("Limpiar")}">${icon("x", "fg-icon-sm")}</button>
+		</div>
+	`;
+}
+
+function render_search_empty_html() {
+	return `
+		<div class="fg-search-empty">
+			<strong>${__("No se encontraron resultados")}</strong>
+			<div>${__("Prueba buscando por nombre del cliente o fecha.")}</div>
+		</div>
+	`;
 }
 
 function get_initials(name) {

@@ -241,6 +241,7 @@ def get_queue():
 			"fg_started_by",
 			"fg_started_on",
 			"modified",
+			"creation",
 		],
 		order_by="modified desc",
 		limit_page_length=0,
@@ -248,6 +249,28 @@ def get_queue():
 
 	names = [pl.name for pl in pick_lists]
 	shortage_pick_lists = _open_shortage_pick_lists(names)
+
+	# Commit 25.20 -- customer_name (Customer's own display name, `customer`
+	# above is only the Customer ID) for the unified "Buscar por cliente o
+	# fecha..." search bar (Pedidos/Historial, bodega.js). `frappe.get_all`
+	# (not `get_list`): Bodega holds no Customer Custom DocPerm grant at
+	# all (confirmed against fixtures/custom_docperm.json), same reasoning
+	# already established a few lines above for Pick List Item -- name-only,
+	# non-economic, and she already legitimately sees the raw Customer ID
+	# on every one of these same cards regardless (`pl.customer`), so this
+	# adds no real exposure, just a readable label for the same fact.
+	# Batched over the distinct Customer ids on THIS page's own already-
+	# permission-filtered `pick_lists` -- one extra query total, never one
+	# per card (section 18's own explicit "no N+1").
+	customer_names = {}
+	customer_ids = {pl.customer for pl in pick_lists if pl.customer}
+	if customer_ids:
+		customer_names = {
+			row.name: row.customer_name
+			for row in frappe.get_all(
+				"Customer", filters={"name": ["in", list(customer_ids)]}, fields=["name", "customer_name"]
+			)
+		}
 
 	# Line count / sales_order per Pick List, for card display. Pick List Item is a
 	# child table with no permission model of its own -- access is governed entirely
@@ -284,6 +307,16 @@ def get_queue():
 			"purpose": pl.purpose,
 			"parent_warehouse": pl.parent_warehouse,
 			"customer": pl.customer,
+			# Commit 25.20 -- see the batched resolution above.
+			"customer_name": customer_names.get(pl.customer),
+			# Commit 25.20 -- "fecha operativa" for search purposes (section
+			# 6): Pick List has no `transaction_date` of its own; `creation`
+			# is the one real Date/Datetime already on every row, same
+			# choice this function's own Historial tab (bodega.js) already
+			# made for an equivalent problem (`fg_started_on`, a narrower
+			# field only ever set for a Pick List that was actually
+			# started).
+			"creation": pl.creation,
 			"fg_started_by": pl.fg_started_by,
 			"fg_started_on": pl.fg_started_on,
 			"item_count": line_counts.get(pl.name, 0),

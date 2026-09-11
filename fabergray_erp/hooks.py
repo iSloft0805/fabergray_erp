@@ -33,7 +33,17 @@ app_include_css = "/assets/fabergray_erp/css/fg_shell.css"
 # Home Fabrigray -- landing fix for operational users (production
 # incident, post-7c9c1e7). See fabergray_erp/public/js/fg_home_landing.js
 # and fabergray_erp/boot.py's own docstrings for the full mechanism.
-app_include_js = "/assets/fabergray_erp/js/fg_home_landing.js"
+#
+# Commit 25.20 -- fg_search.js: the shared client-side search helper
+# (normalize_text/normalize_date/matches_operational_search) every Page's
+# own "Buscar por cliente o fecha..." bar calls -- same "one shared,
+# globally-loaded file" pattern app_include_css already established for
+# fg_shell.css, so the matching algorithm is implemented once, never
+# copied into six Pages' own bundles.
+app_include_js = [
+	"/assets/fabergray_erp/js/fg_home_landing.js",
+	"/assets/fabergray_erp/js/fg_search.js",
+]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/fabergray_erp/css/fabergray_erp.css"

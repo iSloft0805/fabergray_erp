@@ -174,8 +174,11 @@ fabergray_erp.CentroFaltantes = class CentroFaltantes {
 				<div class="fg-cf-search-wrap">
 					${icon("search", "fg-cf-search-icon")}
 					<input type="text" class="fg-cf-search-input" placeholder="${__(
-						"Buscar por Item, Pedido o Faltante..."
+						"Buscar por cliente, fecha, Item o Pedido..."
 					)}" value="${frappe.utils.escape_html(this.txt || "")}">
+					<button type="button" class="fg-search-clear ${
+						this.txt ? "is-visible" : ""
+					}" title="${__("Limpiar")}">${icon("x", "fg-icon-sm")}</button>
 				</div>
 			</div>
 		`;
@@ -183,6 +186,10 @@ fabergray_erp.CentroFaltantes = class CentroFaltantes {
 
 	render_cards_html() {
 		if (!this.rows.length) {
+			// Commit 25.20, section 11 -- server-side search (this.txt), so
+			// an empty page while a query is active unambiguously means "no
+			// matches", distinct from "nothing reported yet".
+			if (this.txt) return render_search_empty_html();
 			return `<div class="fg-empty">${__("No hay reportes de faltante que coincidan.")}</div>`;
 		}
 		return this.rows.map((r) => this.render_card(r)).join("");
@@ -197,6 +204,13 @@ fabergray_erp.CentroFaltantes = class CentroFaltantes {
 
 		const pedido = r.sales_order ? `${__("Pedido")} #${frappe.utils.escape_html(r.sales_order)}` : __("Sin pedido asociado");
 		const resuelto = r.status === "Resuelto";
+		// Commit 25.20 -- customer_name (get_shortage_center(), batched
+		// resolve off the linked Sales Order) -- section 17's own "cliente
+		// vinculado al pedido/faltante"; omitted entirely when the report
+		// has no Sales Order at all, never a guessed value.
+		const cliente = r.customer_name
+			? `<div class="fg-cf-card-meta">${__("Cliente")}: ${frappe.utils.escape_html(r.customer_name)}</div>`
+			: "";
 
 		return `
 			<div class="fg-cf-card" data-name="${frappe.utils.escape_html(r.name)}">
@@ -206,6 +220,7 @@ fabergray_erp.CentroFaltantes = class CentroFaltantes {
 				</div>
 				<div class="fg-cf-card-title">${frappe.utils.escape_html(r.item_name)}</div>
 				<div class="fg-cf-card-meta">${__("Código")}: ${frappe.utils.escape_html(r.item_code || "—")}</div>
+				${cliente}
 				<div class="fg-cf-card-meta">${pedido}</div>
 				<div class="fg-cf-card-meta">${__("Almacén")}: ${frappe.utils.escape_html(r.warehouse || "—")}</div>
 				<div class="fg-cf-card-qty">
@@ -268,12 +283,23 @@ fabergray_erp.CentroFaltantes = class CentroFaltantes {
 		});
 		this.$body.find(".fg-cf-search-input").on("input", (e) => {
 			const val = $(e.currentTarget).val();
+			this.$body.find(".fg-cf-search-wrap .fg-search-clear").toggleClass("is-visible", !!val.trim());
 			clearTimeout(this._search_debounce);
 			this._search_debounce = setTimeout(() => {
 				this.txt = val;
 				this.list_page = 1;
 				this.refresh_list();
 			}, 300);
+		});
+		// Commit 25.20, section 10 -- clears the search text only; the
+		// active status tab (this.status) is a separate filter, untouched.
+		this.$body.find(".fg-cf-search-wrap .fg-search-clear").on("click", () => {
+			clearTimeout(this._search_debounce);
+			this.$body.find(".fg-cf-search-input").val("");
+			this.$body.find(".fg-cf-search-wrap .fg-search-clear").removeClass("is-visible");
+			this.txt = "";
+			this.list_page = 1;
+			this.refresh_list();
 		});
 		this.$body.find(".fg-cf-cards").on("click", ".fg-cf-card-register", (e) => {
 			const name = $(e.currentTarget).closest(".fg-cf-card").data("name");
@@ -447,6 +473,21 @@ function cf_row(label, value) {
 // Small render helpers -- pure presentation, intentionally duplicated.
 // -------------------------------------------------------------------------
 const PAGE_SIZE = 10;
+
+// Commit 25.20, section 11 -- same shared shape/classes every other
+// operational Page's own copy uses (page/ventas/ventas.js's own
+// render_search_bar_html() carries the full "why reproduced, not
+// imported" comment). This Page's own search bar markup already existed
+// before this commit (fg-cf-search-*) and is left untouched -- only this
+// empty-state message is new.
+function render_search_empty_html() {
+	return `
+		<div class="fg-search-empty">
+			<strong>${__("No se encontraron resultados")}</strong>
+			<div>${__("Prueba buscando por nombre del cliente o fecha.")}</div>
+		</div>
+	`;
+}
 
 function icon(name, extra_class) {
 	return `<svg class="fg-icon ${extra_class || ""}"><use href="#icon-${name}"></use></svg>`;

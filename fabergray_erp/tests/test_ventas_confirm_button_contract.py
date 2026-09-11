@@ -188,7 +188,12 @@ class TestCancelledOrdersUiContract(IntegrationTestCase):
 
     def test_active_orders_are_loaded_with_the_active_view(self):
         body = _method_body(self.js, "load_dashboard")
-        self.assertIn('"get_my_orders", { view: "active" }', body)
+        # Commit 25.20 -- `limit: 500` was added alongside `view: "active"`
+        # (the search bar needs more than the server's own default-50
+        # fetch to filter over) -- this assertion only cares that the
+        # active view itself is still requested, never the exact trailing
+        # object shape.
+        self.assertIn('"get_my_orders", { view: "active"', body)
 
     def test_cancelled_orders_are_fetched_via_a_separate_view_param(self):
         body = _method_body(self.js, "set_order_filter")
@@ -199,7 +204,12 @@ class TestCancelledOrdersUiContract(IntegrationTestCase):
         self.assertIn("this.cancelled_orders === null", body)
 
     def test_render_orders_section_switches_data_source_for_cancelled_view(self):
-        body = _method_body(self.js, "render_orders_section")
+        # Commit 25.20 -- this logic moved from render_orders_section()
+        # itself into render_orders_results_html() (extracted so the
+        # search `input` handler can re-render just the results, never the
+        # search bar -- see that method's own comment); render_orders_
+        # section() now only wraps the search bar around it.
+        body = _method_body(self.js, "render_orders_results_html")
         self.assertIn('this.order_filter === "cancelados"', body)
         self.assertIn("this.cancelled_orders", body)
 
@@ -311,7 +321,10 @@ class TestCancelledOrdersCacheInvalidation(IntegrationTestCase):
         cancel_body = _method_body(self.js, "confirm_cancel_order")
         self.assertIn("this.load_dashboard();", cancel_body)
         dashboard_body = _method_body(self.js, "load_dashboard")
-        self.assertIn('"get_my_orders", { view: "active" }', dashboard_body)
+        # Commit 25.20 -- see test_active_orders_are_loaded_with_the_active_
+        # view's own comment: `limit: 500` was added, the trailing object
+        # shape is no longer asserted exactly.
+        self.assertIn('"get_my_orders", { view: "active"', dashboard_body)
 
     def test_load_dashboard_still_refreshes_cancelled_orders_when_already_loaded(self):
         """The pre-existing safety net (Commit 25.10) stays intact and
@@ -321,4 +334,5 @@ class TestCancelledOrdersCacheInvalidation(IntegrationTestCase):
         still gets a fresh fetch too, never a stale in-memory replay."""
         body = _method_body(self.js, "load_dashboard")
         self.assertIn("this.cancelled_orders !== null", body)
-        self.assertIn('"get_my_orders", { view: "cancelled" }', body)
+        # Commit 25.20 -- same `limit: 500` reasoning as above.
+        self.assertIn('"get_my_orders", { view: "cancelled"', body)

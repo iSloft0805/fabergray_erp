@@ -104,6 +104,7 @@ from fabergray_erp.api.bodega import _require_login
 from fabergray_erp.api.clientes import _primary_address_name
 from fabergray_erp.api.facturacion import FG_INVOICING_FACTURADO, _sales_order_of
 from fabergray_erp.sales_order_naming import root_commercial_name
+from fabergray_erp.search_utils import normalize_search_date
 
 #: A Pick List assigned to a Recorrido in any of these statuses blocks it
 #: from being assigned to a second one -- Borrador/Planificado/En Ruta are
@@ -715,7 +716,45 @@ def _parse_status_filter(status):
 
 
 @frappe.whitelist()
-def get_routes(status=None, start=0, page_length=20):
+def _routes_matching_search(txt, company):
+	"""Commit 25.20 -- resolves `txt` to the SET of Recorrido names that
+	should match get_routes()'s own search bar, section 16's own explicit
+	rule: a Recorrido with multiple stops/customers matches on ANY ONE of
+	them, never only its first/its own name. Three independent sources,
+	unioned:
+	  1. Recorrido.name itself (e.g. searching "REC-2026-00012" directly).
+	  2. Recorrido Parada.customer_name/.customer for ANY stop belonging to
+	     that route -- Recorrido Parada is a standalone doctype with its
+	     own real permission model (this module's own top docstring,
+	     section 5's own architecture decision), so `frappe.get_list()`
+	     here is the exact same convention get_route_detail() already
+	     uses for this doctype, never `frappe.get_all()`.
+	  3. `route_date` itself, when `txt` parses as a real date (section 4)
+	     -- an exact match against the real Date column, never a `like` on
+	     a formatted string.
+	Company scoping is enforced by the CALLER (get_routes() already filters
+	`company` in the same query this feeds into) -- a stray match from
+	another company here is simply never returned, never a leak."""
+	matches = set(frappe.get_list("Recorrido", filters={"company": company, "name": ["like", f"%{txt}%"]}, pluck="name"))
+	matches.update(
+		frappe.get_list(
+			"Recorrido Parada", filters={"customer_name": ["like", f"%{txt}%"]}, pluck="recorrido", distinct=True
+		)
+	)
+	matches.update(
+		frappe.get_list(
+			"Recorrido Parada", filters={"customer": ["like", f"%{txt}%"]}, pluck="recorrido", distinct=True
+		)
+	)
+	date_query = normalize_search_date(txt)
+	if date_query:
+		matches.update(
+			frappe.get_list("Recorrido", filters={"company": company, "route_date": date_query}, pluck="name")
+		)
+	return list(matches)
+
+
+def get_routes(status=None, start=0, page_length=20, txt=None):
 	"""Paginated Recorrido listing for the "Recorridos" (Borrador/
 	Planificado/En Ruta) and "Historial" (Completado/Cancelado) tabs
 	(Commit 24.2) -- get_route_detail() alone cannot serve either tab
@@ -739,18 +778,27 @@ def get_routes(status=None, start=0, page_length=20):
 	for the whole page -- never one query per route -- see
 	test_get_routes_query_count_is_bounded. Vehicle needs no such lookup:
 	its own autoname IS its license_plate (erpnext.setup.doctype.vehicle's
-	own `"autoname": "field:license_plate"`), already display-ready."""
+	own `"autoname": "field:license_plate"`), already display-ready.
+
+	Commit 25.20 -- `txt`: real server-side search (this endpoint is
+	page-paginated, page_length capped at 100, so a client-side-only
+	search would silently only ever look at whatever page happened to be
+	loaded -- section 8's own explicit warning). See
+	`_routes_matching_search()`'s own docstring for the full rule."""
 	_require_login()
 	frappe.has_permission("Recorrido", "read", throw=True)
 
 	company = get_default_company()
 	start = max(cint(start), 0)
 	page_length = min(max(cint(page_length) or 20, 1), 100)
+	txt = (txt or "").strip()
 
 	filters = {"company": company}
 	statuses = _parse_status_filter(status)
 	if statuses:
 		filters["status"] = ["in", statuses]
+	if txt:
+		filters["name"] = ["in", _routes_matching_search(txt, company)]
 
 	page_rows = frappe.get_list(
 		"Recorrido",

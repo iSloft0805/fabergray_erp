@@ -113,6 +113,7 @@ from erpnext.stock.doctype.pick_list.pick_list import create_delivery, get_actua
 
 from fabergray_erp.api.bodega import OPEN_SHORTAGE_STATUSES, _require_login
 from fabergray_erp.sales_order_naming import root_commercial_name
+from fabergray_erp.search_utils import normalize_search_date
 
 #: The corrected queue-entry contract from Commit 21.1's live audit,
 #: applied everywhere in this module: a Pick List belongs to Facturación's
@@ -659,6 +660,21 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 		matching_by_so = _pick_lists_matching_sales_order(txt)
 		if matching_by_so:
 			or_filters.append(["name", "in", matching_by_so])
+		# Commit 25.20 -- section 4's own "comparar contra la fecha real del
+		# documento, no solo contra texto visual": Pick List has no
+		# `transaction_date` of its own, so `creation` (always present) and
+		# `fg_invoiced_on` (set once actually invoiced) are its own two real
+		# Date/Datetime fields -- both compared against the FULL day the
+		# query parses to, never a plain text `like` on a formatted string.
+		# `normalize_search_date()` returns `None` for an ordinary customer-
+		# name query, so this branch is simply skipped then -- never a false
+		# match.
+		date_query = normalize_search_date(txt)
+		if date_query:
+			or_filters.append(["creation", "between", [f"{date_query} 00:00:00", f"{date_query} 23:59:59"]])
+			or_filters.append(
+				["fg_invoiced_on", "between", [f"{date_query} 00:00:00", f"{date_query} 23:59:59"]]
+			)
 
 	page_rows = frappe.get_list(
 		"Pick List",
@@ -672,6 +688,7 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 			"fg_invoiced_on",
 			"fg_invoiced_by",
 			"modified",
+			"creation",
 		],
 		order_by="modified desc",
 		limit_start=start,

@@ -72,6 +72,7 @@ from fabergray_erp.api.bodega import (
 )
 from fabergray_erp.api.inventario import PRICE_LIST_BUYING, _selling_rates, _upsert_item_price
 from fabergray_erp.sales_order_naming import root_commercial_name
+from fabergray_erp.search_utils import normalize_search_date
 
 RESOLVED_STATUS = "Resuelto"
 IN_PROGRESS_STATUS = "En Proceso"
@@ -1037,6 +1038,26 @@ def get_shortage_center(status=None, txt=None, start=0, page_length=20):
 			["item_code", "like", f"%{txt}%"],
 			["sales_order", "like", f"%{txt}%"],
 		]
+		# Commit 25.20 -- section 17's own "cliente vinculado al pedido/
+		# faltante": Reporte de Faltante carries `sales_order` but no
+		# customer field of its own, so a customer-name query is resolved
+		# by first finding the matching Sales Order names (one query,
+		# Jefe de Bodega already holds native `read` on Sales Order --
+		# fixtures/custom_docperm.json -- so this is a plain, permission-
+		# respecting frappe.get_list(), never frappe.get_all()), then
+		# folded into the same `or_filters` as an `in` clause.
+		matching_by_customer = frappe.get_list(
+			"Sales Order",
+			filters=[["customer_name", "like", f"%{txt}%"]],
+			pluck="name",
+		)
+		if matching_by_customer:
+			or_filters.append(["sales_order", "in", matching_by_customer])
+		# section 4 -- compare against the real `reported_on` Date/Datetime
+		# column, never a text `like` on a formatted string.
+		date_query = normalize_search_date(txt)
+		if date_query:
+			or_filters.append(["reported_on", "between", [f"{date_query} 00:00:00", f"{date_query} 23:59:59"]])
 
 	rows = frappe.get_list(
 		"Reporte de Faltante",
@@ -1065,6 +1086,19 @@ def get_shortage_center(status=None, txt=None, start=0, page_length=20):
 	names = [r.name for r in rows]
 	received_by_report = _bulk_received_qty(names) if frappe.has_permission("Stock Entry", "read") else {}
 
+	# Commit 25.20 -- customer_name for the unified search bar, batched over
+	# the distinct `sales_order` values on THIS page only (never per row) --
+	# section 18's own explicit "no N+1".
+	customer_names = {}
+	sales_orders = {r.sales_order for r in rows if r.sales_order}
+	if sales_orders:
+		customer_names = {
+			row.name: row.customer_name
+			for row in frappe.get_list(
+				"Sales Order", filters={"name": ["in", list(sales_orders)]}, fields=["name", "customer_name"]
+			)
+		}
+
 	pick_list_cache = {}
 	item_name_by_code = _batch_item_names([r.item_code for r in rows])
 	results = []
@@ -1080,6 +1114,8 @@ def get_shortage_center(status=None, txt=None, start=0, page_length=20):
 				),
 				"warehouse": r.warehouse,
 				"sales_order": r.sales_order,
+				"customer_name": customer_names.get(r.sales_order),
+				"reported_on": r.reported_on,
 				"qty_solicitada": r.qty_solicitada,
 				"qty_disponible": r.qty_disponible,
 				"qty_faltante": r.qty_faltante,

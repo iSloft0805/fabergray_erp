@@ -438,7 +438,16 @@
 	pointer-events: none;
 }
 
-.fg-ventas .fg-search-input {
+/* Hotfix 25.20.1 -- renamed from the generic `.fg-search-input` (this rule
+   pre-dates Commit 25.20 and was written only for this page's own Cliente/
+   Producto pickers, .fg-search-box above) to `.fg-search-box-input`: the
+   old name collided with the unified "Buscar por cliente o fecha..." bar's
+   shared `.fg-search-input` class (fg_shell.css, same one Facturación's own
+   bar already uses untouched), silently overriding its pill shape/height/
+   focus ring with this page-local box style. Renaming here is the fix --
+   the unified bar now inherits fg_shell.css exactly like Facturación's
+   does, nothing else changed. */
+.fg-ventas .fg-search-box-input {
 	width: 100%;
 	height: var(--fg-touch);
 	border: 1.5px solid var(--fg-border);
@@ -449,7 +458,7 @@
 	color: var(--fg-text);
 }
 
-.fg-ventas .fg-search-input:focus {
+.fg-ventas .fg-search-box-input:focus {
 	outline: none;
 	border-color: var(--fg-primary);
 }
@@ -1296,7 +1305,7 @@
 	margin-bottom: 12px;
 }
 
-.fg-ventas .fg-search-box--sm .fg-search-input,
+.fg-ventas .fg-search-box--sm .fg-search-box-input,
 .fg-ventas .fg-qo-manual-search-input {
 	height: 38px;
 	font-size: 0.86rem;

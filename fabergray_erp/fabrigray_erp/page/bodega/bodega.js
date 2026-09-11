@@ -546,15 +546,20 @@ fabergray_erp.Bodega = class Bodega {
 			(queue[bucket] || []).forEach((pl) => items.push({ pl, bucket }));
 		});
 
-		const search = (this.state.orders_search || "").trim().toLowerCase();
+		// Commit 25.20 -- the shared matcher (fg_search.js), now also
+		// matching customer_name (the real display name, get_queue() as of
+		// this commit) and creation (the "fecha operativa" this doctype
+		// actually has, see api/bodega.py's own comment) -- `customer`/
+		// `sales_order`/`name`/`commercial_name` all still searched exactly
+		// as before, nothing removed.
+		const search = this.state.orders_search || "";
 		if (search) {
-			items = items.filter(({ pl }) => {
-				const haystack = [pl.commercial_name, pl.sales_order, pl.name, pl.customer]
-					.filter(Boolean)
-					.join(" ")
-					.toLowerCase();
-				return haystack.includes(search);
-			});
+			items = items.filter(({ pl }) =>
+				fabergray_erp.search.matches_operational_search(pl, search, {
+					text_fields: ["commercial_name", "sales_order", "name", "customer_name", "customer"],
+					date_fields: ["creation"],
+				})
+			);
 		}
 		return items;
 	}
@@ -599,8 +604,11 @@ fabergray_erp.Bodega = class Bodega {
 				<div class="fg-orders-search-wrap">
 					${icon("search", "fg-orders-search-icon")}
 					<input type="text" class="fg-orders-search" placeholder="${__(
-						"Buscar pedido o cliente..."
+						"Buscar por pedido, cliente o fecha..."
 					)}" value="${frappe.utils.escape_html(this.state.orders_search || "")}">
+					<button type="button" class="fg-bodega-search-clear ${
+						this.state.orders_search ? "is-visible" : ""
+					}" title="${__("Limpiar")}">${icon("x", "fg-icon-sm")}</button>
 				</div>
 				<div class="fg-orders-filters">
 					<button type="button" class="fg-orders-filters-btn ${
@@ -727,6 +735,20 @@ fabergray_erp.Bodega = class Bodega {
 
 		this.$body.find(".fg-orders-search").on("input", (e) => {
 			this.state.orders_search = $(e.currentTarget).val();
+			this.state.orders_page = 1;
+			this.$body
+				.find(".fg-orders-search-wrap .fg-bodega-search-clear")
+				.toggleClass("is-visible", !!this.state.orders_search.trim());
+			rerender();
+		});
+
+		// Commit 25.20, section 10 -- clears the search text and re-renders
+		// the SAME already-active filter chip (orders_filter untouched),
+		// never resets it to "todos".
+		this.$body.find(".fg-orders-search-wrap .fg-bodega-search-clear").on("click", () => {
+			this.state.orders_search = "";
+			this.$body.find(".fg-orders-search").val("");
+			this.$body.find(".fg-orders-search-wrap .fg-bodega-search-clear").removeClass("is-visible");
 			this.state.orders_page = 1;
 			rerender();
 		});
@@ -1001,17 +1023,23 @@ fabergray_erp.Bodega = class Bodega {
 	// field (see original note this replaces, same reasoning holds).
 	get_filtered_history() {
 		const rows = ((this.state.queue || {}).listos || []).slice();
-		const search = (this.state.history_search || "").trim().toLowerCase();
+		const search = this.state.history_search || "";
 		const from = this.state.history_date_from;
 		const to = this.state.history_date_to;
 
 		return rows.filter((pl) => {
-			if (search) {
-				const haystack = [pl.commercial_name, pl.sales_order, pl.name, pl.customer]
-					.filter(Boolean)
-					.join(" ")
-					.toLowerCase();
-				if (!haystack.includes(search)) return false;
+			// Commit 25.20 -- same shared matcher as Pedidos above, now also
+			// matching customer_name and creation/fg_started_on as dates --
+			// the separate from/to range pickers right below are untouched,
+			// purely additive to a free-text query typed in this same box.
+			if (
+				search &&
+				!fabergray_erp.search.matches_operational_search(pl, search, {
+					text_fields: ["commercial_name", "sales_order", "name", "customer_name", "customer"],
+					date_fields: ["creation", "fg_started_on"],
+				})
+			) {
+				return false;
 			}
 			if (from || to) {
 				if (!pl.fg_started_on) return false;
@@ -1044,8 +1072,11 @@ fabergray_erp.Bodega = class Bodega {
 				<div class="fg-history-search-wrap">
 					${icon("search", "fg-history-search-icon")}
 					<input type="text" class="fg-history-search" placeholder="${__(
-						"Buscar por pedido o cliente..."
+						"Buscar por pedido, cliente o fecha..."
 					)}" value="${frappe.utils.escape_html(this.state.history_search || "")}">
+					<button type="button" class="fg-bodega-search-clear ${
+						this.state.history_search ? "is-visible" : ""
+					}" title="${__("Limpiar")}">${icon("x", "fg-icon-sm")}</button>
 				</div>
 				<div class="fg-history-date-range">
 					${icon("calendar", "fg-history-date-icon")}
@@ -1142,6 +1173,20 @@ fabergray_erp.Bodega = class Bodega {
 
 		this.$body.find(".fg-history-search").on("input", (e) => {
 			this.state.history_search = $(e.currentTarget).val();
+			this.state.history_page = 1;
+			this.$body
+				.find(".fg-history-search-wrap .fg-bodega-search-clear")
+				.toggleClass("is-visible", !!this.state.history_search.trim());
+			rerender();
+		});
+
+		// Commit 25.20, section 10 -- clears the search text only; the
+		// history_date_from/history_date_to range pickers are a SEPARATE,
+		// still-active filter this button must never touch.
+		this.$body.find(".fg-history-search-wrap .fg-bodega-search-clear").on("click", () => {
+			this.state.history_search = "";
+			this.$body.find(".fg-history-search").val("");
+			this.$body.find(".fg-history-search-wrap .fg-bodega-search-clear").removeClass("is-visible");
 			this.state.history_page = 1;
 			rerender();
 		});

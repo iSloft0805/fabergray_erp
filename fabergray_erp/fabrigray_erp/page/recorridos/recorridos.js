@@ -56,12 +56,18 @@ fabergray_erp.Recorridos = class Recorridos {
 		this.routes_total = 0;
 		this.routes_page = 1;
 		this.routes_status_filter = ""; // "" (todos) | "Borrador" | "Planificado" | "En Ruta"
+		// Commit 25.20 -- server-side (get_routes() is page-paginated,
+		// section 8), debounced ~300ms (section 9).
+		this.routes_search = "";
+		this._routes_search_debounce = null;
 
 		// -- Historial (Completado/Cancelado) -------------------------------
 		this.hist_rows = [];
 		this.hist_total = 0;
 		this.hist_page = 1;
 		this.hist_status_filter = ""; // "" (todos) | "Completado" | "Cancelado"
+		this.hist_search = "";
+		this._hist_search_debounce = null;
 
 		this.$app = $('<div class="fg-shell fg-recorridos">').appendTo(this.page.body);
 		this.render_shell();
@@ -753,6 +759,7 @@ fabergray_erp.Recorridos = class Recorridos {
 			status: this.routes_status_filter ? [this.routes_status_filter] : ["Borrador", "Planificado", "En Ruta"],
 			start: (this.routes_page - 1) * PAGE_SIZE,
 			page_length: PAGE_SIZE,
+			txt: this.routes_search,
 		}).then((r) => {
 			this.routes_rows = r.routes;
 			this.routes_total = r.total;
@@ -789,6 +796,7 @@ fabergray_erp.Recorridos = class Recorridos {
 			<div class="fg-section-head">
 				<div class="fg-section-title">${__("Recorridos activos")}</div>
 			</div>
+			${render_search_bar_html(this.routes_search)}
 			<div class="fg-recorridos-filter-chips">${filters_html}</div>
 			<div class="fg-recorridos-route-cards">${this.render_route_cards_html(this.routes_rows, false)}</div>
 			<div class="fg-recorridos-pagination" data-scope="routes">${this.render_pagination_html(
@@ -800,6 +808,12 @@ fabergray_erp.Recorridos = class Recorridos {
 
 	render_route_cards_html(rows, is_history) {
 		if (!rows.length) {
+			// Commit 25.20, section 11 -- a search that matched nothing gets
+			// its own explicit message, distinct from "genuinely nothing
+			// here yet" (the search is server-side, so `rows` being empty
+			// while a query is active unambiguously means "no matches").
+			const search = is_history ? this.hist_search : this.routes_search;
+			if (search) return render_search_empty_html();
 			return `
 				<div class="fg-empty">
 					<div>${is_history ? __("Aún no hay recorridos completados o cancelados.") : __("No hay recorridos activos.")}</div>
@@ -848,6 +862,24 @@ fabergray_erp.Recorridos = class Recorridos {
 
 	bind_routes_events() {
 		const $t = this.$body.find(".fg-recorridos-tab-body");
+		// Commit 25.20 -- server-side, debounced 300ms, same idiom as this
+		// file's own pre-existing avail_search (bind_available_events()
+		// above) -- full section re-render on each debounced fetch, same
+		// established tradeoff that pattern already accepts.
+		$t.find(".fg-search-input").on("input", (e) => {
+			const val = $(e.currentTarget).val();
+			clearTimeout(this._routes_search_debounce);
+			this._routes_search_debounce = setTimeout(() => {
+				this.routes_search = val;
+				this.routes_page = 1;
+				this.refresh_routes();
+			}, 300);
+		});
+		$t.find(".fg-search-clear").on("click", () => {
+			this.routes_search = "";
+			this.routes_page = 1;
+			this.refresh_routes();
+		});
 		$t.find(".fg-recorridos-filter-chips").on("click", ".fg-recorridos-filter-chip", (e) => {
 			this.routes_status_filter = $(e.currentTarget).data("status") || "";
 			this.routes_page = 1;
@@ -875,6 +907,7 @@ fabergray_erp.Recorridos = class Recorridos {
 			status: this.hist_status_filter ? [this.hist_status_filter] : ["Completado", "Cancelado"],
 			start: (this.hist_page - 1) * PAGE_SIZE,
 			page_length: PAGE_SIZE,
+			txt: this.hist_search,
 		}).then((r) => {
 			this.hist_rows = r.routes;
 			this.hist_total = r.total;
@@ -910,6 +943,7 @@ fabergray_erp.Recorridos = class Recorridos {
 			<div class="fg-section-head">
 				<div class="fg-section-title">${__("Historial de recorridos")}</div>
 			</div>
+			${render_search_bar_html(this.hist_search)}
 			<div class="fg-recorridos-filter-chips">${filters_html}</div>
 			<div class="fg-recorridos-route-cards">${this.render_route_cards_html(this.hist_rows, true)}</div>
 			<div class="fg-recorridos-pagination" data-scope="hist">${this.render_pagination_html(this.hist_page, this.hist_total)}</div>
@@ -918,6 +952,20 @@ fabergray_erp.Recorridos = class Recorridos {
 
 	bind_history_events() {
 		const $t = this.$body.find(".fg-recorridos-tab-body");
+		$t.find(".fg-search-input").on("input", (e) => {
+			const val = $(e.currentTarget).val();
+			clearTimeout(this._hist_search_debounce);
+			this._hist_search_debounce = setTimeout(() => {
+				this.hist_search = val;
+				this.hist_page = 1;
+				this.refresh_history();
+			}, 300);
+		});
+		$t.find(".fg-search-clear").on("click", () => {
+			this.hist_search = "";
+			this.hist_page = 1;
+			this.refresh_history();
+		});
 		$t.find(".fg-recorridos-filter-chips").on("click", ".fg-recorridos-filter-chip", (e) => {
 			this.hist_status_filter = $(e.currentTarget).data("status") || "";
 			this.hist_page = 1;
@@ -1612,6 +1660,36 @@ fabergray_erp.Recorridos = class Recorridos {
 // this Page's asset loading independent of theirs.
 // -------------------------------------------------------------------------
 const PAGE_SIZE = 10;
+
+// Commit 25.20 -- unified search bar markup, same shape/classes as every
+// other operational Page's own copy (page/ventas/ventas.js's own
+// render_search_bar_html() carries the full "why reproduced, not
+// imported" comment). Clear button visibility is simply re-rendered from
+// `value` here (never toggled via a separate class-flip in the input
+// handler) -- this Page's own search is server-side + debounced, so every
+// change already triggers a full section re-render (refresh_routes()/
+// refresh_history()), unlike the client-side Pages.
+function render_search_bar_html(value) {
+	const has_value = !!(value && value.trim());
+	return `
+		<div class="fg-search-bar">
+			${icon("search", "fg-search-icon")}
+			<input type="text" class="fg-search-input" placeholder="${__("Buscar por cliente o fecha...")}" value="${frappe.utils.escape_html(
+				value || ""
+			)}">
+			<button type="button" class="fg-search-clear ${has_value ? "is-visible" : ""}" title="${__("Limpiar")}">${icon("x", "fg-icon-sm")}</button>
+		</div>
+	`;
+}
+
+function render_search_empty_html() {
+	return `
+		<div class="fg-search-empty">
+			<strong>${__("No se encontraron resultados")}</strong>
+			<div>${__("Prueba buscando por nombre del cliente o fecha.")}</div>
+		</div>
+	`;
+}
 
 function icon(name, extra_class) {
 	return `<svg class="fg-icon ${extra_class || ""}"><use href="#icon-${name}"></use></svg>`;

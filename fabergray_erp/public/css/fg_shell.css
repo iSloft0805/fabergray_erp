@@ -420,6 +420,99 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Commit 25.20 -- unified "Buscar por cliente o fecha..." search bar.  */
+/* Shared, global classes (same reasoning fg-badge/fg-status-pill above */
+/* already establish) so all six operational Pages render the identical */
+/* input, never six slightly-different reimplementations. Icon absolutely */
+/* positioned inside the input's own left padding -- no wrapper flex     */
+/* needed, keeps this trivially full-width on mobile (section 20's own  */
+/* "mobile full width").                                                 */
+/* ------------------------------------------------------------------ */
+.fg-shell .fg-search-bar {
+	position: relative;
+	width: 100%;
+}
+
+.fg-shell .fg-search-icon {
+	position: absolute;
+	left: 14px;
+	top: 50%;
+	transform: translateY(-50%);
+	color: var(--fg-text-faint);
+	pointer-events: none;
+	display: flex;
+}
+
+.fg-shell .fg-search-input {
+	width: 100%;
+	height: 44px;
+	padding: 0 40px 0 40px;
+	border-radius: var(--fg-radius-pill);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	font-size: 0.88rem;
+	transition: border-color var(--fg-transition), box-shadow var(--fg-transition);
+}
+
+.fg-shell .fg-search-input::placeholder {
+	color: var(--fg-text-faint);
+}
+
+.fg-shell .fg-search-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+	box-shadow: 0 0 0 3px var(--fg-primary-tint);
+}
+
+.fg-shell .fg-search-clear {
+	position: absolute;
+	right: 8px;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 28px;
+	height: 28px;
+	border-radius: 50%;
+	border: none;
+	background: var(--fg-bg);
+	color: var(--fg-text-muted);
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	/* Always in the DOM (never conditionally rendered) so the input
+	   handler can toggle it without ever touching/re-rendering the input
+	   itself -- see each Page's own render_search_bar_html(). */
+	display: none;
+}
+
+.fg-shell .fg-search-clear.is-visible {
+	display: flex;
+}
+
+.fg-shell .fg-search-clear:hover {
+	background: var(--fg-border);
+}
+
+.fg-shell .fg-search-empty {
+	text-align: center;
+	color: var(--fg-text-muted);
+	padding: 32px 16px;
+}
+
+.fg-shell .fg-search-empty strong {
+	display: block;
+	color: var(--fg-text);
+	margin-bottom: 4px;
+	font-size: 0.94rem;
+}
+
+@media (max-width: 640px) {
+	.fg-shell .fg-search-input {
+		font-size: 0.85rem;
+	}
+}
+
+/* ------------------------------------------------------------------ */
 /* Progress (exact values only -- callers must never pass an invented %) */
 /* ------------------------------------------------------------------ */
 .fg-shell .fg-progress-block {

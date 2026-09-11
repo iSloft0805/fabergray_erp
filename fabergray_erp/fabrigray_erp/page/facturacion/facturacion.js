@@ -49,6 +49,12 @@ fabergray_erp.Facturacion = class Facturacion {
 		this.queue_search = "";
 		this.queue_page = 1;
 		this._search_debounce = null;
+		// Commit 25.20 -- "Cotizaciones pendientes" own search, client-side
+		// (that list is fully fetched, see load_billing_queue()) -- separate
+		// state from queue_search above, section 15's own "usar una barra
+		// por sección si UX actual lo exige": these are two structurally
+		// different documents/lists in the same Page.
+		this.billing_search = "";
 
 		// Review modal state -- see open_review_dialog(). Reset every time a
 		// modal opens/closes so a stale detail from a previous Pick List can
@@ -168,7 +174,10 @@ fabergray_erp.Facturacion = class Facturacion {
 	load_billing_queue() {
 		return Promise.all([
 			this.call_cotizaciones("get_quotation_billing_summary"),
-			this.call_cotizaciones("get_pending_billing_review_quotations"),
+			// Commit 25.20 -- limit: 500 (was the server default 50): the new
+			// search bar below filters this list client-side, over whatever
+			// this call actually fetched.
+			this.call_cotizaciones("get_pending_billing_review_quotations", { limit: 500 }),
 		]).then(([summary, quotations]) => {
 			this.billing_summary = summary;
 			this.billing_quotations = quotations || [];
@@ -242,7 +251,7 @@ fabergray_erp.Facturacion = class Facturacion {
 					<div class="fg-fact-search-wrap">
 						${icon("search", "fg-fact-search-icon")}
 						<input type="text" class="fg-fact-search-input" placeholder="${__(
-							"Buscar por PEDIDO-N, cliente o Pick List..."
+							"Buscar por PEDIDO-N, cliente, fecha o Pick List..."
 						)}" value="${frappe.utils.escape_html(this.queue_search || "")}">
 					</div>
 				</div>
@@ -262,11 +271,29 @@ fabergray_erp.Facturacion = class Facturacion {
 	// from the Pick List invoicing queue above (different document,
 	// different API module).
 	// =====================================================================
+	// Commit 25.20 -- the shared matcher (fg_search.js). customer_name/
+	// customer cover section 5's "cliente" (Quotation.party_name is
+	// returned here as `customer`, get_pending_billing_review_quotations()
+	// -- api/cotizaciones.py), transaction_date is this document's own
+	// real operational date (section 13).
+	billing_quotation_matches_search(q) {
+		return fabergray_erp.search.matches_operational_search(q, this.billing_search, {
+			text_fields: ["customer_name", "customer", "name"],
+			date_fields: ["transaction_date"],
+		});
+	}
+
+	render_billing_queue_cards_html() {
+		const filtered = this.billing_quotations.filter((q) => this.billing_quotation_matches_search(q));
+		return filtered.length
+			? filtered.map((q) => this.render_billing_queue_card(q)).join("")
+			: this.billing_search
+				? render_search_empty_html()
+				: `<div class="fg-empty">${__("No hay cotizaciones pendientes de revisión.")}</div>`;
+	}
+
 	render_billing_queue_section() {
 		const pendientes = (this.billing_summary || {}).cotizaciones_pendientes ?? 0;
-		const cards = this.billing_quotations.length
-			? this.billing_quotations.map((q) => this.render_billing_queue_card(q)).join("")
-			: `<div class="fg-empty">${__("No hay cotizaciones pendientes de revisión.")}</div>`;
 
 		return `
 			<div class="fg-fact-billing-section">
@@ -274,7 +301,8 @@ fabergray_erp.Facturacion = class Facturacion {
 					<div class="fg-section-title">${__("Cotizaciones pendientes")}</div>
 					<span class="fg-fact-billing-count">${pendientes}</span>
 				</div>
-				<div class="fg-fact-billing-cards">${cards}</div>
+				${render_search_bar_html(this.billing_search)}
+				<div class="fg-fact-billing-cards">${this.render_billing_queue_cards_html()}</div>
 			</div>
 		`;
 	}
@@ -306,11 +334,40 @@ fabergray_erp.Facturacion = class Facturacion {
 		`;
 	}
 
-	bind_billing_queue_events() {
+	// Commit 25.20 -- client-side, re-renders only .fg-fact-billing-cards
+	// (never .fg-fact-billing-section itself, which also holds the search
+	// input -- same "never re-render the input the user is typing into"
+	// rule ventas.js's own bind_orders_search_events() already documents).
+	bind_billing_queue_search_events() {
+		this.$body.find(".fg-fact-billing-section .fg-search-input").on("input", (e) => {
+			this.billing_search = $(e.currentTarget).val();
+			this.$body
+				.find(".fg-fact-billing-section .fg-search-clear")
+				.toggleClass("is-visible", !!this.billing_search.trim());
+			// .fg-fact-billing-cards itself is never replaced here (only its
+			// own .html() content is) -- the delegated click handler bound
+			// once in bind_billing_queue_card_events() below still applies
+			// to whatever cards end up inside it, no re-bind needed/safe to
+			// repeat (delegated events would otherwise stack).
+			this.$body.find(".fg-fact-billing-cards").html(this.render_billing_queue_cards_html());
+		});
+		this.$body.find(".fg-fact-billing-section .fg-search-clear").on("click", () => {
+			this.billing_search = "";
+			this.$body.find(".fg-fact-billing-section").replaceWith(this.render_billing_queue_section());
+			this.bind_billing_queue_events();
+		});
+	}
+
+	bind_billing_queue_card_events() {
 		this.$body.find(".fg-fact-billing-cards").on("click", ".fg-fact-billing-review-btn", (e) => {
 			const name = $(e.currentTarget).closest(".fg-fact-billing-card").data("name");
 			this.open_billing_review_dialog(name);
 		});
+	}
+
+	bind_billing_queue_events() {
+		this.bind_billing_queue_search_events();
+		this.bind_billing_queue_card_events();
 	}
 
 	// Purely informational -- never clickable. Filtering happens only
@@ -1342,6 +1399,32 @@ const PAGE_SIZE = 10;
 // removed here, matching api/cotizaciones.py's own PRICE_MODE_DISCOUNTS.
 const PRICE_MODE_DISCOUNTS = { FULL: 0, DISCOUNT_10: 10, DISCOUNT_15: 15, DISCOUNT_20: 20, DISCOUNT_25: 25 };
 const PRICE_MODE_MULTIPLIERS = { FULL: 1, DISCOUNT_10: 0.9, DISCOUNT_15: 0.85, DISCOUNT_20: 0.8, DISCOUNT_25: 0.75 };
+
+// Commit 25.20 -- unified search bar markup, same shape/classes as every
+// other operational Page's own copy (page/ventas/ventas.js's own
+// render_search_bar_html() carries the full "why reproduced, not
+// imported" comment).
+function render_search_bar_html(value) {
+	const has_value = !!(value && value.trim());
+	return `
+		<div class="fg-search-bar">
+			${icon("search", "fg-search-icon")}
+			<input type="text" class="fg-search-input" placeholder="${__("Buscar por cliente o fecha...")}" value="${frappe.utils.escape_html(
+				value || ""
+			)}">
+			<button type="button" class="fg-search-clear ${has_value ? "is-visible" : ""}" title="${__("Limpiar")}">${icon("x", "fg-icon-sm")}</button>
+		</div>
+	`;
+}
+
+function render_search_empty_html() {
+	return `
+		<div class="fg-search-empty">
+			<strong>${__("No se encontraron resultados")}</strong>
+			<div>${__("Prueba buscando por nombre del cliente o fecha.")}</div>
+		</div>
+	`;
+}
 
 function icon(name, extra_class) {
 	return `<svg class="fg-icon ${extra_class || ""}"><use href="#icon-${name}"></use></svg>`;

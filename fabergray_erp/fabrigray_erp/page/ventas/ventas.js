@@ -38,6 +38,10 @@ fabergray_erp.Ventas = class Ventas {
 		// from `[]` ("fetched, there are none") -- see set_order_filter().
 		this.cancelled_orders = null;
 		this.order_filter = null; // null | "pedidos_hoy" | "pendientes" | "entregados" | "cancelados"
+		// Commit 25.20 -- free-text search, ALWAYS applied AFTER order_filter
+		// (section 12's own explicit "la búsqueda debe aplicarse DESPUÉS del
+		// filtro seleccionado") -- never a replacement for it.
+		this.order_search = "";
 
 		// "Nuevo pedido" (view: "nuevo_pedido") working state -- reset every
 		// time open_nuevo_pedido() runs, never persisted across pedidos.
@@ -146,9 +150,19 @@ fabergray_erp.Ventas = class Ventas {
 		this.state.view = "dashboard";
 		this.render_skeleton_dashboard();
 
-		const calls = [this.call("get_sales_summary"), this.call("get_my_orders", { view: "active" })];
+		// Commit 25.20 -- `limit: 500` (was the server-side default of 50):
+		// the search bar below filters `this.orders` client-side, over
+		// whatever this call actually fetched -- a search that silently
+		// only ever looked at the first 50 orders would be exactly the
+		// "búsqueda incompleta" section 8 explicitly warns against. 500 is
+		// a generous ceiling for this app's own real scale (never claimed
+		// as literally unlimited); get_my_orders() itself is unchanged.
+		const calls = [
+			this.call("get_sales_summary"),
+			this.call("get_my_orders", { view: "active", limit: 500 }),
+		];
 		if (this.cancelled_orders !== null) {
-			calls.push(this.call("get_my_orders", { view: "cancelled" }));
+			calls.push(this.call("get_my_orders", { view: "cancelled", limit: 500 }));
 		}
 
 		return Promise.all(calls)
@@ -257,10 +271,31 @@ fabergray_erp.Ventas = class Ventas {
 		return true;
 	}
 
-	render_orders_section() {
+	// Commit 25.20 -- client-side (this.orders is already fully fetched,
+	// limit: 500, see load_dashboard()) -- the ONE shared matcher
+	// (fg_search.js, globally loaded) every operational Page's own search
+	// bar calls, never a bespoke haystack built here. `customer`/
+	// `customer_name` cover section 5's "cliente" (both, so a raw Customer
+	// ID still matches even without its display name); `transaction_date`
+	// is Ventas' own real operational date, section 6.
+	order_matches_search(o) {
+		return fabergray_erp.search.matches_operational_search(o, this.order_search, {
+			text_fields: ["customer_name", "customer", "name", "commercial_name"],
+			date_fields: ["transaction_date"],
+		});
+	}
+
+	// Commit 25.20 -- split out from render_orders_section() so the search
+	// `input` handler (bind_orders_section_events()) can re-render just
+	// this part, never the search bar itself -- see render_search_bar_
+	// html()'s own comment for why that matters.
+	render_orders_results_html() {
 		const is_cancelled_view = this.order_filter === "cancelados";
 		const all = is_cancelled_view ? this.cancelled_orders || [] : this.orders || [];
-		const list = is_cancelled_view ? all : all.filter((o) => this.order_matches_filter(o, this.order_filter));
+		const filtered = is_cancelled_view ? all : all.filter((o) => this.order_matches_filter(o, this.order_filter));
+		// Section 12 -- search applies AFTER the existing filter, never
+		// instead of it.
+		const list = filtered.filter((o) => this.order_matches_search(o));
 
 		const filter_labels = {
 			pedidos_hoy: __("Pedidos de hoy"),
@@ -280,14 +315,20 @@ fabergray_erp.Ventas = class Ventas {
 
 		const cards = list.length
 			? list.map((o) => this.render_order_card(o)).join("")
-			: `<div class="fg-empty">${__("No tienes pedidos para mostrar.")}</div>`;
+			: this.order_search
+				? render_search_empty_html()
+				: `<div class="fg-empty">${__("No tienes pedidos para mostrar.")}</div>`;
 
+		return `${chip}<div class="fg-order-list">${cards}</div>`;
+	}
+
+	render_orders_section() {
 		return `
 			<div class="fg-section-head">
 				<div class="fg-section-title">${__("Pedidos")}</div>
 			</div>
-			${chip}
-			<div class="fg-order-list">${cards}</div>
+			${render_search_bar_html(this.order_search)}
+			<div class="fg-orders-results">${this.render_orders_results_html()}</div>
 		`;
 	}
 
@@ -466,7 +507,29 @@ fabergray_erp.Ventas = class Ventas {
 		`);
 	}
 
-	bind_orders_section_events() {
+	// Commit 25.20 -- bound ONCE per full render_orders_section() (never
+	// re-bound by the search `input` handler itself, which only ever
+	// touches .fg-orders-results -- re-binding this every keystroke would
+	// stack N duplicate handlers after N keystrokes).
+	bind_orders_search_events() {
+		this.$body.find(".fg-search-input").on("input", (e) => {
+			this.order_search = $(e.currentTarget).val();
+			this.$body.find(".fg-search-clear").toggleClass("is-visible", !!this.order_search.trim());
+			this.$body.find(".fg-orders-results").html(this.render_orders_results_html());
+			this.bind_orders_results_events();
+		});
+		this.$body.find(".fg-search-clear").on("click", () => {
+			this.order_search = "";
+			this.$body.find(".fg-orders-section").html(this.render_orders_section());
+			this.bind_orders_section_events();
+		});
+	}
+
+	// Card actions + the filter chip's own clear button -- re-bound after
+	// EVERY re-render of .fg-orders-results (both the search input's own
+	// partial re-render and set_order_filter()'s full one), since those
+	// DOM nodes are recreated each time.
+	bind_orders_results_events() {
 		this.$body.find(".fg-filter-chip-clear").on("click", () => this.set_order_filter(null));
 
 		this.$body.find(".fg-order-card-view").on("click", (e) => {
@@ -484,6 +547,11 @@ fabergray_erp.Ventas = class Ventas {
 		this.$body.find(".fg-order-card-cancel").on("click", (e) => {
 			this.confirm_cancel_order($(e.currentTarget).data("order-name"));
 		});
+	}
+
+	bind_orders_section_events() {
+		this.bind_orders_search_events();
+		this.bind_orders_results_events();
 	}
 
 	// =====================================================================
@@ -836,7 +904,7 @@ fabergray_erp.Ventas = class Ventas {
 			$wrap.html(`
 				<div class="fg-search-box">
 					${icon("search")}
-					<input type="text" class="fg-search-input fg-item-search-input" placeholder="${__("Buscar producto...")}">
+					<input type="text" class="fg-search-box-input fg-item-search-input" placeholder="${__("Buscar producto...")}">
 				</div>
 				<div class="fg-item-results"></div>
 			`);
@@ -924,7 +992,7 @@ fabergray_erp.Ventas = class Ventas {
 		$area.html(`
 			<div class="fg-search-box">
 				${icon("search")}
-				<input type="text" class="fg-search-input fg-customer-search-input" placeholder="${__("Buscar cliente...")}">
+				<input type="text" class="fg-search-box-input fg-customer-search-input" placeholder="${__("Buscar cliente...")}">
 			</div>
 			<div class="fg-search-dropdown"></div>
 		`);
@@ -1998,6 +2066,42 @@ fabergray_erp.Ventas = class Ventas {
 // same reasoning as Commit 6: a few lines each, zero business logic, keeps
 // this Page's asset loading independent of theirs.
 // -------------------------------------------------------------------------
+// Commit 25.20 -- the unified search bar markup, ONE shape shared by
+// every operational Page (section 2's own "debe verse igual en los seis
+// módulos") -- reproduced per-page (never imported: each Page's own
+// icon() is page-local, same "self-contained bundle" convention this
+// whole file already documents at its own top) but never re-derived
+// differently -- exact same classes (fg_shell.css, global), exact same
+// placeholder text, exact same clear-button behavior in every Page that
+// has one of these.
+function render_search_bar_html(value) {
+	const has_value = !!(value && value.trim());
+	// The clear button is always in the DOM (visibility toggled via the
+	// "is-visible" class, never conditionally rendered) -- the `input`
+	// handler below only ever touches the RESULTS container, never this
+	// search bar itself, so the field never loses focus/cursor position
+	// while the user is still typing (same pattern bodega.js's own
+	// pre-existing Pedidos search already established).
+	return `
+		<div class="fg-search-bar">
+			${icon("search", "fg-search-icon")}
+			<input type="text" class="fg-search-input" placeholder="${__("Buscar por cliente o fecha...")}" value="${frappe.utils.escape_html(
+				value || ""
+			)}">
+			<button type="button" class="fg-search-clear ${has_value ? "is-visible" : ""}" title="${__("Limpiar")}">${icon("x", "fg-icon-sm")}</button>
+		</div>
+	`;
+}
+
+function render_search_empty_html() {
+	return `
+		<div class="fg-search-empty">
+			<strong>${__("No se encontraron resultados")}</strong>
+			<div>${__("Prueba buscando por nombre del cliente o fecha.")}</div>
+		</div>
+	`;
+}
+
 function icon(name, extra_class) {
 	return `<svg class="fg-icon ${extra_class || ""}"><use href="#icon-${name}"></use></svg>`;
 }

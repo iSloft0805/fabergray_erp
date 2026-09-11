@@ -730,7 +730,7 @@
 	border: 1.5px solid var(--fg-border);
 	border-radius: var(--fg-radius-sm);
 	background: var(--fg-card);
-	padding: 0 14px 0 40px;
+	padding: 0 36px 0 40px;
 	font-size: 0.9rem;
 	color: var(--fg-text);
 }
@@ -738,6 +738,37 @@
 .fg-orders-search:focus {
 	outline: none;
 	border-color: var(--fg-primary);
+}
+
+/* Commit 25.20 -- section 10's own clear button. This page's own wraps
+   (.fg-orders-search-wrap/.fg-history-search-wrap) are not nested under a
+   .fg-shell root (see bodega.js's own top-level `<div class="fg-bodega">`),
+   so fg_shell.css's shared `.fg-shell .fg-search-clear` rule never applies
+   here -- this is bodega.js's own local equivalent, same visual shape,
+   shared by both search bars on this page. */
+.fg-bodega-search-clear {
+	position: absolute;
+	right: 8px;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 28px;
+	height: 28px;
+	border-radius: 50%;
+	border: none;
+	background: transparent;
+	color: var(--fg-text-faint);
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	display: none;
+}
+
+.fg-bodega-search-clear.is-visible {
+	display: flex;
+}
+
+.fg-bodega-search-clear:hover {
+	background: var(--fg-border);
 }
 
 .fg-orders-filters {
@@ -1606,7 +1637,7 @@
 	border: 1.5px solid var(--fg-border);
 	border-radius: var(--fg-radius-sm);
 	background: var(--fg-card);
-	padding: 0 14px 0 40px;
+	padding: 0 36px 0 40px;
 	font-size: 0.9rem;
 	color: var(--fg-text);
 }

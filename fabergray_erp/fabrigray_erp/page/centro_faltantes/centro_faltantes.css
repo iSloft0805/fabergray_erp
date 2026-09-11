@@ -95,7 +95,7 @@
 .fg-centro-faltantes .fg-cf-search-input {
 	width: 100%;
 	min-height: 42px;
-	padding: 0 12px 0 36px;
+	padding: 0 34px 0 36px;
 	border: 1.5px solid var(--fg-border);
 	border-radius: var(--fg-radius-sm);
 	font-size: 0.86rem;
