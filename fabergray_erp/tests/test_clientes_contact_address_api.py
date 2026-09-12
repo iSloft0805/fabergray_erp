@@ -81,6 +81,11 @@ class TestClientesContactAddressApi(IntegrationTestCase):
         cls.no_contact_user = cls.world.user("fg227-sin-contacto@example.com", [role.name])
 
     def _create(self, **fields):
+        # Commit 25.22 -- fg_customer_company_type is now mandatory in
+        # create_customer(); this file exercises Contact/Address, not
+        # this field, so the helper defaults it here (see
+        # test_clientes_write_api.py's own identical comment).
+        fields.setdefault("fg_customer_company_type", "IVA")
         result = clientes_api.create_customer(fields)
         self.world.track_existing("Customer", result["name"])
         return result

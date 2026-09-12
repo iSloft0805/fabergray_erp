@@ -1057,6 +1057,38 @@ def get_quotation_billing_summary():
     return {"cotizaciones_pendientes": len(pending)}
 
 
+def _customer_company_types(customer_names):
+    """Commit 25.22 -- bulk Customer.fg_customer_company_type lookup for
+    Facturación's Quotation views, one query for the whole page -- same
+    helper/reasoning as api.facturacion._customer_company_types() (kept
+    as its own copy here, not imported, same "each module stays
+    independent" convention this whole app already follows for small
+    helpers). Guarded by frappe.has_permission("Customer", "read") --
+    never assumed -- so a caller without it simply sees None everywhere,
+    never a PermissionError from an incidental enrichment lookup.
+    Source of truth is always this live read against Customer, never a
+    value copied onto Quotation (section 12's own explicit "preferir
+    fuente dinámica")."""
+    customer_names = [c for c in dict.fromkeys(customer_names) if c]
+    if not customer_names or not frappe.has_permission("Customer", "read"):
+        return {}
+    rows = frappe.get_list(
+        "Customer",
+        filters={"name": ["in", customer_names]},
+        fields=["name", "fg_customer_company_type"],
+    )
+    return {r.name: (r.fg_customer_company_type or None) for r in rows}
+
+
+def _customer_company_type(customer_name):
+    """Single-Customer counterpart of _customer_company_types() above,
+    for get_quotation_billing_detail() below (one Quotation, one
+    Customer, at a time)."""
+    if not customer_name or not frappe.has_permission("Customer", "read"):
+        return None
+    return frappe.db.get_value("Customer", customer_name, "fg_customer_company_type") or None
+
+
 @frappe.whitelist()
 def get_pending_billing_review_quotations(limit=50):
     """Commit 25.13, section 6 -- Page Facturación's "COTIZACIONES
@@ -1115,6 +1147,13 @@ def get_pending_billing_review_quotations(limit=50):
                 "fg_billing_review_status": qtn.fg_billing_review_status,
             }
         )
+
+    # Commit 25.22 -- one batched Customer lookup for the whole tray,
+    # never one per Quotation (same reasoning as api/facturacion.py's
+    # own get_invoicing_queue()).
+    company_types = _customer_company_types([q["customer"] for q in quotations])
+    for q in quotations:
+        q["fg_customer_company_type"] = company_types.get(q["customer"])
 
     return quotations
 
@@ -1348,6 +1387,12 @@ def get_quotation_billing_detail(name):
     from the `fg_billing_price_mode` audit label.  Still strictly
     read-only: computing them touches nothing but the same
     `_reference_selling_rates()` lookup this function already did.
+
+    Commit 25.22 adds `fg_customer_company_type`, resolved fresh from the
+    real Customer (`qtn.party_name`) -- `None` for a historical Customer
+    never classified, the dialog renders that as "Sin clasificar" with a
+    visible warning (section 9/11's own explicit requirement). Never
+    modifies pricing/billing review in any way -- this is display only.
     """
     _facturacion_billing_review_gate()
 
@@ -1408,6 +1453,7 @@ def get_quotation_billing_detail(name):
         "name": qtn.name,
         "customer": qtn.party_name,
         "customer_name": qtn.customer_name,
+        "fg_customer_company_type": _customer_company_type(qtn.party_name),
         "transaction_date": qtn.transaction_date,
         "owner": qtn.owner,
         "owner_fullname": frappe.utils.get_fullname(qtn.owner),

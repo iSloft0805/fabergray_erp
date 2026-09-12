@@ -284,6 +284,56 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Commit 25.22 -- "Empresa / Tipo de facturación" classification badge  */
+/* (Customer.fg_customer_company_type). Deliberately NOT the shared      */
+/* `.fg-badge` (defined under `.fg-shell .fg-badge` in fg_shell.css, and */
+/* whose `--fg-*` color tokens are ALSO only declared on `.fg-shell`) --  */
+/* this badge also renders inside `.fg-fact-review-dialog`/`.fg-fact-    */
+/* billing-review-dialog`, both `frappe.ui.Dialog` modals appended       */
+/* straight to <body>, OUTSIDE `.fg-shell` (the exact scoping trap       */
+/* Hotfix 25.20.4's own header comment documents for `.fg-btn`, further  */
+/* up this same file). `.fg-company-type-badge` therefore carries its    */
+/* own COMPLETE shape (never depending on `.fg-badge`) and every `var()` */
+/* here has a literal fallback that is actually load-bearing inside      */
+/* both dialogs, not decorative -- and is styled identically in every    */
+/* one of the four places it appears (both queue cards, both dialogs).   */
+/* ------------------------------------------------------------------ */
+.fg-facturacion .fg-company-type-badge,
+.fg-fact-review-dialog .fg-company-type-badge,
+.fg-fact-billing-review-dialog .fg-company-type-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 4px 10px;
+	border-radius: var(--fg-radius-pill, 999px);
+	font-size: 0.7rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	white-space: nowrap;
+	background: var(--fg-primary-tint, #eaf2fd);
+	color: var(--fg-primary-dark, #1e63c4);
+}
+
+.fg-facturacion .fg-company-type-badge--missing,
+.fg-fact-review-dialog .fg-company-type-badge--missing,
+.fg-fact-billing-review-dialog .fg-company-type-badge--missing {
+	background: var(--fg-warning-tint, #fff7e0);
+	color: var(--fg-warning-dark, #b45309);
+}
+
+/* The explanatory line under the badge, section 11's own explicit
+"advertencia visual" -- shown only for a Customer never classified, in
+both review dialogs (never on the queue cards, to keep them compact). */
+.fg-fact-review-dialog .fg-fact-review-company-type-warning,
+.fg-fact-billing-review-dialog .fg-fact-billing-review-company-type-warning {
+	margin-top: 6px;
+	font-size: 0.76rem;
+	font-weight: 600;
+	color: var(--fg-warning-dark, #b45309);
+	max-width: 260px;
+}
+
+/* ------------------------------------------------------------------ */
 /* Paginación                                                           */
 /* ------------------------------------------------------------------ */
 .fg-facturacion .fg-fact-queue-pagination {
@@ -1180,7 +1230,9 @@
 
 .fg-fact-billing-review-dialog .fg-fact-billing-review-info-grid {
 	display: grid;
-	grid-template-columns: repeat(4, 1fr);
+	/* Commit 25.22 -- 4 -> 5 columns: "Empresa / Tipo" added to info_cards
+	 * (render_billing_review_dialog_body()), between Cliente and Asesora. */
+	grid-template-columns: repeat(5, 1fr);
 	gap: 12px;
 	margin-bottom: 18px;
 }

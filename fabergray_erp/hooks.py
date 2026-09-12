@@ -493,6 +493,10 @@ fixtures = [
 					"fg_billing_price_mode",
 					"fg_billing_price_adjusted_by",
 					"fg_billing_price_adjusted_on",
+					# Commit 25.22 -- Customer classification by empresa/tipo de
+					# facturación (IVA/integrandoMAS/ecoluminar/fabrigraySAS/
+					# amore). See CUSTOMER_COMPANY_TYPES in api/clientes.py.
+					"fg_customer_company_type",
 				],
 			]
 		],

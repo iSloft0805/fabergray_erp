@@ -84,6 +84,13 @@ class TestClientesWriteApi(IntegrationTestCase):
         cls.gestion_user = cls.world.user("fg222-gestion-clientes@example.com", ["Gestión de Clientes"])
 
     def _create(self, **fields):
+        # Commit 25.22 -- fg_customer_company_type is now mandatory in
+        # create_customer(); every pre-existing test in this file is
+        # exercising something else entirely (name/tax_id/customer_type/
+        # permissions), so this helper defaults it here rather than
+        # touching every call site -- the new mandatory-field behaviour
+        # itself is pinned by its own dedicated tests below.
+        fields.setdefault("fg_customer_company_type", "IVA")
         result = clientes_api.create_customer(fields)
         self.world.track_existing("Customer", result["name"])
         return result

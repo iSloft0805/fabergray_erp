@@ -137,6 +137,44 @@ def _sales_order_of(pick_list_doc):
 	return next((row.sales_order for row in pick_list_doc.get("locations") if row.sales_order), None)
 
 
+def _customer_company_types(customer_names):
+	"""Commit 25.22 -- bulk lookup of Customer.fg_customer_company_type
+	for exactly these customer names, one query (never one get_doc() per
+	Pick List/row) -- same "bulk read, never N+1" convention
+	get_invoicing_queue()'s own sales_order/item_count batching below
+	already established. Guarded by frappe.has_permission("Customer",
+	"read") (never assumed): Facturación's own Custom DocPerm already
+	grants it today, but this module never reads a doctype's fields
+	without checking, even via a raw frappe.get_list() call that itself
+	does not enforce row-level permission the way check_permission()
+	does -- a caller without it simply sees None everywhere, never a
+	PermissionError from an incidental enrichment lookup, same reasoning
+	api.clientes.get_customer_detail() already documents for its own
+	Contact/Address resolution.
+
+	Source of truth is always this live read against Customer -- never a
+	value copied onto Pick List/Sales Order/Quotation (section 12 of the
+	Commit 25.22 brief's own explicit "preferir fuente dinámica")."""
+	customer_names = [c for c in dict.fromkeys(customer_names) if c]
+	if not customer_names or not frappe.has_permission("Customer", "read"):
+		return {}
+	rows = frappe.get_list(
+		"Customer",
+		filters={"name": ["in", customer_names]},
+		fields=["name", "fg_customer_company_type"],
+	)
+	return {r.name: (r.fg_customer_company_type or None) for r in rows}
+
+
+def _customer_company_type(customer_name):
+	"""Single-Customer counterpart of _customer_company_types() above, for
+	the detail endpoints below that only ever resolve one Pick List/
+	Quotation (and therefore one Customer) at a time."""
+	if not customer_name or not frappe.has_permission("Customer", "read"):
+		return None
+	return frappe.db.get_value("Customer", customer_name, "fg_customer_company_type") or None
+
+
 @frappe.whitelist()
 def get_facturacion_summary():
 	"""KPI counts for the future Page Facturación's dashboard header.
@@ -635,7 +673,12 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 	batched Pick List Item query, scoped to only the page being returned
 	-- never one query/get_doc per Pick List (same "bulk read, never
 	N+1" rule api.jefe_bodega.get_pick_list_history() already
-	established for the equivalent problem)."""
+	established for the equivalent problem).
+
+	Commit 25.22 -- `fg_customer_company_type` per row, one batched
+	Customer lookup for the whole page (_customer_company_types()) --
+	`None` for a historical Customer never classified, the tray renders
+	that as "Sin clasificar"."""
 	_require_login()
 	frappe.has_permission("Pick List", "read", throw=True)
 
@@ -721,6 +764,10 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 			commercial_name_cache[sales_order] = root_commercial_name(sales_order)
 		return commercial_name_cache[sales_order]
 
+	# Commit 25.22 -- one batched Customer lookup for the whole page, never
+	# one per Pick List. See _customer_company_types()'s own docstring.
+	company_types = _customer_company_types([r.customer for r in page_rows])
+
 	results = []
 	for pl in page_rows:
 		sales_order = sales_order_by_pl.get(pl.name)
@@ -734,6 +781,7 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 				"commercial_name": _commercial_name(sales_order),
 				"customer": pl.customer,
 				"customer_name": pl.customer_name,
+				"fg_customer_company_type": company_types.get(pl.customer),
 				"item_count": total_items,
 				"total_qty": total_qtys.get(pl.name, 0.0),
 				"checked_items": checked_items,
@@ -758,7 +806,13 @@ def get_invoicing_detail(pick_list):
 	(see this module's own top docstring for why). No rate/amount/
 	grand_total/account anywhere in this response, unlike the legacy
 	get_pick_list_for_facturacion() above -- this is operational
-	facturación, not accounting, end to end."""
+	facturación, not accounting, end to end.
+
+	Commit 25.22 -- `fg_customer_company_type` resolved fresh from the
+	real Customer (`_customer_company_type()`), `None` for a historical
+	Customer never classified -- the modal renders that as "Sin
+	clasificar" with a visible warning, never a blocked/hidden view
+	(section 11 of the brief)."""
 	_require_login()
 	frappe.has_permission("Pick List", "read", throw=True)
 
@@ -788,6 +842,7 @@ def get_invoicing_detail(pick_list):
 		"commercial_name": root_commercial_name(sales_order) if sales_order else None,
 		"customer": pl.customer,
 		"customer_name": pl.customer_name,
+		"fg_customer_company_type": _customer_company_type(pl.customer),
 		"fg_invoicing_status": pl.fg_invoicing_status or FG_INVOICING_PENDIENTE,
 		"total_items": total_items,
 		"total_qty": sum(flt(i["qty"]) for i in items),

@@ -303,6 +303,9 @@ fabergray_erp.Clientes = class Clientes {
 					<span>${commercial}</span>
 					<span>${icon("file-text", "fg-icon-sm")} ${doc}</span>
 				</div>
+				<div class="fg-clientes-card-meta">
+					${render_company_type_badge(c.fg_customer_company_type)}
+				</div>
 				<div class="fg-clientes-card-actions">
 					<button type="button" class="fg-clientes-card-action fg-clientes-card-view" data-name="${frappe.utils.escape_html(
 						c.name
@@ -498,6 +501,10 @@ fabergray_erp.Clientes = class Clientes {
 						<div class="fg-clientes-detail-label">${__("Tipo de cliente")}</div>
 						<div>${frappe.utils.escape_html(d.customer_type || "—")}</div>
 					</div>
+					<div class="fg-clientes-detail-field">
+						<div class="fg-clientes-detail-label">${__("Empresa / Tipo de facturación")}</div>
+						<div>${render_company_type_badge(d.fg_customer_company_type)}</div>
+					</div>
 				</div>
 
 				<div class="fg-clientes-detail-section">
@@ -624,6 +631,30 @@ fabergray_erp.Clientes = class Clientes {
 					reqd: 1,
 					default: is_edit ? existing.customer_type || options[0] : "Company",
 				},
+				// Commit 25.22 -- "EMPRESA / TIPO DE FACTURACIÓN". Mandatory
+				// for a NEW customer (section 4 -- the primary_action itself
+				// never fires while empty, same guard DEVOLVER's own reason
+				// field already relies on elsewhere in this app; create_
+				// customer() re-validates server-side regardless). Optional
+				// on edit (section 6 -- a historical Customer must stay
+				// editable/visible without forcing this): blank stays a
+				// legal, selectable "no elegido todavía" option there, so
+				// its own options list gets a leading blank choice ONLY in
+				// that mode -- CREATE's own 5 options never include one,
+				// mirroring the exact "primera línea vacía" idiom already
+				// used for the underlying Custom Field's own Select options.
+				{
+					fieldtype: "Select",
+					fieldname: "fg_customer_company_type",
+					label: __("Empresa / Tipo de facturación"),
+					options: is_edit ? ["", ...CUSTOMER_COMPANY_TYPES] : CUSTOMER_COMPANY_TYPES,
+					reqd: is_edit ? 0 : 1,
+					default: is_edit ? existing.fg_customer_company_type || "" : "",
+					description:
+						is_edit && !existing.fg_customer_company_type
+							? __("Cliente histórico sin clasificar. Selecciona una opción.")
+							: undefined,
+				},
 			];
 
 			if (is_edit) {
@@ -710,16 +741,28 @@ fabergray_erp.Clientes = class Clientes {
 	}
 
 	// El único lugar donde se arma el payload de create_customer()/
-	// update_customer() -- exactamente estas 4 claves, nunca más. No hay
+	// update_customer() -- exactamente estas claves, nunca más. No hay
 	// forma de que este formulario envíe access_id_cliente o disabled:
 	// ningún campo del Dialog los produce, y esta función no los agrega.
+	// Commit 25.22 -- fg_customer_company_type se omite del payload por
+	// completo cuando queda en blanco (edición de un cliente histórico
+	// que el usuario decide no clasificar todavía): update_customer()
+	// solo cambia lo que efectivamente recibe, así que omitir la clave
+	// dejar el valor exactamente como está, nunca lo "limpia" a blanco.
+	// En creación el campo es reqd:1 (Dialog.get_values() nunca invoca
+	// primary_action mientras esté vacío), así que aquí siempre llega
+	// con un valor real de los 5.
 	_build_customer_payload(values) {
-		return {
+		const payload = {
 			customer_name: (values.customer_name || "").trim(),
 			access_nombre_comercial: (values.access_nombre_comercial || "").trim() || null,
 			tax_id: (values.tax_id || "").trim() || null,
 			customer_type: values.customer_type,
 		};
+		if (values.fg_customer_company_type) {
+			payload.fg_customer_company_type = values.fg_customer_company_type;
+		}
+		return payload;
 	}
 
 	// Commit 22.7 -- exactamente las claves que update_customer() acepta
@@ -755,6 +798,31 @@ fabergray_erp.Clientes = class Clientes {
 const PAGE_SIZE = 10;
 const INCOMPLETE_FETCH_CAP = 8000; // margen amplio sobre el total real de clientes (~4091) -- ver comentario en load_list()
 const DEFAULT_CUSTOMER_TYPES = ["Company", "Individual", "Partnership"];
+
+// Commit 25.22 -- mirrors CUSTOMER_COMPANY_TYPES in api/clientes.py exactly
+// (a closed business classification this app owns, never the doctype's
+// own live metadata -- unlike customer_type/DEFAULT_CUSTOMER_TYPES above,
+// deliberately NOT read from frappe.get_meta()). Validated server-side
+// regardless of what this copy sends -- same "no confiar en el cliente"
+// reasoning PRICE_MODE_DISCOUNTS's own JS mirror in facturacion.js
+// documents for its own closed set.
+const CUSTOMER_COMPANY_TYPES = ["IVA", "integrandoMAS", "ecoluminar", "fabrigraySAS", "amore"];
+
+// Commit 25.22 -- "EMPRESA / TIPO DE FACTURACIÓN" badge, shared by the
+// list card, the detail view, and (via facturacion.js's own identical
+// copy) every place a Customer appears in Página Facturación.
+// `company_type` is whatever get_customer_detail()/search_customers()
+// already resolved from Customer.fg_customer_company_type -- this
+// function never guesses/defaults a value, only renders it. Falsy
+// (null/""/undefined -- a historical Customer never classified through
+// this app) renders "SIN CLASIFICAR" in the warning modifier, never
+// blank/hidden (section 6's own explicit "no bloquear la visualización").
+function render_company_type_badge(company_type) {
+	if (!company_type) {
+		return `<span class="fg-badge fg-badge--company-type-missing">${__("Sin clasificar")}</span>`;
+	}
+	return `<span class="fg-badge fg-badge--company-type">${frappe.utils.escape_html(company_type)}</span>`;
+}
 
 function paginate(items, page, page_size) {
 	const total = items.length;

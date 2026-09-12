@@ -326,7 +326,9 @@ fabergray_erp.Facturacion = class Facturacion {
 					<div class="fg-fact-billing-card-id">#${frappe.utils.escape_html(q.name)}</div>
 					<span class="fg-badge fg-badge--billing-pending">${__("Pendiente de Facturación")}</span>
 				</div>
-				<div class="fg-fact-billing-card-customer">${icon("user", "fg-icon-sm")} ${customer_label}</div>
+				<div class="fg-fact-billing-card-customer">${icon("user", "fg-icon-sm")} ${customer_label} ${render_company_type_badge(
+			q.fg_customer_company_type
+		)}</div>
 				<div class="fg-fact-billing-card-meta">
 					<span>${icon("user-check", "fg-icon-sm")} ${__("Asesora")}: ${asesora_label}</span>
 					<span>${icon("calendar", "fg-icon-sm")} ${frappe.datetime.str_to_user(q.transaction_date)}</span>
@@ -485,7 +487,9 @@ fabergray_erp.Facturacion = class Facturacion {
 					<div class="fg-fact-queue-card-id">${__("PEDIDO")} #${frappe.utils.escape_html(pedido_label)}</div>
 					${status_html}
 				</div>
-				<div class="fg-fact-queue-card-customer">${icon("user", "fg-icon-sm")} ${customer_label}</div>
+				<div class="fg-fact-queue-card-customer">${icon("user", "fg-icon-sm")} ${customer_label} ${render_company_type_badge(
+			r.fg_customer_company_type
+		)}</div>
 				<div class="fg-fact-queue-card-meta">
 					<span class="fg-fact-queue-card-picklist">${icon("clipboard-list", "fg-icon-sm")} ${frappe.utils.escape_html(
 			r.name
@@ -617,6 +621,15 @@ fabergray_erp.Facturacion = class Facturacion {
 		const customer_label = frappe.utils.escape_html(d.customer_name || d.customer || __("Sin cliente"));
 		const is_facturado = d.fg_invoicing_status === "Facturado";
 		const pct = review_progress_pct(d);
+		// Commit 25.22, section 11 -- the one legitimate visible warning:
+		// never a blocked/hidden view, just a clearly-labelled "Sin
+		// clasificar" plus this explanatory line so it reads as actionable,
+		// not as a silent gap.
+		const company_type_warning_html = d.fg_customer_company_type
+			? ""
+			: `<div class="fg-fact-review-company-type-warning">${__(
+					"Este cliente no tiene Empresa / Tipo de facturación definido. Actualízalo en Gestión de Clientes antes de facturar."
+			  )}</div>`;
 
 		const items_html = (d.items || []).length
 			? `<div class="fg-fact-review-table">
@@ -644,6 +657,11 @@ fabergray_erp.Facturacion = class Facturacion {
 							<div class="fg-fact-review-info-item">
 								<div class="fg-fact-review-info-label">${__("Cliente")}</div>
 								<div class="fg-fact-review-info-value">${customer_label}</div>
+							</div>
+							<div class="fg-fact-review-info-item">
+								<div class="fg-fact-review-info-label">${__("Empresa / Tipo")}</div>
+								<div class="fg-fact-review-info-value">${render_company_type_badge(d.fg_customer_company_type)}</div>
+								${company_type_warning_html}
 							</div>
 							<div class="fg-fact-review-info-item">
 								<div class="fg-fact-review-info-label">${__("Pick List")}</div>
@@ -1015,9 +1033,21 @@ fabergray_erp.Facturacion = class Facturacion {
 		const asesora_label = frappe.utils.escape_html(d.owner_fullname || d.owner || "—");
 		const total_label = frappe.format(d.grand_total, { fieldtype: "Currency" });
 		const price_list_label = frappe.utils.escape_html((d.items && d.items[0] && d.items[0].price_list) || "—");
+		// Commit 25.22, section 9 -- classification of the Customer behind
+		// this Cotización, in the same header as "Cliente". Never modifies
+		// pricing/billing review -- display only, exactly like every other
+		// info_card in this array.
+		const company_type_value =
+			render_company_type_badge(d.fg_customer_company_type) +
+			(d.fg_customer_company_type
+				? ""
+				: `<div class="fg-fact-billing-review-company-type-warning">${__(
+						"Este cliente no tiene Empresa / Tipo de facturación definido. Actualízalo en Gestión de Clientes antes de facturar."
+				  )}</div>`);
 
 		const info_cards = [
 			{ label: __("Cliente"), value: customer_label },
+			{ label: __("Empresa / Tipo"), value: company_type_value },
 			{ label: __("Asesora"), value: asesora_label },
 			{ label: __("Fecha"), value: frappe.datetime.str_to_user(d.transaction_date) },
 			{ label: __("Total"), value: total_label },
@@ -1513,6 +1543,31 @@ function render_search_empty_html() {
 
 function icon(name, extra_class) {
 	return `<svg class="fg-icon ${extra_class || ""}"><use href="#icon-${name}"></use></svg>`;
+}
+
+// Commit 25.22 -- "EMPRESA DEL CLIENTE" classification badge, shared by
+// every place in this Page a Customer appears: both queue cards
+// (render_queue_card()/render_billing_queue_card()) and both review
+// dialogs (render_review_dialog_body()/render_billing_review_dialog_
+// body()). `company_type` is whatever the server already resolved
+// (get_invoicing_queue()/get_invoicing_detail()/get_pending_billing_
+// review_quotations()/get_quotation_billing_detail(), all four straight
+// off Customer.fg_customer_company_type -- section 10's own "backend
+// debe resolverlo desde el Customer real") -- this helper never guesses/
+// defaults a value itself, only renders it. Falsy (null/""/undefined --
+// a historical Customer never classified) renders "SIN CLASIFICAR" in
+// the warning modifier, never blank/hidden (section 11's own explicit
+// "no bloquear la visualización... mostrar SIN CLASIFICAR y una
+// advertencia visual"). Deliberately NOT reusing `.fg-badge` as-is here
+// without its own CSS: see facturacion.css's own comment on
+// `.fg-company-type-badge` for why (the two review dialogs render
+// outside `.fg-shell`, the exact scoping trap Hotfix 25.20.4's own
+// header comment documents for `.fg-btn`).
+function render_company_type_badge(company_type) {
+	if (!company_type) {
+		return `<span class="fg-company-type-badge fg-company-type-badge--missing">${__("Sin clasificar")}</span>`;
+	}
+	return `<span class="fg-company-type-badge">${frappe.utils.escape_html(company_type)}</span>`;
 }
 
 // Commit 25.15 review fix, section 2/4 -- NEVER builds the `/printview`

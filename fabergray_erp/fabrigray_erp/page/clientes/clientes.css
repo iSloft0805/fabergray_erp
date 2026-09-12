@@ -239,6 +239,23 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* Commit 25.22 -- "Empresa / Tipo de facturación" badge. Safe to reuse   */
+/* the shared .fg-badge shape (fg_shell.css, .fg-shell .fg-badge) here -- */
+/* every card/detail view in this Page renders inside .fg-shell          */
+/* .fg-clientes, never inside a frappe.ui.Dialog (only color modifiers   */
+/* needed, same pattern as fg-badge--clientes-activo/-inactivo above).   */
+/* ------------------------------------------------------------------ */
+.fg-clientes .fg-badge--company-type {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-clientes .fg-badge--company-type-missing {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+/* ------------------------------------------------------------------ */
 /* Pagination                                                            */
 /* ------------------------------------------------------------------ */
 .fg-clientes .fg-clientes-pagination {

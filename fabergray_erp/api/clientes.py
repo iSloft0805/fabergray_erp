@@ -21,10 +21,11 @@ payload, filtered through a single shared allowlist helper
 (_parse_customer_payload(), the same role _validate_and_build_item_rows()
 plays there) shared by create and update -- one security boundary, not
 two. Allowlist is exactly {customer_name, access_nombre_comercial, tax_id,
-customer_type} -- access_id_cliente (the Fase 1 migration's own
-idempotency key) and disabled (its own narrower, dedicated endpoint below)
-are never in it, so sending either raises immediately, same as any other
-disallowed key -- never silently dropped, never silently ignored.
+customer_type, fg_customer_company_type (Commit 25.22)} -- access_id_cliente
+(the Fase 1 migration's own idempotency key) and disabled (its own
+narrower, dedicated endpoint below) are never in it, so sending either
+raises immediately, same as any other disallowed key -- never silently
+dropped, never silently ignored.
 customer_type is validated against the Customer doctype's own live
 `options` (frappe.get_meta(), not a hardcoded copy that could drift),
 defaulting to "Company" only when the caller omits it from
@@ -34,7 +35,26 @@ Scope, exactly as approved in the Fase 2 audit: Customer only (native
 doctype -- no custom Client doctype, no delete endpoint). Address/Contact
 are surfaced only as far as the primary links Customer itself already
 stores (customer_primary_contact/customer_primary_address) -- no
-Address/Contact list or CRUD here, deferred as approved."""
+Address/Contact list or CRUD here, deferred as approved.
+
+Commit 25.22 -- "Empresa / Tipo de facturación" classification
+(`fg_customer_company_type`, Custom Field on Customer). Unlike
+`customer_type` (validated against the doctype's own LIVE `options`,
+Frappe's native Select), this is validated against `CUSTOMER_COMPANY_
+TYPES` below -- a hardcoded, closed set this app owns, same reasoning
+`PRICE_MODE_DISCOUNTS` in api/cotizaciones.py already established for its
+own closed set: these 5 values are a business classification this app
+defines, not a doctype's own live metadata that could be extended
+elsewhere in Desk. Mandatory for NEW Customers (enforced here in
+create_customer(), never via the Custom Field's own `reqd` -- thousands
+of historical Customers, and every OTHER way a Customer can be created
+in this system (`fixtures.py`'s own test helper, core Desk, a future
+migration), must stay able to insert/save a Customer without it; the
+mandatory rule is this ONE whitelisted entry point's own business rule,
+not a doctype-wide constraint). Optional on update_customer() -- a
+historical Customer may be classified at any time, but this endpoint
+never forces it and never clears it back to blank once set (no
+"un-classify" operation exists here, unasked-for)."""
 
 import frappe
 from frappe import _
@@ -46,7 +66,27 @@ from erpnext.selling.doctype.customer.customer import parse_full_name
 
 from fabergray_erp.api.bodega import _require_login
 
-_ALLOWED_CUSTOMER_FIELDS = {"customer_name", "access_nombre_comercial", "tax_id", "customer_type"}
+_ALLOWED_CUSTOMER_FIELDS = {
+    "customer_name",
+    "access_nombre_comercial",
+    "tax_id",
+    "customer_type",
+    "fg_customer_company_type",
+}
+
+# Commit 25.22 -- the ONE closed set "Empresa / Tipo de facturación" may
+# ever be. Mirrored (never imported, same "each Page/module stays
+# independent" convention as PRICE_MODE_DISCOUNTS's own JS mirror in
+# facturacion.js) by CUSTOMER_COMPANY_TYPES in page/clientes/clientes.js
+# -- validated HERE regardless of whatever that copy sent, exactly like
+# PRICE_MODE_DISCOUNTS's own docstring already documents for price modes.
+CUSTOMER_COMPANY_TYPES = (
+    "IVA",
+    "integrandoMAS",
+    "ecoluminar",
+    "fabrigraySAS",
+    "amore",
+)
 
 # Commit 22.7 -- Contact/Address, mismo boundary que _ALLOWED_CUSTOMER_FIELDS:
 # exactamente estas claves, cualquier otra se rechaza (nunca se ignora en
@@ -71,6 +111,9 @@ _LIST_FIELDS = [
     "tax_id",
     "disabled",
     "customer_primary_contact",
+    # Commit 25.22 -- section 13's own "en ficha/lista de cliente mostrar
+    # un badge".
+    "fg_customer_company_type",
 ]
 
 
@@ -216,6 +259,11 @@ def get_customer_detail(name):
         "customer_group": doc.customer_group,
         "territory": doc.territory,
         "disabled": doc.disabled,
+        # Commit 25.22 -- `None` (never an invented value) for every
+        # Customer never classified through this app -- the UI renders
+        # that as "Sin clasificar", same convention as
+        # get_quotation_billing_detail()'s own `fg_billing_price_mode`.
+        "fg_customer_company_type": doc.fg_customer_company_type or None,
         "access_id_cliente": doc.access_id_cliente,
         "creation": doc.creation,
         "contact": contact,
@@ -246,6 +294,24 @@ def _validate_customer_type(customer_type):
         )
 
 
+def _validate_customer_company_type(fg_customer_company_type):
+    """Commit 25.22 -- against the hardcoded CUSTOMER_COMPANY_TYPES, NEVER
+    the Customer doctype's own live `fg_customer_company_type` Select
+    options (unlike _validate_customer_type() above) -- this is this
+    app's own closed business classification, not native doctype
+    metadata. Rejects an empty string explicitly: `_parse_customer_
+    payload()` only calls this when the key is present and non-None, so
+    an explicit "" here means the caller tried to clear the
+    classification, which neither create_customer() (mandatory) nor
+    update_customer() (no un-classify operation) ever allows."""
+    if fg_customer_company_type not in CUSTOMER_COMPANY_TYPES:
+        frappe.throw(
+            _("Empresa / Tipo de facturación inválida: {0}. Valores permitidos: {1}").format(
+                fg_customer_company_type, ", ".join(CUSTOMER_COMPANY_TYPES)
+            )
+        )
+
+
 def _parse_customer_payload(customer):
     """Shared by create_customer()/update_customer() -- the one place a
     Customer field payload from the client is parsed and filtered.
@@ -264,6 +330,9 @@ def _parse_customer_payload(customer):
 
     if payload.get("customer_type") is not None:
         _validate_customer_type(payload["customer_type"])
+
+    if payload.get("fg_customer_company_type") is not None:
+        _validate_customer_company_type(payload["fg_customer_company_type"])
 
     return payload
 
@@ -293,19 +362,31 @@ def create_customer(customer):
     invalid value is rejected, never silently replaced). access_id_cliente
     is never set here -- a Customer created through this endpoint is, by
     definition, not one of the Access-migrated records, so it stays null,
-    exactly as approved."""
+    exactly as approved.
+
+    Commit 25.22 -- fg_customer_company_type is mandatory HERE (never via
+    the Custom Field's own `reqd`, see this module's own top docstring for
+    why): a Customer created through Página Clientes must always leave
+    this endpoint already classified. Checked AFTER _parse_customer_
+    payload() (so an invalid value is still reported as "inválida", never
+    masked as "faltante") and AFTER the customer_name check above it
+    mirrors (both are this endpoint's own business rules, never the
+    doctype's)."""
     _require_login()
     frappe.has_permission("Customer", "create", throw=True)
 
     payload = _parse_customer_payload(customer)
     if not payload.get("customer_name"):
         frappe.throw(_("customer_name es obligatorio."))
+    if not payload.get("fg_customer_company_type"):
+        frappe.throw(_("Empresa / Tipo de facturación es obligatoria para un cliente nuevo."))
 
     doc = frappe.new_doc("Customer")
     doc.customer_name = payload["customer_name"]
     doc.customer_type = payload.get("customer_type") or "Company"
     doc.access_nombre_comercial = payload.get("access_nombre_comercial")
     doc.tax_id = payload.get("tax_id")
+    doc.fg_customer_company_type = payload["fg_customer_company_type"]
     doc.insert()  # real permission, no ignore_permissions
 
     return {"name": doc.name}
@@ -483,6 +564,8 @@ def update_customer(name, customer=None, contact=None, address=None):
         doc.tax_id = payload["tax_id"]
     if "customer_type" in payload:
         doc.customer_type = payload["customer_type"]  # already validated above
+    if "fg_customer_company_type" in payload:
+        doc.fg_customer_company_type = payload["fg_customer_company_type"]  # already validated above
 
     _apply_contact_payload(doc, contact_payload)
     _apply_address_payload(doc, address_payload)
