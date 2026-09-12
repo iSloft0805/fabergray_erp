@@ -1290,21 +1290,71 @@
 	color: #fff;
 }
 
+/* Hotfix 25.20.4 -- ROOT CAUSE of "APLICAR PRECIOS queda deshabilitado". */
+/* The button is rendered with `class="fg-btn fg-btn--solid-primary ..."`, */
+/* but EVERY `.fg-btn` rule lives in public/css/fg_shell.css scoped under  */
+/* `.fg-shell` -- and this modal is appended straight to <body>, outside   */
+/* `.fg-shell` entirely (the exact same scoping trap this file's own       */
+/* Commit 25.13.1 header comment above already documents for the rest of   */
+/* this dialog, just never caught for `.fg-btn`). So the button inherited  */
+/* NO background, NO color, NO border and NO cursor: it painted as bare    */
+/* browser-default chrome -- flat grey, no hover, no pointer -- i.e.       */
+/* visually identical to a disabled button, while actually being enabled   */
+/* and clickable. The `--fg-*` custom properties are declared on           */
+/* `.fg-shell` too and do not reach here either, which is why every rule   */
+/* in this dialog carries a literal fallback; these do the same.           */
+/*                                                                         */
+/* Second half of the same bug: the disabled rule below used to be written */
+/* `.fg-fact-billing-apply-price-btn.disabled` -- a CLASS selector -- while */
+/* facturacion.js emits the `disabled` ATTRIBUTE. It therefore never       */
+/* matched, so a genuinely disabled button got no dimming either and the   */
+/* two states were indistinguishable. Both `:disabled` and `.disabled` are */
+/* covered now.                                                            */
 .fg-fact-billing-review-dialog .fg-fact-billing-apply-price-btn {
 	display: inline-flex;
 	align-items: center;
+	justify-content: center;
 	gap: 6px;
 	height: 38px;
 	padding: 0 16px;
+	border: 1.5px solid var(--fg-primary, #2b7be4);
 	border-radius: 10px;
+	background: var(--fg-primary, #2b7be4);
+	color: #fff;
 	font-weight: 700;
 	font-size: 0.82rem;
 	white-space: nowrap;
+	cursor: pointer;
+	transition: background 160ms ease, opacity 160ms ease;
 }
 
+.fg-fact-billing-review-dialog .fg-fact-billing-apply-price-btn:hover:not(:disabled):not(.disabled) {
+	background: var(--fg-primary-dark, #1e63c4);
+	border-color: var(--fg-primary-dark, #1e63c4);
+}
+
+.fg-fact-billing-review-dialog .fg-fact-billing-apply-price-btn:disabled,
 .fg-fact-billing-review-dialog .fg-fact-billing-apply-price-btn.disabled {
 	opacity: 0.5;
+	cursor: not-allowed;
 	pointer-events: none;
+}
+
+/* Same scoping trap, same fix, for the 5 segmented mode buttons: they are */
+/* disabled too while an apply is in flight (section 11), and that state   */
+/* must read as disabled rather than merely inert.                         */
+.fg-fact-billing-review-dialog .fg-fact-billing-pricemode-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+	pointer-events: none;
+}
+
+/* Why APLICAR PRECIOS is disabled, stated next to it -- the one legitimate */
+/* "nothing would change" case (Hotfix 25.20.4).                           */
+.fg-fact-billing-review-dialog .fg-fact-billing-review-pricemode-applied {
+	font-size: 0.76rem;
+	font-weight: 700;
+	color: var(--fg-success-dark, #197a4b);
 }
 
 .fg-fact-billing-review-dialog .fg-fact-billing-review-pricemode-preview {

@@ -1212,6 +1212,98 @@ def _resolve_billing_review_warehouse(item_code, company, line_warehouse=None):
     return None
 
 
+def _expected_price_mode_rate(reference_rate, price_mode, row):
+    """Hotfix 25.20.4 -- the `rate` a Quotation Item WOULD end up carrying
+    if `apply_quotation_price_mode(price_mode)` ran right now, computed
+    with exactly the same two-step arithmetic and the same per-field
+    precisions ERPNext's own `calculate_item_rate()` uses (confirmed by
+    reading `erpnext/controllers/taxes_and_totals.py` directly:
+    `discount_amount = flt(rate_with_margin * discount_percentage / 100.0,
+    precision("discount_amount"))`, then `rate = flt(rate_with_margin -
+    discount_amount, precision("rate"))`, with `rate_with_margin ==
+    price_list_rate` for a fresh row that carries no margin/pricing rule
+    -- exactly the rows `apply_quotation_price_mode()` builds).
+
+    Reimplementing the formula here (rather than calling ERPNext) is
+    deliberate and safe BECAUSE it is only ever used to answer a
+    yes/no question -- "would applying this mode change anything?"
+    (`has_price_mode_changes()` below). It never writes a rate anywhere:
+    `apply_quotation_price_mode()` still sets ONLY `discount_percentage`
+    and lets ERPNext derive every rate natively, unchanged by this
+    hotfix.
+
+    The base is ALWAYS `reference_rate` -- the CURRENT Item Price on the
+    Quotation's own `selling_price_list` -- never the line's already
+    discounted `rate`, so a discount can never compound on a previous one
+    (Commit 25.15, section 7's own rule, the same base
+    `apply_quotation_price_mode()` itself relies on)."""
+    reference_rate = flt(reference_rate)
+    discount_percentage = PRICE_MODE_DISCOUNTS[price_mode]
+    discount_amount = flt(reference_rate * discount_percentage / 100.0, row.precision("discount_amount"))
+    return flt(reference_rate - discount_amount, row.precision("rate"))
+
+
+def has_price_mode_changes(qtn, price_mode, reference_rates=None):
+    """Hotfix 25.20.4 -- THE single source of truth for "would applying
+    `price_mode` to `qtn` produce a REAL change in the persisted prices?",
+    the one question "APLICAR PRECIOS" is enabled/disabled by.
+
+    Compares, per line, against the DOCUMENT's own persisted economic
+    reality -- never against the `fg_billing_price_mode` audit label.
+    That label records the last explicit `apply_quotation_price_mode()`
+    call and can disagree with the rates (a Quotation amended/re-priced
+    another way afterwards, a label written before an Item Price moved, a
+    historical document this mechanism never touched). When the label and
+    the rates disagree, THE RATES WIN: a Quotation stamped "Descuento
+    25%" whose lines still carry the undiscounted `rate` has NOT had 25%
+    applied, and Facturación must still be able to apply it.
+
+    Three persisted fields are compared, all three of which
+    `apply_quotation_price_mode()` really would rewrite:
+
+      * `rate` vs `_expected_price_mode_rate()` -- the economic number;
+      * `price_list_rate` vs the CURRENT `reference_rate` -- a line whose
+        stored base drifted from the live Item Price would genuinely be
+        rewritten by an apply, even if `rate` happened to match;
+      * `discount_percentage` vs `PRICE_MODE_DISCOUNTS[price_mode]`.
+
+    Every comparison is rounded to the field's own Frappe/ERPNext
+    precision first (`row.precision(...)`) -- never a raw float equality
+    on values that went through a division.
+
+    Returns False (nothing to apply) when a line has no reference price
+    on `qtn.selling_price_list`: `apply_quotation_price_mode()` refuses
+    that whole call outright, naming the item, so enabling the button
+    there would only offer a guaranteed error.
+    """
+    if price_mode not in PRICE_MODE_DISCOUNTS:
+        return False
+    if not qtn.items:
+        return False
+
+    if reference_rates is None:
+        reference_rates = _reference_selling_rates([row.item_code for row in qtn.items], qtn.selling_price_list)
+
+    discount_percentage = PRICE_MODE_DISCOUNTS[price_mode]
+
+    for row in qtn.items:
+        reference_rate = reference_rates.get(row.item_code)
+        if not reference_rate:
+            return False
+
+        rate_precision = row.precision("rate")
+        if flt(row.rate, rate_precision) != _expected_price_mode_rate(reference_rate, price_mode, row):
+            return True
+        if flt(row.price_list_rate, rate_precision) != flt(reference_rate, rate_precision):
+            return True
+
+        discount_precision = row.precision("discount_percentage")
+        if flt(row.discount_percentage, discount_precision) != flt(discount_percentage, discount_precision):
+            return True
+
+    return False
+
+
 @frappe.whitelist()
 def get_quotation_billing_detail(name):
     """Commit 25.13, sections 7/8 -- the full per-line review Facturación
@@ -1246,6 +1338,16 @@ def get_quotation_billing_detail(name):
     Price, never a second, unrelated list. `price_list` is returned
     per-line so Facturación always knows exactly what was compared against
     what.
+
+    Hotfix 25.20.4 adds `can_apply_price_mode` (bool) and
+    `price_mode_changes` (`{price_mode: bool}`, one entry per
+    `PRICE_MODE_DISCOUNTS` key) to the response -- the single, server-side
+    answer to "may APLICAR PRECIOS be pressed for this mode?".  See
+    `has_price_mode_changes()` above for why that answer is derived from
+    the persisted `rate`/`price_list_rate`/`discount_percentage` and never
+    from the `fg_billing_price_mode` audit label.  Still strictly
+    read-only: computing them touches nothing but the same
+    `_reference_selling_rates()` lookup this function already did.
     """
     _facturacion_billing_review_gate()
 
@@ -1255,6 +1357,11 @@ def get_quotation_billing_detail(name):
 
     item_codes = [row.item_code for row in qtn.items]
     reference_rates = _reference_selling_rates(item_codes, qtn.selling_price_list)
+
+    # Hotfix 25.20.4 -- same eligibility apply_quotation_price_mode() itself
+    # enforces, re-derived from the document, never from whatever the tray
+    # last showed.
+    can_apply_price_mode = qtn.docstatus == 1 and qtn.get("fg_billing_review_status") == BILLING_REVIEW_PENDING
 
     items = []
     for row in qtn.items:
@@ -1272,6 +1379,22 @@ def get_quotation_billing_detail(name):
                 "rate": row.rate,
                 "amount": row.amount,
                 "reference_rate": reference_rate,
+                # Hotfix 25.20.4 AUDIT (brief section 8) -- SEMANTICS
+                # DELIBERATELY UNCHANGED. `rate_difference` is
+                # "Actual - Base": how far the rate ALREADY PERSISTED on
+                # this line sits from the CURRENT Item Price on the
+                # Quotation's own selling_price_list. It is NOT, and never
+                # was, "Actual - Ajustado" (the client-side preview of a
+                # mode the user is merely hovering over -- that preview is
+                # not persisted, so the server has nothing to difference
+                # it against). $0,00 next to a -25% preview is therefore
+                # CORRECT, not a bug: it says "this line is still quoted
+                # at exactly catalog price" -- which is precisely why
+                # APLICAR PRECIOS must be enabled there. The column header
+                # in facturacion.js is relabelled "Dif. vs base" by this
+                # hotfix so the number can no longer be misread as
+                # belonging to the "Ajustado" column beside it; the
+                # formula itself is untouched.
                 "rate_difference": (flt(row.rate) - flt(reference_rate)) if reference_rate is not None else None,
                 "price_list": qtn.selling_price_list,
                 "warehouse": warehouse,
@@ -1300,6 +1423,25 @@ def get_quotation_billing_detail(name):
         "fg_billing_price_mode": qtn.fg_billing_price_mode or None,
         "fg_billing_price_adjusted_by": qtn.fg_billing_price_adjusted_by or None,
         "fg_billing_price_adjusted_on": qtn.fg_billing_price_adjusted_on or None,
+        # Hotfix 25.20.4 -- everything "APLICAR PRECIOS" needs to decide
+        # enabled/disabled, computed HERE (server-side, from the document's
+        # own persisted rates) so the browser never has to re-derive an
+        # economic truth from a preview. `can_apply_price_mode` is the
+        # eligibility half (submitted + still Pendiente de Facturación --
+        # the exact same two conditions apply_quotation_price_mode() itself
+        # re-validates; the role half is already enforced by this
+        # function's own _facturacion_billing_review_gate() above, nobody
+        # else ever gets this payload at all). `price_mode_changes` is the
+        # "would it actually change anything" half, per mode --
+        # has_price_mode_changes()'s own answer, never a comparison against
+        # the `fg_billing_price_mode` audit label above. The frontend only
+        # reads these; it never decides authorization, and
+        # apply_quotation_price_mode() re-validates everything regardless.
+        "can_apply_price_mode": can_apply_price_mode,
+        "price_mode_changes": {
+            mode: (can_apply_price_mode and has_price_mode_changes(qtn, mode, reference_rates))
+            for mode in PRICE_MODE_DISCOUNTS
+        },
         "item_count": len(qtn.items),
         "total_qty": qtn.total_qty,
         # Commit 25.14, section 4/10 -- native Quotation totals, straight

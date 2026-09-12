@@ -81,6 +81,14 @@ fabergray_erp.Facturacion = class Facturacion {
 		// preview state until "APLICAR PRECIOS" is pressed -- never sent
 		// to the server just by changing this.
 		this._billing_review_selected_mode = null;
+		// Hotfix 25.20.4, section 11 -- true only while an
+		// apply_quotation_price_mode() call is actually in flight. Keeps
+		// APLICAR PRECIOS (and the 5 mode buttons) disabled for exactly
+		// that window so a double click can never fire two cancel+amend
+		// cycles; cleared in apply_billing_price_mode()'s own `.finally()`
+		// on BOTH the success and the error path, so a server error can
+		// never leave the button permanently dead.
+		this._billing_review_applying = false;
 
 		this.$app = $('<div class="fg-shell fg-facturacion">').appendTo(this.page.body);
 		this.render_shell();
@@ -943,6 +951,7 @@ fabergray_erp.Facturacion = class Facturacion {
 		this._billing_review_quotation = name;
 		this._billing_review_detail = null;
 		this._billing_review_selected_mode = null;
+		this._billing_review_applying = false;
 
 		const dialog = new frappe.ui.Dialog({
 			title: __("Revisar cotización"),
@@ -1044,7 +1053,7 @@ fabergray_erp.Facturacion = class Facturacion {
 					<span>${__("Base")}</span>
 					<span>${__("Actual")}</span>
 					<span>${__("Ajustado")}</span>
-					<span>${__("Diferencia")}</span>
+					<span>${__("Dif. vs base")}</span>
 					<span>${__("Disponibilidad ERP")}</span>
 				</div>
 				<div class="fg-fact-billing-review-tbody">${rows_html}</div>
@@ -1059,6 +1068,32 @@ fabergray_erp.Facturacion = class Facturacion {
 		});
 	}
 
+	// Hotfix 25.20.4 -- THE enable/disable rule for "APLICAR PRECIOS", in
+	// one place. Reads the SERVER's own per-mode answer
+	// (`price_mode_changes`, computed by has_price_mode_changes() in
+	// api/cotizaciones.py from the persisted rate/price_list_rate/
+	// discount_percentage of every line) -- never re-derived from this
+	// file's own preview multipliers, and never from the
+	// `fg_billing_price_mode` audit label, which can disagree with the
+	// rates and must never win over them.
+	//
+	// Returns false (button disabled) ONLY for the three cases the brief
+	// allows: a call is already in flight (section 11), the Quotation is
+	// not eligible by state/permission (`can_apply_price_mode`, the same
+	// "submitted + Pendiente de Facturación" apply_quotation_price_mode()
+	// re-validates server-side regardless), or applying the selected mode
+	// would not change a single persisted price. `price_mode_changes`
+	// missing entirely (an older cached payload) falls back to "enabled
+	// whenever a mode is selected" -- the pre-hotfix behaviour, never a
+	// silently dead button.
+	can_apply_billing_price_mode(d, selected_mode) {
+		if (!d || !selected_mode) return false;
+		if (this._billing_review_applying) return false;
+		if (d.can_apply_price_mode === false) return false;
+		if (!d.price_mode_changes) return true;
+		return !!d.price_mode_changes[selected_mode];
+	}
+
 	// Commit 25.14 -- "PRECIOS AJUSTADOS" segmented control + live preview
 	// summary. Purely a render helper (called from render_billing_review_
 	// dialog_body() above) -- no state of its own, no server call.
@@ -1067,7 +1102,16 @@ fabergray_erp.Facturacion = class Facturacion {
 	// open (detect_billing_price_mode()) or nothing has been explicitly
 	// clicked yet; APLICAR PRECIOS stays disabled in that state (never
 	// lets a click apply "nothing").
+	// Hotfix 25.20.4 -- the button is no longer enabled merely because a
+	// mode is selected: can_apply_billing_price_mode() above decides, and
+	// whenever it says no BECAUSE the prices already match the selected
+	// mode, the preview line says so explicitly ("Los precios ya
+	// corresponden a esta modalidad.") -- a disabled button with no reason
+	// next to it is exactly what made this bug unreadable in the first
+	// place.
 	render_billing_price_mode_section(d, selected_mode) {
+		const can_apply = this.can_apply_billing_price_mode(d, selected_mode);
+		const applying = !!this._billing_review_applying;
 		const options = [
 			{ mode: "FULL", label: __("Precio completo") },
 			{ mode: "DISCOUNT_10", label: __("-10%") },
@@ -1079,7 +1123,7 @@ fabergray_erp.Facturacion = class Facturacion {
 				(o) => `
 					<button type="button" class="fg-fact-billing-pricemode-btn ${
 						selected_mode === o.mode ? "is-active" : ""
-					}" data-mode="${o.mode}">
+					}" data-mode="${o.mode}" ${applying ? "disabled" : ""}>
 						${o.label}
 					</button>
 				`
@@ -1094,12 +1138,23 @@ fabergray_erp.Facturacion = class Facturacion {
 						(sum, item) => sum + flt(item.reference_rate) * multiplier * flt(item.qty),
 						0
 					);
+					// Only "ya aplicado" explains a disabled button here;
+					// an ineligible Quotation or an in-flight call are both
+					// already obvious from the rest of the dialog.
+					const already_applied =
+						!can_apply && !applying && d.can_apply_price_mode !== false && !!d.price_mode_changes;
+					const reason_html = already_applied
+						? `<span class="fg-fact-billing-review-pricemode-applied">${__(
+								"Los precios ya corresponden a esta modalidad."
+						  )}</span>`
+						: "";
 					return `
 						<div class="fg-fact-billing-review-pricemode-preview">
 							<span>${__("Subtotal estimado")}: <strong>${frappe.format(preview_subtotal, {
 						fieldtype: "Currency",
 					})}</strong></span>
 							<span class="fg-fact-billing-review-pricemode-note">${__("Impuestos se recalculan al aplicar.")}</span>
+							${reason_html}
 						</div>
 					`;
 			  })()
@@ -1111,9 +1166,9 @@ fabergray_erp.Facturacion = class Facturacion {
 				<div class="fg-fact-billing-review-pricemode-row">
 					<div class="fg-fact-billing-review-pricemode-options">${options}</div>
 					<button type="button" class="fg-btn fg-btn--solid-primary fg-fact-billing-apply-price-btn" ${
-						selected_mode ? "" : "disabled"
+						can_apply ? "" : "disabled"
 					}>
-						${icon("tag", "fg-icon-sm")} ${__("APLICAR PRECIOS")}
+						${icon("tag", "fg-icon-sm")} ${applying ? __("APLICANDO...") : __("APLICAR PRECIOS")}
 					</button>
 				</div>
 				${state_html}
@@ -1156,6 +1211,19 @@ fabergray_erp.Facturacion = class Facturacion {
 	// explicit "Sin precio de referencia" sentence (never a bare "N/D"),
 	// diff==0 is styled neutral/success, otherwise visibly colored -- never
 	// blocking APROBAR on its own (section 7's own explicit instruction).
+	// Hotfix 25.20.4 AUDIT (brief section 8) -- the "Diferencia" column was
+	// reported as suspicious for showing $0,00 while "Ajustado" showed a
+	// discounted price. Its FORMULA IS CORRECT AND UNCHANGED: the server's
+	// `rate_difference` is "Actual - Base" (the persisted rate vs the
+	// current Item Price on the Quotation's own selling_price_list), NOT
+	// "Actual - Ajustado" -- "Ajustado" is an unpersisted client-side
+	// preview of a mode the user is merely trying on, so there is nothing
+	// persisted to difference it against. $0,00 there is the TRUE and
+	// useful reading: "this line is still quoted at exactly catalog price"
+	// -- i.e. the -25% has NOT been applied yet, which is precisely the
+	// state in which APLICAR PRECIOS must be enabled. Only the column
+	// HEADER changed, to "Dif. vs base", so the number can no longer be
+	// misread as belonging to the "Ajustado" column next to it.
 	// "Ajustado" (Commit 25.14): the CLIENT-computed preview for whichever
 	// mode is currently selected -- `reference_rate * multiplier`, plus
 	// the resulting discount % and adjusted amount (`qty * adjusted_rate`)
@@ -1230,7 +1298,7 @@ fabergray_erp.Facturacion = class Facturacion {
 				<div class="fg-fact-billing-review-cell" data-label="${__("Base")}">${reference_html}</div>
 				<div class="fg-fact-billing-review-cell" data-label="${__("Actual")}">${rate_label}</div>
 				<div class="fg-fact-billing-review-cell" data-label="${__("Ajustado")}">${adjusted_html}</div>
-				<div class="fg-fact-billing-review-cell" data-label="${__("Diferencia")}">${diff_html}</div>
+				<div class="fg-fact-billing-review-cell" data-label="${__("Dif. vs base")}">${diff_html}</div>
 				<div class="fg-fact-billing-review-cell fg-fact-billing-review-cell-avail" data-label="${__(
 					"Disponibilidad ERP"
 				)}">${availability_html}</div>
@@ -1250,7 +1318,11 @@ fabergray_erp.Facturacion = class Facturacion {
 	apply_billing_price_mode() {
 		const d = this._billing_review_detail;
 		const mode = this._billing_review_selected_mode;
-		if (!d || !mode) return;
+		// Hotfix 25.20.4, section 11 -- re-checked here, not only in the
+		// rendered `disabled` attribute: a keyboard/programmatic click, or
+		// a click landing between the confirm dialog and the re-render,
+		// must never start a second cancel+amend cycle either.
+		if (!this.can_apply_billing_price_mode(d, mode)) return;
 
 		const confirm_messages = {
 			FULL: __("Se restaurarán los precios de venta completos de todos los productos."),
@@ -1269,6 +1341,9 @@ fabergray_erp.Facturacion = class Facturacion {
 		};
 
 		frappe.confirm(confirm_messages[mode], () => {
+			if (this._billing_review_applying) return;
+			this._billing_review_applying = true;
+			this.render_billing_review_dialog_body(); // APLICANDO..., both button groups disabled
 			this.set_busy(true);
 			this.call_cotizaciones("apply_quotation_price_mode", { quotation_name: d.name, price_mode: mode })
 				.then((result) => {
@@ -1288,7 +1363,17 @@ fabergray_erp.Facturacion = class Facturacion {
 					// precio de referencia..." -- section 12) -- nothing here
 					// assumes the write succeeded.
 				})
-				.finally(() => this.set_busy(false));
+				.finally(() => {
+					// Hotfix 25.20.4, section 11 -- runs on BOTH paths, so a
+					// failed apply always gives the button back instead of
+					// leaving it dead. The re-render also repaints the
+					// enabled/disabled state from whatever `detail` is now
+					// current (the amended document's on success, the
+					// untouched original's on error).
+					this._billing_review_applying = false;
+					this.set_busy(false);
+					this.render_billing_review_dialog_body();
+				});
 		});
 	}
 
