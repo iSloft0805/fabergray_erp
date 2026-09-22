@@ -259,6 +259,22 @@ class TestDeactivateReactivateInventoryItem(IntegrationTestCase):
 				api.reactivate_inventory_item(item.name)
 		self.assertEqual(frappe.db.get_value("Item", item.name, "disabled"), 1)
 
+	def test_used_item_can_be_deactivated_and_reactivated(self):
+		"""Caso 5/6: un producto ya usado en un documento comercial (Sales
+		Order sometido) no se puede eliminar, pero sí desactivar y
+		reactivar -- sin tocar ese documento."""
+		item = self.world.item(f"FG2521-USED-{frappe.generate_hash(length=4)}")
+		wh = self.world.warehouse(f"FG2521 Used Wh {frappe.generate_hash(length=4)}")
+		customer = self.world.customer(f"FG2521 Used Customer {frappe.generate_hash(length=4)}")
+		so = self.world.submitted_sales_order(item.name, wh.name, 1, customer.name)
+		with fx.as_user(self.jefe_user):
+			with self.assertRaises(api.ItemHasDependenciesError):
+				api.delete_inventory_item(item.name)
+			self.assertEqual(api.deactivate_inventory_item(item.name)["disabled"], 1)
+			self.assertEqual(api.reactivate_inventory_item(item.name)["disabled"], 0)
+		self.assertEqual(frappe.db.get_value("Sales Order", so.name, "docstatus"), 1)
+		self.assertTrue(frappe.db.exists("Item", item.name))
+
 	def test_toggle_never_touches_stock(self):
 		wh = self.world.warehouse("FG2521 Toggle Wh")
 		item = self.world.item("FG2521-TOGGLE-STOCK")
@@ -392,7 +408,10 @@ class TestDeleteInventoryItem(IntegrationTestCase):
 		with fx.as_user(self.jefe_user):
 			with self.assertRaises(api.ItemHasDependenciesError) as ctx:
 				api.delete_inventory_item(item.name)
-		self.assertIn("Puedes desactivarlo", str(ctx.exception))
+		self.assertIn(
+			"Este producto ya tiene movimientos o documentos asociados. Puedes desactivarlo, pero no eliminarlo.",
+			str(ctx.exception),
+		)
 		self.assertTrue(frappe.db.exists("Item", item.name))
 		self.assertEqual(frappe.db.count("Stock Ledger Entry", {"item_code": item.name, "is_cancelled": 0}), history)
 		self.assertEqual(frappe.db.get_value("Stock Entry", receipt.name, "docstatus"), 1)

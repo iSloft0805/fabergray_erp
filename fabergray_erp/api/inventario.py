@@ -997,8 +997,8 @@ def delete_inventory_item(item_code):
     except frappe.LinkExistsError:
         frappe.throw(
             _(
-                "No se puede eliminar este producto porque ya tiene movimientos o documentos asociados. "
-                "Puedes desactivarlo."
+                "Este producto ya tiene movimientos o documentos asociados. "
+                "Puedes desactivarlo, pero no eliminarlo."
             ),
             ItemHasDependenciesError,
         )
