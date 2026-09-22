@@ -9,7 +9,24 @@ frappe.pages["jefe-pick-lists"].on_page_load = function (wrapper) {
 		title: __("Pick Lists"),
 		single_column: true,
 	});
-	new fabergray_erp.JefePickLists(page);
+	wrapper.jefe_pick_lists = new fabergray_erp.JefePickLists(page);
+};
+
+// Hotfix 25.20.5 -- misma mecánica que centro-faltantes: la Page queda en
+// caché, así que las route options (KPI "Listos -> Ver" del dashboard Jefe
+// de Bodega) se aplican aquí sobre la instancia viva.
+// Sin route options ni query string (acceso rápido "Pick Lists"), una vista
+// de "Listos / Todas las fechas" que quedó de antes vuelve a la vista por
+// defecto (Todos / Hoy): la URL manda, igual que en centro-faltantes.
+frappe.pages["jefe-pick-lists"].on_page_show = function (wrapper) {
+	const view = wrapper.jefe_pick_lists;
+	if (!view) return;
+	const filters = consume_route_filters();
+	if (filters) {
+		view.set_filters(filters);
+	} else if (!window.location.search && (view.filters.status || view.filters.date_preset !== "hoy")) {
+		view.set_filters({});
+	}
 };
 
 // Commit 22.9 -- resumen operativo/historial de Pick Lists para Jefe de
@@ -25,14 +42,16 @@ fabergray_erp.JefePickLists = class JefePickLists {
 		this.method_prefix = "fabergray_erp.api.jefe_bodega.";
 		this.busy = false;
 
+		const route_filters = consume_route_filters() || {};
 		this.filters = {
 			date_preset: "hoy",
 			date_from: frappe.datetime.get_today(),
 			date_to: frappe.datetime.get_today(),
-			status: "",
+			status: route_filters.status || "",
 			warehouse: "",
 			txt: "",
 		};
+		this.set_date_range(route_filters.date_preset || "hoy");
 		this.list_page = 1;
 		this.rows = [];
 		this.total = 0;
@@ -88,6 +107,7 @@ fabergray_erp.JefePickLists = class JefePickLists {
 	load_all() {
 		this.set_busy(true);
 		this.render_skeleton();
+		this.sync_url();
 		// get_warehouse_summary() (Commit 22.9) ya devuelve exactamente los
 		// almacenes reales y operativos de la compañía -- reutilizado aquí
 		// solo para poblar el filtro, una vez por carga de Page (no en cada
@@ -104,6 +124,31 @@ fabergray_erp.JefePickLists = class JefePickLists {
 			})
 			.catch(() => {})
 			.finally(() => this.set_busy(false));
+	}
+
+	// Aplica filtros desde fuera (on_page_show). Una clave ausente vuelve a
+	// su valor por defecto (Todos / Hoy), igual que al abrir la Page.
+	set_filters(filters) {
+		this.filters.status = filters.status || "";
+		this.set_date_range(filters.date_preset || "hoy");
+		this.list_page = 1;
+		return this.load_all();
+	}
+
+	// status/date_preset en la query string (replaceState, sin tocar el
+	// router) para que F5 reabra la misma vista. "custom" no se refleja: sus
+	// fechas viven en los inputs y F5 vuelve al preset por defecto, como antes.
+	sync_url() {
+		const params = new URLSearchParams();
+		if (this.filters.status) params.set("status", this.filters.status);
+		if (["ayer", "7dias", "todas"].includes(this.filters.date_preset)) {
+			params.set("date_preset", this.filters.date_preset);
+		}
+		const query = params.toString();
+		const url = window.location.pathname + (query ? `?${query}` : "");
+		if (url !== window.location.pathname + window.location.search) {
+			window.history.replaceState(window.history.state, "", url);
+		}
 	}
 
 	load_list() {
@@ -182,6 +227,7 @@ fabergray_erp.JefePickLists = class JefePickLists {
 			{ key: "hoy", label: __("Hoy") },
 			{ key: "ayer", label: __("Ayer") },
 			{ key: "7dias", label: __("Últimos 7 días") },
+			{ key: "todas", label: __("Todas las fechas") },
 			{ key: "custom", label: __("Rango personalizado") },
 		];
 		const preset_html = presets
@@ -344,6 +390,7 @@ fabergray_erp.JefePickLists = class JefePickLists {
 			this.list_page = 1;
 			this.$body.find(".fg-pl-tab").removeClass("is-active");
 			$(e.currentTarget).addClass("is-active");
+			this.sync_url();
 			this.refresh_list();
 		});
 		this.$body.find(".fg-pl-warehouse-select").on("change", (e) => {
@@ -374,7 +421,8 @@ fabergray_erp.JefePickLists = class JefePickLists {
 		});
 	}
 
-	apply_date_preset(preset) {
+	// Solo calcula date_from/date_to para un preset -- sin recargar nada.
+	set_date_range(preset) {
 		this.filters.date_preset = preset;
 		const today = frappe.datetime.get_today();
 		if (preset === "hoy") {
@@ -387,9 +435,20 @@ fabergray_erp.JefePickLists = class JefePickLists {
 		} else if (preset === "7dias") {
 			this.filters.date_from = frappe.datetime.add_days(today, -6);
 			this.filters.date_to = today;
+		} else if (preset === "todas") {
+			// Hotfix 25.20.5 -- sin rango: get_pick_list_history() ya trata
+			// date_from/date_to nulos como "sin filtro de fecha". Es lo que
+			// usa "Listos -> Ver", cuyo KPI (get_queue()) no depende de fecha.
+			this.filters.date_from = "";
+			this.filters.date_to = "";
 		}
 		// "custom": deja date_from/date_to como estén -- el usuario los edita
 		// en los dos <input type="date"> que aparecen para ese preset.
+	}
+
+	apply_date_preset(preset) {
+		this.set_date_range(preset);
+		this.sync_url();
 		this.list_page = 1;
 		this.set_busy(true);
 		Promise.all([this.call("get_pick_list_history_summary"), this.load_list()])
@@ -460,8 +519,11 @@ fabergray_erp.JefePickLists = class JefePickLists {
 			primary_action: has_shortage
 				? () => {
 						dialog.hide();
-						frappe.route_options = { pick_list: detail.name };
-						frappe.set_route("List", "Reporte de Faltante");
+						// Hotfix 25.20.5 -- Centro de Faltantes propio, filtrado
+						// server-side por este Pick List (todas las pestañas: el
+						// detalle marca cualquier reporte, no solo los abiertos),
+						// nunca el List View nativo de Reporte de Faltante.
+						frappe.set_route("centro-faltantes", { pick_list: detail.name });
 				  }
 				: is_ready
 				? () => {
@@ -491,6 +553,35 @@ function row_kv(label, value) {
 // jefe_de_bodega.js/bodega.js (same reasoning as Commit 6).
 // -------------------------------------------------------------------------
 const PAGE_SIZE = 10;
+const PL_STATUSES = ["listos", "con_faltantes", "en_alistamiento", "pendientes"];
+const PL_ROUTE_DATE_PRESETS = ["hoy", "ayer", "7dias", "todas"];
+
+// Hotfix 25.20.5 -- misma lectura tolerante que centro_faltantes.js::
+// consume_route_filters(): consume frappe.route_options.status/date_preset
+// una sola vez, acepta valores JSON (frappe.set_route()) o planos (sync_url()
+// / F5), y descarta todo lo que no esté en su whitelist.
+function consume_route_filters() {
+	const opts = frappe.route_options;
+	if (!opts || (opts.status == null && opts.date_preset == null)) return null;
+	const status = route_value(opts.status);
+	const date_preset = route_value(opts.date_preset);
+	delete opts.status;
+	delete opts.date_preset;
+	return {
+		status: PL_STATUSES.includes(status) ? status : "",
+		date_preset: PL_ROUTE_DATE_PRESETS.includes(date_preset) ? date_preset : "hoy",
+	};
+}
+
+function route_value(raw) {
+	if (raw == null) return "";
+	try {
+		const parsed = JSON.parse(raw);
+		return typeof parsed === "string" ? parsed.trim() : String(raw).trim();
+	} catch (e) {
+		return String(raw).trim();
+	}
+}
 
 function icon(name, extra_class) {
 	return `<svg class="fg-icon ${extra_class || ""}"><use href="#icon-${name}"></use></svg>`;

@@ -122,7 +122,8 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 	// KPI row -- Pendientes/En alistamiento/Con faltantes are informative
 	// only (no faithful native filter exists for those buckets without
 	// reimplementing get_queue()'s shortage join, so they never navigate).
-	// Listos/Faltantes abiertos have an exact native filter and are the
+	// Listos/Faltantes abiertos map exactly onto a filter of our own Pages
+	// (jefe-pick-lists "Listos" / centro-faltantes "Abiertos") and are the
 	// only two rendered as clickable buttons.
 	// -------------------------------------------------------------------
 	render_kpis() {
@@ -301,17 +302,23 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 	}
 
 	// -------------------------------------------------------------------
-	// Events / navigation -- every action here is a route to a standard
-	// Frappe/ERPNext surface (Form, List or Tree). Nothing is duplicated.
+	// Events / navigation -- operational screens are always our own Pages;
+	// only a single document is opened as a native Form. Nothing is
+	// duplicated.
 	// -------------------------------------------------------------------
 	bind_events() {
+		// Listos abre jefe-pick-lists en su pestaña "Listos", sin filtro de
+		// fecha: el KPI sale de get_queue()["listos"] (todo Pick List sometido,
+		// de cualquier fecha), el mismo _pick_list_bucket() que usa esa Page.
 		this.$body.find('.fg-kpi[data-action="listos"]').on("click", () => {
-			frappe.route_options = { docstatus: ["=", 1] };
-			frappe.set_route("List", "Pick List");
+			frappe.set_route("jefe-pick-lists", { status: "listos", date_preset: "todas" });
 		});
+		// Faltantes abiertos abre el Centro de Faltantes propio (pestaña
+		// ABIERTOS), nunca el List View nativo de Reporte de Faltante. El
+		// estado viaja como route option -> query string (?status=...), así
+		// sobrevive a un refresh de la Page destino.
 		this.$body.find('.fg-kpi[data-action="faltantes_abiertos"]').on("click", () => {
-			frappe.route_options = { status: "Abierto" };
-			frappe.set_route("List", "Reporte de Faltante");
+			frappe.set_route("centro-faltantes", { status: "Abierto" });
 		});
 
 		this.$body.find(".fg-shortage-card-btn").on("click", (e) => {

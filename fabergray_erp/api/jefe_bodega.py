@@ -191,18 +191,17 @@ def get_summary():
 
 	The four Pick List counts come straight out of get_queue()'s buckets --
 	no re-implementation of the bucketing rule. "Faltantes abiertos" is a
-	plain, permission-scoped count on Reporte de Faltante -- Abierto AND En
-	Proceso (Commit 22.8: a partially-received shortage still needs
-	attention, it must not silently drop off this count the moment its
-	first receipt lands)."""
+	plain, permission-scoped count on Reporte de Faltante with status
+	"Abierto" ONLY (Hotfix 25.20.5 -- it used to also count "En Proceso",
+	but its "Ver" opens Centro de Faltantes on the ABIERTOS tab, so the
+	number must match exactly what that tab lists; partially-received
+	shortages stay visible in "Requieren atención" and the EN PROCESO tab)."""
 	_require_login()
 	frappe.has_permission("Pick List", "read", throw=True)
 	frappe.has_permission("Reporte de Faltante", "read", throw=True)
 
 	queue = get_queue()
-	faltantes_abiertos = frappe.get_list(
-		"Reporte de Faltante", filters={"status": ["in", OPEN_SHORTAGE_STATUSES]}, pluck="name"
-	)
+	faltantes_abiertos = frappe.get_list("Reporte de Faltante", filters={"status": OPEN_STATUS}, pluck="name")
 
 	return {
 		"pendientes": len(queue["pendientes"]),
@@ -1014,7 +1013,7 @@ def _bulk_received_qty(report_names):
 
 
 @frappe.whitelist()
-def get_shortage_center(status=None, txt=None, start=0, page_length=20):
+def get_shortage_center(status=None, txt=None, start=0, page_length=20, pick_list=None):
 	"""Paginated Reporte de Faltante list for the Centro de Faltantes,
 	with received_qty/remaining_qty per row (Commit 22.8's own relation,
 	via _bulk_received_qty() -- never recomputed differently here).
@@ -1022,15 +1021,27 @@ def get_shortage_center(status=None, txt=None, start=0, page_length=20):
 	status: "Abierto" | "En Proceso" | "Resuelto", or falsy/unrecognized
 	for "TODOS" -- a plain native column, so this is a real DB-level
 	filter+pagination, no bounded-fetch-then-filter needed (unlike Pick
-	List's own computed state)."""
+	List's own computed state).
+
+	pick_list (Hotfix 25.20.5): optional, "VER FALTANTES" from a Pick List
+	detail in jefe-pick-lists -- Reporte de Faltante's own native `pick_list`
+	Link column, combined (AND) with status/txt in the same frappe.get_list()
+	filters, so permissions apply exactly as before. A name that doesn't
+	exist raises DoesNotExistError rather than silently returning an empty
+	list the user could mistake for "no shortages"."""
 	_require_login()
 	frappe.has_permission("Reporte de Faltante", "read", throw=True)
 
 	start, page_length = _clamp_pagination(start, page_length, MAX_PAGE_LENGTH)
 	txt = (txt or "").strip()
 	status = status if status in SHORTAGE_CENTER_STATUSES else None
+	pick_list = (pick_list or "").strip() or None
+	if pick_list and not frappe.db.exists("Pick List", pick_list):
+		frappe.throw(_("El Pick List {0} no existe.").format(pick_list), frappe.DoesNotExistError)
 
 	filters = {"status": status} if status else {}
+	if pick_list:
+		filters["pick_list"] = pick_list
 	or_filters = None
 	if txt:
 		or_filters = [

@@ -9,7 +9,24 @@ frappe.pages["centro-faltantes"].on_page_load = function (wrapper) {
 		title: __("Centro de Faltantes"),
 		single_column: true,
 	});
-	new fabergray_erp.CentroFaltantes(page);
+	wrapper.centro_faltantes = new fabergray_erp.CentroFaltantes(page);
+};
+
+// La Page queda en caché tras el primer on_page_load: si se vuelve a
+// entrar con route options de filtro (KPI "Faltantes abiertos" del
+// dashboard Jefe de Bodega -> status; "VER FALTANTES" de jefe-pick-lists ->
+// pick_list), se aplican aquí sobre la instancia viva. Sin route options
+// ni query string (acceso rápido "Faltantes"), una vista filtrada que quedó
+// de una visita anterior vuelve a la vista por defecto: la URL manda.
+frappe.pages["centro-faltantes"].on_page_show = function (wrapper) {
+	const view = wrapper.centro_faltantes;
+	if (!view) return;
+	const filters = consume_route_filters();
+	if (filters) {
+		view.set_filters(filters);
+	} else if (!window.location.search && (view.status || view.pick_list)) {
+		view.set_filters({});
+	}
 };
 
 // Commit 22.9 -- Centro de Faltantes/Compras. Toda la lógica de negocio
@@ -24,7 +41,9 @@ fabergray_erp.CentroFaltantes = class CentroFaltantes {
 		this.method_prefix = "fabergray_erp.api.jefe_bodega.";
 		this.busy = false;
 
-		this.status = "";
+		const route_filters = consume_route_filters() || {};
+		this.status = route_filters.status || "";
+		this.pick_list = route_filters.pick_list || "";
 		this.txt = "";
 		this.list_page = 1;
 		this.rows = [];
@@ -76,18 +95,60 @@ fabergray_erp.CentroFaltantes = class CentroFaltantes {
 	load_all() {
 		this.set_busy(true);
 		this.render_skeleton();
+		this.sync_url();
 		return Promise.all([this.call("get_shortage_center_summary"), this.load_list()])
 			.then(([summary]) => {
 				this.summary = summary;
 				this.render_body();
 			})
-			.catch(() => {})
+			.catch(() => {
+				// Un pick_list inválido (p. ej. URL editada a mano) ya mostró
+				// el error del servidor; se descarta ese filtro y se recarga
+				// la vista completa en vez de dejar el skeleton colgado.
+				if (this.pick_list) {
+					this.pick_list = "";
+					return this.load_all();
+				}
+			})
 			.finally(() => this.set_busy(false));
+	}
+
+	// Aplica filtros desde fuera (on_page_show). La navegación define la
+	// vista completa: una clave ausente se limpia, así "Faltantes abiertos"
+	// nunca hereda el pick_list de una visita anterior.
+	set_filters(filters) {
+		this.status = filters.status || "";
+		this.pick_list = filters.pick_list || "";
+		this.list_page = 1;
+		return this.load_all();
+	}
+
+	// Refleja status/pick_list en la query string (replaceState: no crea
+	// entrada de historial ni dispara el router) para que F5 reabra
+	// exactamente la misma vista -- consume_route_filters() la relee.
+	sync_url() {
+		const params = new URLSearchParams();
+		if (this.status) params.set("status", this.status);
+		if (this.pick_list) params.set("pick_list", this.pick_list);
+		const query = params.toString();
+		const url = window.location.pathname + (query ? `?${query}` : "");
+		if (url !== window.location.pathname + window.location.search) {
+			window.history.replaceState(window.history.state, "", url);
+		}
+	}
+
+	clear_pick_list_filter() {
+		this.pick_list = "";
+		this.list_page = 1;
+		this.sync_url();
+		this.$body.find(".fg-cf-filter-chip").remove();
+		return this.refresh_list();
 	}
 
 	load_list() {
 		return this.call("get_shortage_center", {
 			status: this.status || null,
+			pick_list: this.pick_list || null,
 			txt: this.txt,
 			start: (this.list_page - 1) * PAGE_SIZE,
 			page_length: PAGE_SIZE,
@@ -168,8 +229,21 @@ fabergray_erp.CentroFaltantes = class CentroFaltantes {
 			)
 			.join("");
 
+		// Filtro por Pick List ("VER FALTANTES" desde jefe-pick-lists):
+		// visible y removible con un clic -- nunca un filtro oculto.
+		const pick_list_chip = this.pick_list
+			? `<div class="fg-cf-filter-chip">
+					${icon("clipboard-list", "fg-icon-sm")}
+					<span>${__("Pick List")}: <strong>${frappe.utils.escape_html(this.pick_list)}</strong></span>
+					<button type="button" class="fg-cf-filter-chip-clear" title="${__("Ver todos los faltantes")}">
+						${icon("x", "fg-icon-sm")} ${__("Quitar filtro")}
+					</button>
+				</div>`
+			: "";
+
 		return `
 			<div class="fg-cf-toolbar">
+				${pick_list_chip}
 				<div class="fg-cf-tabs">${tabs_html}</div>
 				<div class="fg-cf-search-wrap">
 					${icon("search", "fg-cf-search-icon")}
@@ -279,8 +353,10 @@ fabergray_erp.CentroFaltantes = class CentroFaltantes {
 			this.list_page = 1;
 			this.$body.find(".fg-cf-tab").removeClass("is-active");
 			$(e.currentTarget).addClass("is-active");
+			this.sync_url();
 			this.refresh_list();
 		});
+		this.$body.find(".fg-cf-filter-chip-clear").on("click", () => this.clear_pick_list_filter());
 		this.$body.find(".fg-cf-search-input").on("input", (e) => {
 			const val = $(e.currentTarget).val();
 			this.$body.find(".fg-cf-search-wrap .fg-search-clear").toggleClass("is-visible", !!val.trim());
@@ -473,6 +549,37 @@ function cf_row(label, value) {
 // Small render helpers -- pure presentation, intentionally duplicated.
 // -------------------------------------------------------------------------
 const PAGE_SIZE = 10;
+const CF_TAB_STATUSES = ["Abierto", "En Proceso", "Resuelto"];
+
+// Lee y consume frappe.route_options.status/pick_list (una sola vez, igual
+// que page/inventario/inventario.js con item_code). Devuelve null si no
+// vino ninguna de las dos -- la vista actual no se toca. Los valores llegan
+// en dos formas: JSON ('"Abierto"', como los serializa frappe.set_route())
+// o planos ('Abierto', como los escribe sync_url() y los repone el router
+// tras F5) -- de ahí route_value(). El status fuera de la whitelist se
+// descarta; pick_list lo valida el servidor (get_shortage_center()).
+function consume_route_filters() {
+	const opts = frappe.route_options;
+	if (!opts || (opts.status == null && opts.pick_list == null)) return null;
+	const status = route_value(opts.status);
+	const pick_list = route_value(opts.pick_list);
+	delete opts.status;
+	delete opts.pick_list;
+	return {
+		status: CF_TAB_STATUSES.includes(status) ? status : "",
+		pick_list: pick_list || "",
+	};
+}
+
+function route_value(raw) {
+	if (raw == null) return "";
+	try {
+		const parsed = JSON.parse(raw);
+		return typeof parsed === "string" ? parsed.trim() : String(raw).trim();
+	} catch (e) {
+		return String(raw).trim();
+	}
+}
 
 // Commit 25.20, section 11 -- same shared shape/classes every other
 // operational Page's own copy uses (page/ventas/ventas.js's own
