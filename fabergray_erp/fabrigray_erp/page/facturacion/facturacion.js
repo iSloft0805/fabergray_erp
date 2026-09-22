@@ -466,6 +466,7 @@ fabergray_erp.Facturacion = class Facturacion {
 						r.fg_invoiced_on ? frappe.datetime.str_to_user(r.fg_invoiced_on) : "—"
 					}</strong></span>
 				</div>
+				${this.render_invoice_pdf_html(r)}
 			`
 			: `
 				<div class="fg-fact-queue-card-progress">
@@ -504,6 +505,70 @@ fabergray_erp.Facturacion = class Facturacion {
 				${footer_html}
 			</div>
 		`;
+	}
+
+	// Commit 25.23 -- PDF comercial de factura, solo en tarjetas Facturado.
+	// El select refleja r.fg_invoice_issuer (persistido en el Pick List por
+	// set_invoice_issuer()); VER/DESCARGAR siempre usan ese valor guardado,
+	// nunca el estado del navegador.
+	render_invoice_pdf_html(r) {
+		const current = r.fg_invoice_issuer || "";
+		const options = [`<option value="" ${current ? "" : "selected"}>${__("Selecciona...")}</option>`]
+			.concat(
+				INVOICE_ISSUERS.map(
+					(issuer) =>
+						`<option value="${issuer}" ${issuer === current ? "selected" : ""}>${issuer}</option>`
+				)
+			)
+			.join("");
+		return `
+			<div class="fg-fact-invoice-pdf">
+				<label class="fg-fact-invoice-pdf-field">
+					<span class="fg-fact-invoice-pdf-label">${__("EMPRESA EMISORA")}</span>
+					<select class="fg-fact-invoice-issuer">${options}</select>
+				</label>
+				<div class="fg-fact-invoice-pdf-actions">
+					<button type="button" class="fg-btn fg-fact-invoice-view">${icon("file-text", "fg-icon-sm")} ${__("VER PDF")}</button>
+					<button type="button" class="fg-btn fg-btn--solid-primary fg-fact-invoice-download">${icon(
+						"download",
+						"fg-icon-sm"
+					)} ${__("DESCARGAR PDF")}</button>
+				</div>
+			</div>
+		`;
+	}
+
+	// Guarda la elección apenas cambia el select. Mientras la request está
+	// en vuelo, select y botones quedan deshabilitados para que un VER/
+	// DESCARGAR nunca salga con un emisor aún no persistido. Si el servidor
+	// rechaza, el select vuelve al último valor guardado.
+	save_invoice_issuer(pick_list_name, issuer, $card) {
+		const row = this.rows.find((r) => r.name === pick_list_name);
+		const $controls = $card.find(".fg-fact-invoice-issuer, .fg-fact-invoice-view, .fg-fact-invoice-download");
+		const revert = () => $card.find(".fg-fact-invoice-issuer").val((row && row.fg_invoice_issuer) || "");
+
+		if (!issuer) {
+			revert();
+			return;
+		}
+		$controls.prop("disabled", true);
+		this.call("set_invoice_issuer", { pick_list_name: pick_list_name, issuer: issuer })
+			.then((result) => {
+				if (row) row.fg_invoice_issuer = result.fg_invoice_issuer;
+				frappe.show_alert({ message: __("Empresa emisora guardada: {0}", [result.fg_invoice_issuer]), indicator: "green" }, 4);
+			})
+			.catch(() => revert())
+			.finally(() => $controls.prop("disabled", false));
+	}
+
+	invoice_issuer_of(pick_list_name) {
+		const row = this.rows.find((r) => r.name === pick_list_name);
+		const issuer = row && row.fg_invoice_issuer;
+		if (!issuer) {
+			frappe.msgprint(__("Selecciona la empresa emisora de la factura."));
+			return null;
+		}
+		return issuer;
 	}
 
 	render_queue_pagination_html() {
@@ -549,6 +614,23 @@ fabergray_erp.Facturacion = class Facturacion {
 			e.stopPropagation();
 			const name = $(e.currentTarget).closest(".fg-fact-queue-card").data("name");
 			this.open_review_dialog(name);
+		});
+
+		// Commit 25.23 -- PDF comercial de factura (delegados, igual que el
+		// botón de revisión de arriba).
+		this.$body.find(".fg-fact-queue-cards").on("change", ".fg-fact-invoice-issuer", (e) => {
+			const $card = $(e.currentTarget).closest(".fg-fact-queue-card");
+			this.save_invoice_issuer($card.data("name"), $(e.currentTarget).val(), $card);
+		});
+		this.$body.find(".fg-fact-queue-cards").on("click", ".fg-fact-invoice-view", (e) => {
+			e.stopPropagation();
+			const name = $(e.currentTarget).closest(".fg-fact-queue-card").data("name");
+			if (this.invoice_issuer_of(name)) open_fabrigray_invoice_pdf(name);
+		});
+		this.$body.find(".fg-fact-queue-cards").on("click", ".fg-fact-invoice-download", (e) => {
+			e.stopPropagation();
+			const name = $(e.currentTarget).closest(".fg-fact-queue-card").data("name");
+			if (this.invoice_issuer_of(name)) download_fabrigray_invoice_pdf(name);
 		});
 
 		this.$body.find(".fg-fact-queue-pagination").on("click", ".fg-fact-pagination-prev", () => {
@@ -1600,6 +1682,44 @@ function open_fabrigray_quotation_pdf(name) {
 		.catch(() => {
 			if (tab) tab.close();
 		});
+}
+
+// Commit 25.23 -- whitelist de emisores para el select. El servidor
+// (fabergray_erp/invoice_issuers.py::INVOICE_ISSUERS) es la fuente de verdad
+// y rechaza cualquier otro valor; esta copia solo pinta las opciones.
+const INVOICE_ISSUERS = ["integrandoMAS", "ecoluminar"];
+
+// Mismo patrón anti-popup-blocker que open_fabrigray_quotation_pdf():
+// pestaña en blanco abierta sincrónicamente en el click, validación
+// server-side (get_invoice_pdf_view_url()), y solo entonces se navega a la
+// URL devuelta. Si el servidor rechaza, se cierra la pestaña vacía (el
+// error ya lo muestra frappe.xcall()).
+function open_fabrigray_invoice_pdf(name) {
+	if (!name) return;
+	const tab = window.open("about:blank");
+	frappe
+		.xcall("fabergray_erp.api.facturacion.get_invoice_pdf_view_url", { pick_list_name: name })
+		.then((url) => {
+			if (url && tab) {
+				tab.location = url;
+			} else if (tab) {
+				tab.close();
+			}
+		})
+		.catch(() => {
+			if (tab) tab.close();
+		});
+}
+
+// DESCARGAR PDF -- navega directo al endpoint dedicado, que valida todo
+// antes de generar y fija el Print Format en el servidor.
+function download_fabrigray_invoice_pdf(name) {
+	if (!name) return;
+	window.open(
+		frappe.urllib.get_full_url(
+			"/api/method/fabergray_erp.api.facturacion.download_invoice_pdf?pick_list_name=" + encodeURIComponent(name)
+		)
+	);
 }
 
 function get_initials(name) {

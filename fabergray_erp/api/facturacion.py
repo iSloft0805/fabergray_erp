@@ -112,6 +112,18 @@ from frappe.utils import cint, flt, nowdate
 from erpnext.stock.doctype.pick_list.pick_list import create_delivery, get_actual_qty
 
 from fabergray_erp.api.bodega import OPEN_SHORTAGE_STATUSES, _require_login
+from fabergray_erp.api.cotizaciones import (
+	_require_facturacion_role,
+	_resolve_pdf_advisor_name,
+	_resolve_pdf_contact,
+)
+from fabergray_erp.invoice_issuers import (
+	INVOICE_ISSUERS,
+	get_issuer_config,
+	get_print_provider,
+	missing_issuer_fields,
+)
+from fabergray_erp.permission_conditions import assert_same_company
 from fabergray_erp.sales_order_naming import root_commercial_name
 from fabergray_erp.search_utils import normalize_search_date
 
@@ -730,6 +742,7 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 			"fg_invoicing_status",
 			"fg_invoiced_on",
 			"fg_invoiced_by",
+			"fg_invoice_issuer",
 			"modified",
 			"creation",
 		],
@@ -793,6 +806,7 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 				"fg_invoiced_by_fullname": (
 					frappe.utils.get_fullname(pl.fg_invoiced_by) if pl.fg_invoiced_by else None
 				),
+				"fg_invoice_issuer": pl.fg_invoice_issuer or None,
 			}
 		)
 
@@ -1000,3 +1014,406 @@ def mark_as_invoiced(pick_list_name):
 		"fg_invoiced_by": pl.fg_invoiced_by,
 		"fg_invoiced_by_fullname": frappe.utils.get_fullname(pl.fg_invoiced_by),
 	}
+
+
+# =============================================================================
+# Commit 25.23 -- "Fabrigray Factura Comercial": PDF comercial de factura para
+# un Pick List ya marcado Facturado, con empresa emisora elegida y persistida
+# por Facturación (Pick List.fg_invoice_issuer: integrandoMAS | ecoluminar).
+#
+# Mismo patrón que el PDF de Cotizaciones (api/cotizaciones.py, Commit 25.15):
+#   - El Print Format (fixtures/print_format.json) es solo Jinja/HTML/CSS y
+#     únicamente lee atributos `doc.fg_pdf_*` calculados aquí.
+#   - Dos endpoints dedicados (VER/DESCARGAR) validan TODO antes de tocar el
+#     pipeline de impresión de Frappe, y el nombre del formato está fijo en
+#     el servidor -- el cliente nunca lo envía.
+#   - `prepare_and_guard_invoice_pdf()`, un `before_print` de Pick List
+#     acotado SOLO a este formato vía `frappe.form_dict.format`, repite la
+#     misma validación como defensa en profundidad (p. ej. Desk printview:
+#     validate_print_permission() acepta `read` a secas, así que Bodega/
+#     Jefe de Bodega/Recorrido -- que leen Pick List -- llegarían al
+#     formato sin este guard). Cualquier otro formato de Pick List no se toca.
+#
+# Documento fuente: el flujo activo de Facturación (Commit 23.0) no crea
+# Sales Invoice -- la "factura" operativa es el Pick List con
+# fg_invoicing_status == "Facturado". Las líneas son sus filas con
+# picked_qty > 0, al precio real de la fila de Sales Order Item que cada una
+# referencia (misma regla que get_pick_list_for_facturacion()). Los totales:
+#   - si este Pick List cubre el pedido completo, se usan tal cual
+#     rounded_total/grand_total (y net_total/impuestos/descuento) del Sales
+#     Order -- el documento es la fuente de verdad;
+#   - si es parcial y el pedido no tiene impuestos ni descuento global, el
+#     total es la suma de las líneas (qty x rate real), calculada aquí;
+#   - si es parcial y el pedido SÍ tiene impuestos/descuento global, se
+#     rechaza: prorratearlos sería inventar un cálculo contable.
+#
+# Numeración: no existe un número de factura real en este flujo (no hay Sales
+# Invoice y nunca se diseñó una serie). `_resolve_invoice_number()` devuelve
+# None a propósito -- ni el PEDIDO ni el Pick List se usan como número. El PDF
+# muestra "SIN NUMERAR" + la referencia interna del Pick List, y se marca
+# BORRADOR mientras falte numeración o datos del emisor (invoice_issuers.py).
+# =============================================================================
+
+INVOICE_PDF_PRINT_FORMAT_NAME = "Fabrigray Factura Comercial"
+
+MSG_SELECT_INVOICE_ISSUER = "Selecciona la empresa emisora de la factura."
+
+
+class InvoiceIssuerRequiredError(frappe.ValidationError):
+	pass
+
+
+class InvalidInvoiceIssuerError(frappe.ValidationError):
+	pass
+
+
+class InvoicePdfNotEligibleError(frappe.ValidationError):
+	pass
+
+
+def _validate_invoice_issuer(issuer):
+	"""Whitelist estricta -- nunca texto libre del navegador."""
+	if not issuer:
+		frappe.throw(_(MSG_SELECT_INVOICE_ISSUER), InvoiceIssuerRequiredError)
+	if issuer not in INVOICE_ISSUERS:
+		frappe.throw(
+			_("Empresa emisora no permitida: {0}.").format(frappe.bold(issuer)),
+			InvalidInvoiceIssuerError,
+		)
+	return issuer
+
+
+def _assert_invoiced_pick_list(pl, ptype="read"):
+	"""Rol + permiso + Company + estado Facturado -- lo común a guardar el
+	emisor y a generar el PDF. _require_facturacion_role() es el mismo
+	chequeo explícito de rol del flujo de Cotizaciones (Facturación, System
+	Manager o Administrator); los demás roles que leen Pick List quedan
+	fuera aunque su DocPerm les dé `read`/`print`."""
+	_require_facturacion_role()
+	pl.check_permission(ptype)
+	assert_same_company(pl)
+
+	if pl.docstatus != 1:
+		frappe.throw(
+			_("Este Pick List no está sometido; no puede generarse su factura."),
+			InvoicePdfNotEligibleError,
+		)
+	if pl.fg_invoicing_status != FG_INVOICING_FACTURADO:
+		frappe.throw(
+			_("El pedido debe estar marcado como facturado antes de generar la factura."),
+			InvoicePdfNotEligibleError,
+		)
+
+
+def _invoice_sales_order(pl):
+	"""El único Sales Order del Pick List, ya validado (permiso, Company,
+	sometido). Multi-orden o líneas sin orden se rechazan, igual que
+	generate_invoice()/get_pick_list_for_facturacion()."""
+	locations = pl.get("locations") or []
+	if not locations or not all(row.sales_order for row in locations):
+		frappe.throw(
+			_("Este Pick List tiene líneas sin Orden de Venta asociada; no puede generarse su factura."),
+			InvoicePdfNotEligibleError,
+		)
+	distinct_sales_orders = {row.sales_order for row in locations}
+	if len(distinct_sales_orders) > 1:
+		frappe.throw(
+			_(
+				"Este Pick List está asociado a más de una Orden de Venta ({0}); "
+				"la factura comercial todavía no soporta facturación multi-orden."
+			).format(", ".join(sorted(distinct_sales_orders))),
+			InvoicePdfNotEligibleError,
+		)
+
+	so = frappe.get_doc("Sales Order", next(iter(distinct_sales_orders)))
+	so.check_permission("read")
+	assert_same_company(so)
+	if so.docstatus != 1:
+		frappe.throw(
+			_("La Orden de Venta {0} no está vigente; no puede generarse la factura.").format(so.name),
+			InvoicePdfNotEligibleError,
+		)
+	return so
+
+
+def _assert_invoice_pdf_eligible(pl):
+	"""La ÚNICA validación de "este Pick List puede producir la Factura
+	Comercial", llamada desde los dos endpoints y desde el before_print --
+	nunca tres variantes que puedan divergir. Devuelve el Sales Order."""
+	_assert_invoiced_pick_list(pl)
+	_validate_invoice_issuer(pl.fg_invoice_issuer)
+	return _invoice_sales_order(pl)
+
+
+def _resolve_invoice_number(pl):
+	"""Número de factura a imprimir. None a propósito: el flujo actual no
+	crea Sales Invoice ni existe una serie de facturación autorizada, y el
+	PEDIDO/Pick List no deben usarse como número sin autorización. Este es
+	el único punto a cambiar cuando se defina la numeración real."""
+	return None
+
+
+def _format_money_co(value):
+	"""Formato monetario colombiano fijo: "$ 11.500" (punto de miles, coma
+	decimal solo si hay centavos). Independiente del number_format del
+	sitio, igual que _format_date_es_long() lo es del idioma del sitio."""
+	value = flt(value, 2)
+	sign = "-" if value < 0 else ""
+	integer, cents = divmod(int(round(abs(value) * 100)), 100)
+	text = f"{integer:,}".replace(",", ".")
+	if cents:
+		text += f",{cents:02d}"
+	return f"{sign}$ {text}"
+
+
+def _amount_in_words_es(value):
+	"""Valor en letras para "Son:", convención colombiana: "ONCE MIL
+	QUINIENTOS PESOS M/CTE". num2words(lang="es") no aplica apócope
+	("veintiuno mil", "treinta y uno millones"), así que se corrige aquí:
+	ante mil/millón/pesos va siempre "un"/"veintiún"."""
+	import re
+
+	from num2words import num2words
+
+	value = flt(value, 2)
+	integer, cents = divmod(int(round(abs(value) * 100)), 100)
+	if integer == 1:
+		words = "UN PESO"
+	else:
+		words = num2words(integer, lang="es")
+		words = re.sub(r"\bveintiuno\b", "veintiún", words)
+		words = re.sub(r"\buno\b", "un", words)
+		words = words.upper()
+		if integer and integer % 1_000_000 == 0:
+			words += " DE"
+		words += " PESOS"
+	if cents:
+		words += f" CON {cents:02d}/100"
+	return f"{words} M/CTE"
+
+
+def _format_date_co(value):
+	return frappe.utils.getdate(value).strftime("%d/%m/%Y") if value else None
+
+
+def _resolve_invoice_customer(so):
+	"""NIT/dirección/ciudad/teléfono del cliente. Dirección: la Address real
+	del pedido (so.customer_address) o, si no tiene, la principal actual del
+	Customer; si solo existe el texto address_display, se usa ese. Nada se
+	inventa -- cada campo es None si no existe. "Barrio" no existe en el
+	modelo de Address de este sitio, así que no se imprime."""
+	customer = frappe.db.get_value(
+		"Customer", so.customer, ["tax_id", "customer_primary_address"], as_dict=True
+	) or frappe._dict()
+
+	address_line = city = address_phone = None
+	address_name = so.customer_address or customer.customer_primary_address
+	if address_name and frappe.db.exists("Address", address_name):
+		address = frappe.get_doc("Address", address_name)
+		address_line = ", ".join(p for p in (address.address_line1, address.address_line2) if p) or None
+		city = address.city or None
+		address_phone = address.phone or None
+	elif so.address_display:
+		address_line = frappe.utils.strip_html(so.address_display.replace("<br>", ", ")).strip(", ") or None
+
+	contact_name, contact_phone, _contact_email = _resolve_pdf_contact(so)
+	return {
+		"name": so.customer_name or so.customer,
+		"tax_id": customer.tax_id or None,
+		"address": address_line,
+		"city": city,
+		"phone": contact_phone or address_phone,
+		"contact_name": contact_name,
+	}
+
+
+def _build_invoice_lines_and_totals(pl, so):
+	"""Líneas + totales desde los documentos reales (ver cabecera de esta
+	sección). Lee las filas de una copia FRESCA del Pick List: el
+	before_print nativo de ERPNext (PickList.group_similar_items(), si
+	group_same_items está activo) muta `locations` en memoria antes de que
+	corra este hook."""
+	so_items = {row.name: row for row in so.items}
+	precision = 2
+
+	lines = []
+	picked_by_so_item = {}
+	for row in frappe.get_doc("Pick List", pl.name).get("locations") or []:
+		qty = flt(row.picked_qty)
+		if qty <= 0:
+			continue
+		so_item = so_items.get(row.sales_order_item)
+		if not so_item:
+			frappe.throw(
+				_("La línea {0} ({1}) no está vinculada a una línea de la Orden de Venta.").format(
+					row.idx, row.item_code
+				),
+				InvoicePdfNotEligibleError,
+			)
+		picked_by_so_item[so_item.name] = picked_by_so_item.get(so_item.name, 0) + qty
+		rate = flt(so_item.rate)
+		amount = flt(qty * rate, precision)
+		lines.append(
+			{
+				"qty": qty,
+				"qty_display": f"{qty:g}",
+				"description": so_item.item_name or row.item_name or row.item_code,
+				"item_code": row.item_code,
+				"rate": rate,
+				"rate_display": _format_money_co(rate),
+				"amount": amount,
+				"amount_display": _format_money_co(amount),
+			}
+		)
+
+	if not lines:
+		frappe.throw(
+			_("Este Pick List no tiene productos alistados para facturar."), InvoicePdfNotEligibleError
+		)
+
+	covers_whole_order = all(
+		abs(picked_by_so_item.get(item.name, 0) - flt(item.qty)) < 1e-9 for item in so.items
+	)
+	has_order_adjustments = bool(flt(so.total_taxes_and_charges) or flt(so.discount_amount))
+
+	breakdown = []
+	if covers_whole_order:
+		total = flt(so.rounded_total) or flt(so.grand_total)
+		if has_order_adjustments:
+			breakdown.append({"label": "Subtotal", "amount_display": _format_money_co(so.total)})
+			if flt(so.discount_amount):
+				breakdown.append(
+					{"label": "Descuento", "amount_display": _format_money_co(-flt(so.discount_amount))}
+				)
+			if flt(so.total_taxes_and_charges):
+				breakdown.append(
+					{"label": "Impuestos", "amount_display": _format_money_co(so.total_taxes_and_charges)}
+				)
+	elif has_order_adjustments:
+		frappe.throw(
+			_(
+				"Esta factura es parcial y la Orden de Venta {0} tiene impuestos o descuento global; "
+				"la factura comercial todavía no puede prorratearlos."
+			).format(so.name),
+			InvoicePdfNotEligibleError,
+		)
+	else:
+		total = flt(sum(line["amount"] for line in lines), precision)
+
+	return lines, {
+		"total": total,
+		"total_display": _format_money_co(total),
+		"total_in_words": _amount_in_words_es(total),
+		"breakdown": breakdown,
+	}
+
+
+def _build_invoice_pdf_context(pl, so):
+	"""Todos los `doc.fg_pdf_*` que lee el template -- solo desde el
+	before_print (atributos efímeros sobre el `doc` en memoria, nunca se
+	guardan)."""
+	issuer_key = pl.fg_invoice_issuer
+	issuer = get_issuer_config(issuer_key)
+	if issuer.get("logo") and issuer["logo"].startswith("/"):
+		issuer["logo"] = frappe.utils.get_url(issuer["logo"])
+	pl.fg_pdf_issuer = issuer
+	# Imprenta: común a todos los emisores (invoice_issuers.INVOICE_PRINT_PROVIDER).
+	pl.fg_pdf_print_provider = get_print_provider()
+
+	number = _resolve_invoice_number(pl)
+	pl.fg_pdf_number = number
+	pl.fg_pdf_internal_reference = pl.name
+
+	draft_reasons = []
+	if not number:
+		draft_reasons.append(_("sin numeración de factura autorizada"))
+	missing = missing_issuer_fields(issuer_key)
+	if missing:
+		draft_reasons.append(_("faltan datos del emisor: {0}").format(", ".join(missing)))
+	pl.fg_pdf_draft_reasons = draft_reasons
+
+	pl.fg_pdf_invoice_date = _format_date_co(pl.fg_invoiced_on)
+	pl.fg_pdf_payment_terms = None
+	pl.fg_pdf_due_date = None
+	if so.payment_terms_template:
+		pl.fg_pdf_payment_terms = (
+			frappe.db.get_value("Payment Terms Template", so.payment_terms_template, "template_name")
+			or so.payment_terms_template
+		)
+		due_dates = [row.due_date for row in (so.payment_schedule or []) if row.due_date]
+		pl.fg_pdf_due_date = _format_date_co(max(due_dates)) if due_dates else None
+
+	pl.fg_pdf_customer = _resolve_invoice_customer(so)
+	pl.fg_pdf_seller_name = _resolve_pdf_advisor_name(so)
+
+	lines, totals = _build_invoice_lines_and_totals(pl, so)
+	pl.fg_pdf_lines = lines
+	pl.fg_pdf_totals = totals
+
+
+def prepare_and_guard_invoice_pdf(pl, method=None, print_settings=None):
+	"""Pick List `before_print` (hooks.py). Acotado SOLO a "Fabrigray
+	Factura Comercial" -- cualquier otro formato de Pick List (Standard, los
+	de Bodega) retorna de inmediato sin calcular ni bloquear nada. Mismo
+	razonamiento que cotizaciones.prepare_and_guard_quotation_pdf(): get_
+	print() fija form_dict.format antes de renderizar en todos los caminos."""
+	if frappe.form_dict.get("format") != INVOICE_PDF_PRINT_FORMAT_NAME:
+		return
+
+	so = _assert_invoice_pdf_eligible(pl)
+	_build_invoice_pdf_context(pl, so)
+
+
+@frappe.whitelist()
+def set_invoice_issuer(pick_list_name, issuer):
+	"""Guarda/cambia la empresa emisora de la factura de un Pick List
+	Facturado. Persistida en el documento (no en el navegador) para que
+	VER/DESCARGAR/regenerar produzcan siempre el mismo emisor. Un `.save()`
+	real, sin ignore_permissions -- el campo es allow_on_submit=1, igual que
+	fg_invoicing_status (ver mark_as_invoiced()). Mismo valor -> no escribe."""
+	_require_login()
+	_validate_invoice_issuer(issuer)
+
+	pl = frappe.get_doc("Pick List", pick_list_name)
+	_assert_invoiced_pick_list(pl, ptype="write")
+
+	if pl.fg_invoice_issuer != issuer:
+		pl.fg_invoice_issuer = issuer
+		pl.save()  # real permission, no ignore_permissions
+
+	return {"pick_list": pl.name, "fg_invoice_issuer": pl.fg_invoice_issuer}
+
+
+@frappe.whitelist()
+def get_invoice_pdf_view_url(pick_list_name):
+	"""VER PDF: valida todo (_assert_invoice_pdf_eligible) y solo entonces
+	devuelve la URL de printview, con el formato fijo en el servidor."""
+	_require_login()
+	pl = frappe.get_doc("Pick List", pick_list_name)
+	_assert_invoice_pdf_eligible(pl)
+
+	from urllib.parse import quote
+
+	return frappe.utils.get_url(
+		"/printview?doctype=Pick%20List&name="
+		+ quote(pl.name)
+		+ "&format="
+		+ quote(INVOICE_PDF_PRINT_FORMAT_NAME)
+		+ "&no_letterhead=1&trigger_print=0"
+	)
+
+
+@frappe.whitelist()
+def download_invoice_pdf(pick_list_name):
+	"""DESCARGAR PDF: misma validación primero, luego el pipeline nativo
+	(frappe.utils.print_format.download_pdf) con el formato fijo. Solo se
+	reescribe el nombre del archivo."""
+	_require_login()
+	pl = frappe.get_doc("Pick List", pick_list_name)
+	_assert_invoice_pdf_eligible(pl)
+	from frappe.utils.print_format import download_pdf
+
+	download_pdf(doctype="Pick List", name=pl.name, format=INVOICE_PDF_PRINT_FORMAT_NAME, no_letterhead=1)
+
+	safe_name = pl.name.replace(" ", "-").replace("/", "-")
+	frappe.local.response.filename = f"Factura-{pl.fg_invoice_issuer}-{safe_name}.pdf"

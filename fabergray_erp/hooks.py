@@ -239,6 +239,14 @@ doc_events = {
 		# of Quotation, with any other format, is completely untouched.
 		"before_print": "fabergray_erp.api.cotizaciones.prepare_and_guard_quotation_pdf",
 	},
+	# Commit 25.23 -- "Fabrigray Factura Comercial" (PDF comercial de factura
+	# de un Pick List Facturado). Mismo patrón que el before_print de
+	# Quotation: preparación de campos fg_pdf_* + validación de defensa en
+	# profundidad, acotado SOLO a ese formato -- todo otro print de Pick List
+	# queda intacto. Ver prepare_and_guard_invoice_pdf() en api/facturacion.py.
+	"Pick List": {
+		"before_print": "fabergray_erp.api.facturacion.prepare_and_guard_invoice_pdf",
+	},
 	# Home Fabrigray -- Desk-navigation profile only (never a Doctype
 	# permission). See fabergray_erp/user_hooks.py's own module docstring
 	# for why this is safe against a save -> hook -> save loop.
@@ -477,6 +485,10 @@ fixtures = [
 					"fg_invoicing_status",
 					"fg_invoiced_on",
 					"fg_invoiced_by",
+					# Commit 25.23 -- empresa emisora del PDF comercial de
+					# factura (integrandoMAS | ecoluminar). See
+					# set_invoice_issuer() in api/facturacion.py.
+					"fg_invoice_issuer",
 					# Commit 25.12 -- mandatory cancellation reason (+ optional
 					# free-text detail) captured by cancel_sales_order().
 					"fg_cancellation_reason",
@@ -563,8 +575,10 @@ fixtures = [
 		# header for the full design (security gate + display-field prep
 		# both live in the Quotation `before_print` doc_event above, never
 		# in this Print Format's own HTML/CSS, which is pure presentation).
+		# Commit 25.23 -- "Fabrigray Factura Comercial" (Pick List), same
+		# design: pure presentation, logic in api/facturacion.py.
 		"dt": "Print Format",
-		"filters": [["name", "=", "Fabrigray Cotización Comercial"]],
+		"filters": [["name", "in", ["Fabrigray Cotización Comercial", "Fabrigray Factura Comercial"]]],
 	},
 ]
 

@@ -233,6 +233,58 @@
 	color: var(--fg-success-dark);
 }
 
+/* Commit 25.23 -- EMPRESA EMISORA + VER/DESCARGAR PDF on a Facturado card. */
+.fg-facturacion .fg-fact-invoice-pdf {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	gap: 10px 14px;
+	margin-top: 6px;
+	padding-top: 10px;
+	border-top: 1px dashed var(--fg-border);
+}
+
+.fg-facturacion .fg-fact-invoice-pdf-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin: 0;
+}
+
+.fg-facturacion .fg-fact-invoice-pdf-label {
+	font-size: 0.7rem;
+	font-weight: 700;
+	letter-spacing: 0.04em;
+	color: var(--fg-text-muted);
+}
+
+.fg-facturacion .fg-fact-invoice-issuer {
+	min-height: 38px;
+	min-width: 190px;
+	padding: 0 10px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	font-size: 0.84rem;
+}
+
+.fg-facturacion .fg-fact-invoice-pdf-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.fg-facturacion .fg-fact-invoice-view {
+	background: #fff;
+	border-color: var(--fg-primary);
+	color: var(--fg-primary);
+}
+
+.fg-facturacion .fg-fact-invoice-view:hover:not(:disabled) {
+	background: var(--fg-primary-tint);
+}
+
 /* Correction -- "X/Y revisados" progress on a Pendiente card, driven by
  * get_invoicing_queue()'s own checked_items/total_items (never recomputed
  * client-side). */
@@ -987,6 +1039,18 @@ both review dialogs (never on the queue cards, to keep them compact). */
 
 	.fg-facturacion .fg-fact-review-btn {
 		align-self: stretch;
+		justify-content: center;
+	}
+
+	.fg-facturacion .fg-fact-invoice-pdf,
+	.fg-facturacion .fg-fact-invoice-pdf-field,
+	.fg-facturacion .fg-fact-invoice-pdf-actions {
+		align-items: stretch;
+		width: 100%;
+	}
+
+	.fg-facturacion .fg-fact-invoice-pdf-actions .fg-btn {
+		flex: 1 1 0;
 		justify-content: center;
 	}
 
