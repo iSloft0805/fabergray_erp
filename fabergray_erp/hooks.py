@@ -246,6 +246,13 @@ doc_events = {
 	# queda intacto. Ver prepare_and_guard_invoice_pdf() en api/facturacion.py.
 	"Pick List": {
 		"before_print": "fabergray_erp.api.facturacion.prepare_and_guard_invoice_pdf",
+		# Commit 25.25 -- precios de factura (Pick List Item.fg_invoice_rate/
+		# fg_invoice_price_mode/fg_invoice_public_rate) solo cambian por los
+		# endpoints de Facturación: Bodega también tiene write/submit sobre
+		# Pick List y, sin esto, podría reescribirlos por API. `validate`
+		# cubre borradores; `before_update_after_submit` el Pick List sometido.
+		"validate": "fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
+		"before_update_after_submit": "fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
 	},
 	# Home Fabrigray -- Desk-navigation profile only (never a Doctype
 	# permission). See fabergray_erp/user_hooks.py's own module docstring
@@ -527,6 +534,10 @@ fixtures = [
 					"Pick List Item-fg_invoicing_checked",
 					"Pick List Item-fg_invoicing_checked_on",
 					"Pick List Item-fg_invoicing_checked_by",
+					# Commit 25.25 -- precio de factura por línea (api/facturacion.py).
+					"Pick List Item-fg_invoice_rate",
+					"Pick List Item-fg_invoice_price_mode",
+					"Pick List Item-fg_invoice_public_rate",
 				],
 			]
 		],

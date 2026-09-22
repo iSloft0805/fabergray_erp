@@ -778,7 +778,7 @@ both review dialogs (never on the queue cards, to keep them compact). */
 
 .fg-fact-review-table-head {
 	display: grid;
-	grid-template-columns: 44px minmax(200px, 2fr) 140px 170px 100px 130px;
+	grid-template-columns: 36px minmax(170px, 2fr) 96px 72px 72px 104px minmax(150px, 1.3fr) 104px 118px;
 	gap: 10px;
 	align-items: center;
 	background: var(--fg-bg, #f8fafc);
@@ -798,7 +798,7 @@ both review dialogs (never on the queue cards, to keep them compact). */
 
 .fg-fact-review-row {
 	display: grid;
-	grid-template-columns: 44px minmax(200px, 2fr) 140px 170px 100px 130px;
+	grid-template-columns: 36px minmax(170px, 2fr) 96px 72px 72px 104px minmax(150px, 1.3fr) 104px 118px;
 	gap: 10px;
 	align-items: center;
 	padding: 14px 18px;
@@ -866,6 +866,191 @@ both review dialogs (never on the queue cards, to keep them compact). */
 .fg-fact-review-col-uom {
 	font-size: 0.85rem;
 	color: var(--fg-text-muted, #667085);
+}
+
+/* -- Commit 25.25: invoice prices (review dialog, rendered outside
+ *    .fg-facturacion like every other rule in this dialog section) ---- */
+.fg-fact-review-col-public,
+.fg-fact-review-col-total {
+	font-size: 0.85rem;
+	color: var(--fg-text, #101828);
+	text-align: right;
+}
+
+.fg-fact-review-col-public {
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-review-col-final {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 4px 8px;
+	font-size: 0.88rem;
+}
+
+.fg-fact-price-final {
+	display: inline-flex;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 2px;
+}
+
+.fg-fact-price-mode-tag {
+	font-size: 0.66rem;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-price-mode-tag.is-special {
+	color: var(--fg-warning-dark, #b45309);
+}
+
+.fg-fact-price-missing,
+.fg-fact-price-na {
+	color: var(--fg-danger, #d92d20);
+	font-weight: 700;
+	font-size: 0.78rem;
+}
+
+.fg-fact-price-edit-btn {
+	appearance: none;
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	min-height: 32px;
+	padding: 0 10px;
+	border: 1px solid var(--fg-primary, #2b7be4);
+	border-radius: 8px;
+	background: #fff;
+	color: var(--fg-primary, #2b7be4);
+	font-size: 0.74rem;
+	font-weight: 700;
+	cursor: pointer;
+}
+
+.fg-fact-price-edit-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.fg-fact-pricing {
+	border: 1px solid var(--fg-border, #e5e9f0);
+	border-radius: 14px;
+	padding: 14px 18px;
+	margin-bottom: 16px;
+	background: var(--fg-bg, #f8fafc);
+}
+
+.fg-fact-pricing-modes {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 10px 14px;
+	margin-bottom: 12px;
+}
+
+.fg-fact-pricing-label {
+	font-size: 0.76rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-pricing-mode-btns {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.fg-fact-price-mode-btn {
+	appearance: none;
+	min-height: 40px;
+	padding: 0 14px;
+	border: 1.5px solid var(--fg-border, #e5e9f0);
+	border-radius: 10px;
+	background: #fff;
+	color: var(--fg-text, #101828);
+	font-size: 0.8rem;
+	font-weight: 700;
+	cursor: pointer;
+}
+
+.fg-fact-price-mode-btn.is-active {
+	border-color: var(--fg-primary, #2b7be4);
+	background: var(--fg-primary-tint, #eaf2fd);
+	color: var(--fg-primary, #2b7be4);
+}
+
+.fg-fact-price-mode-btn:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.fg-fact-pricing-locked {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 0.82rem;
+	font-weight: 600;
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+.fg-fact-pricing-summary {
+	display: grid;
+	grid-template-columns: repeat(3, 1fr);
+	gap: 10px;
+}
+
+.fg-fact-pricing-summary-item {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 10px 12px;
+	border-radius: 10px;
+	background: #fff;
+	border: 1px solid var(--fg-border, #e5e9f0);
+	font-size: 0.78rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-pricing-summary-item strong {
+	font-size: 1rem;
+	color: var(--fg-text, #101828);
+}
+
+.fg-fact-pricing-summary-item--total {
+	border-color: var(--fg-primary, #2b7be4);
+}
+
+.fg-fact-pricing-summary-item--total strong {
+	color: var(--fg-primary, #2b7be4);
+}
+
+.fg-fact-pricing-warning {
+	display: flex;
+	align-items: flex-start;
+	gap: 6px;
+	margin-top: 10px;
+	font-size: 0.8rem;
+	color: var(--fg-warning-dark, #b45309);
+}
+
+.fg-fact-price-dialog-info {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-bottom: 8px;
+}
+
+.fg-fact-price-dialog-info div {
+	display: flex;
+	justify-content: space-between;
+	gap: 12px;
+	font-size: 0.88rem;
 }
 
 .fg-fact-review-col-status {
@@ -1021,9 +1206,44 @@ both review dialogs (never on the queue cards, to keep them compact). */
 		grid-template-columns: repeat(3, 1fr);
 	}
 
-	.fg-fact-review-table-head,
+	/* Commit 25.25 -- con 9 columnas (precios) la grilla ya no es legible
+	 * en tablet: mismas tarjetas apiladas que <=640px, desde 860px. */
+	.fg-fact-review-table-head {
+		display: none;
+	}
+
 	.fg-fact-review-row {
-		grid-template-columns: 36px minmax(160px, 2fr) 110px 130px 90px 120px;
+		grid-template-columns: 1fr 1fr;
+		gap: 6px 14px;
+		padding: 14px;
+		border-radius: 12px;
+		border: 1px solid var(--fg-border, #e5e9f0);
+		margin: 0 10px 10px;
+	}
+
+	.fg-fact-review-col-idx {
+		display: none;
+	}
+
+	.fg-fact-review-col-product,
+	.fg-fact-review-col-final,
+	.fg-fact-review-col-status {
+		grid-column: 1 / -1;
+	}
+
+	.fg-fact-review-col-code::before,
+	.fg-fact-review-col-qty::before,
+	.fg-fact-review-col-uom::before,
+	.fg-fact-review-col-public::before,
+	.fg-fact-review-col-final::before,
+	.fg-fact-review-col-total::before {
+		content: attr(data-label) ": ";
+		font-weight: 600;
+		color: var(--fg-text-faint, #98a2b3);
+	}
+
+	.fg-fact-pricing-summary {
+		grid-template-columns: 1fr;
 	}
 }
 
@@ -1089,7 +1309,10 @@ both review dialogs (never on the queue cards, to keep them compact). */
 
 	.fg-fact-review-col-code::before,
 	.fg-fact-review-col-qty::before,
-	.fg-fact-review-col-uom::before {
+	.fg-fact-review-col-uom::before,
+	.fg-fact-review-col-public::before,
+	.fg-fact-review-col-final::before,
+	.fg-fact-review-col-total::before {
 		content: attr(data-label) ": ";
 		font-weight: 600;
 		color: var(--fg-text-faint, #98a2b3);
@@ -1097,6 +1320,14 @@ both review dialogs (never on the queue cards, to keep them compact). */
 
 	.fg-fact-review-col-status {
 		margin-top: 4px;
+	}
+
+	.fg-fact-review-row {
+		grid-template-columns: 1fr;
+	}
+
+	.fg-fact-price-mode-btn {
+		flex: 1 1 calc(33% - 8px);
 	}
 }
 

@@ -104,6 +104,9 @@ reviewed. get_invoicing_detail() below returns one entry per child row,
 verbatim, never grouped.
 """
 
+from contextlib import contextmanager
+from decimal import Decimal, InvalidOperation
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
@@ -124,6 +127,12 @@ from fabergray_erp.invoice_issuers import (
 	missing_issuer_fields,
 )
 from fabergray_erp.permission_conditions import assert_same_company
+from fabergray_erp.pricing import (
+	PRICE_MODE_DISCOUNTS,
+	PRICE_MODE_LABELS,
+	discounted_rate,
+	reference_selling_rates,
+)
 from fabergray_erp.sales_order_naming import root_commercial_name
 from fabergray_erp.search_utils import normalize_search_date
 
@@ -998,10 +1007,18 @@ def mark_as_invoiced(pick_list_name):
 
 	sales_order = _sales_order_of(pl)
 
+	# Commit 25.25 -- congela el precio final de CADA línea (el precio de
+	# Facturación si existe; si no, el rate actual del Sales Order) antes de
+	# pasar a Facturado. Valida todas las líneas primero y lanza sin tocar
+	# nada si alguna no tiene precio válido; luego estado + precios viajan
+	# en este MISMO y único .save() -- nunca un estado parcial.
+	_freeze_invoice_prices(pl, _invoice_pricing_sales_orders(pl))
+
 	pl.fg_invoicing_status = FG_INVOICING_FACTURADO
 	pl.fg_invoiced_on = frappe.utils.now_datetime()
 	pl.fg_invoiced_by = frappe.session.user
-	pl.save()  # real permission, no ignore_permissions
+	with _invoice_pricing_write():
+		pl.save()  # real permission, no ignore_permissions
 
 	return {
 		"pick_list": pl.name,
@@ -1232,12 +1249,20 @@ def _build_invoice_lines_and_totals(pl, so):
 	sección). Lee las filas de una copia FRESCA del Pick List: el
 	before_print nativo de ERPNext (PickList.group_similar_items(), si
 	group_same_items está activo) muta `locations` en memoria antes de que
-	corra este hook."""
+	corra este hook.
+
+	Commit 25.25 -- precio unitario = fg_invoice_rate CONGELADO al marcar
+	Facturado (el PDF solo existe para Pick Lists Facturados); nunca se
+	vuelve a leer Sales Order.rate si hay precio congelado, así una factura
+	histórica no cambia si luego cambian Item Price, Sales Order o Price
+	List. Solo un Pick List facturado antes de esta mejora (sin precio
+	congelado) cae al rate del Sales Order, como hasta ahora."""
 	so_items = {row.name: row for row in so.items}
 	precision = 2
 
 	lines = []
 	picked_by_so_item = {}
+	prices_adjusted = False
 	for row in frappe.get_doc("Pick List", pl.name).get("locations") or []:
 		qty = flt(row.picked_qty)
 		if qty <= 0:
@@ -1251,7 +1276,10 @@ def _build_invoice_lines_and_totals(pl, so):
 				InvoicePdfNotEligibleError,
 			)
 		picked_by_so_item[so_item.name] = picked_by_so_item.get(so_item.name, 0) + qty
-		rate = flt(so_item.rate)
+		frozen_rate = flt(row.fg_invoice_rate, precision)
+		rate = frozen_rate if frozen_rate > 0 else flt(so_item.rate)
+		if flt(rate, precision) != flt(so_item.rate, precision):
+			prices_adjusted = True
 		amount = flt(qty * rate, precision)
 		lines.append(
 			{
@@ -1277,7 +1305,18 @@ def _build_invoice_lines_and_totals(pl, so):
 	has_order_adjustments = bool(flt(so.total_taxes_and_charges) or flt(so.discount_amount))
 
 	breakdown = []
-	if covers_whole_order:
+	if prices_adjusted and has_order_adjustments:
+		# Commit 25.25 -- precios de Facturación distintos a los del pedido +
+		# impuestos/descuento global del Sales Order: recalcularlos exigiría
+		# un prorrateo fiscal que no está definido. Se bloquea, no se inventa.
+		frappe.throw(
+			_(
+				"Los precios de esta factura difieren de los de la Orden de Venta {0}, que tiene impuestos "
+				"o descuento global; la factura comercial no puede recalcularlos sin una regla fiscal definida."
+			).format(so.name),
+			InvoicePdfNotEligibleError,
+		)
+	if covers_whole_order and not prices_adjusted:
 		total = flt(so.rounded_total) or flt(so.grand_total)
 		if has_order_adjustments:
 			breakdown.append({"label": "Subtotal", "amount_display": _format_money_co(so.total)})
@@ -1417,3 +1456,440 @@ def download_invoice_pdf(pick_list_name):
 
 	safe_name = pl.name.replace(" ", "-").replace("/", "-")
 	frappe.local.response.filename = f"Factura-{pl.fg_invoice_issuer}-{safe_name}.pdf"
+
+
+# =============================================================================
+# Commit 25.25 -- precios de factura por línea (opción B aprobada).
+#
+# El precio definitivo de Facturación vive en Pick List Item
+# (fg_invoice_rate / fg_invoice_price_mode / fg_invoice_public_rate). El
+# Sales Order NUNCA se modifica: su rate sigue siendo el precio original del
+# pedido (auditoría: cambiarlo exigiría dar `write` sobre Sales Order a
+# Facturación vía "Update Items", o cancel/amend con Pick List y reservas ya
+# vinculados). Consecuencia aceptada: reportes nativos del Sales Order siguen
+# mostrando el precio original.
+#
+# Una sola resolución por línea, _resolve_invoice_lines(), alimenta la
+# pantalla (get_invoicing_pricing), el congelamiento (mark_as_invoiced) y el
+# PDF usa el precio congelado -- UI, estado Facturado y PDF ven el mismo
+# número. El navegador nunca calcula ni envía totales.
+#
+# Reglas de precio (fabergray_erp/pricing.py, compartido con Cotizaciones):
+# los modos generales siempre calculan sobre el PRECIO PÚBLICO vigente
+# (Item Price de la selling_price_list del pedido), nunca sobre un precio ya
+# descontado. Sin fg_invoice_rate persistido, el precio efectivo es el rate
+# del Sales Order (se respeta un precio negociado en Cotización). Al pasar a
+# Facturado todo queda congelado: ni Item Price, ni Sales Order, ni Price
+# List vuelven a cambiar una factura histórica.
+#
+# Escritura: solo estos endpoints + mark_as_invoiced(), dentro de
+# _invoice_pricing_write(); guard_invoice_pricing_fields() (hooks.py) rechaza
+# cualquier otra escritura de los tres campos. Auditoría: Pick List tiene
+# track_changes=1 -- cada .save() deja un Version con valor anterior/nuevo,
+# usuario y fecha; no hay un sistema de auditoría paralelo.
+# =============================================================================
+
+INVOICE_PRICE_MODE_ORDER = "Precio del pedido"
+INVOICE_PRICE_MODE_SPECIAL = "Precio especial"
+INVOICE_PRICING_FIELDS = ("fg_invoice_rate", "fg_invoice_price_mode", "fg_invoice_public_rate")
+_INVOICE_PRICING_FLAG = "fg_invoice_pricing_write"
+
+
+class InvoicePricingLockedError(frappe.ValidationError):
+	pass
+
+
+class InvalidInvoicePriceError(frappe.ValidationError):
+	pass
+
+
+class MissingPublicPriceError(frappe.ValidationError):
+	pass
+
+
+class InvoiceLinePriceMissingError(frappe.ValidationError):
+	pass
+
+
+class OrderAdjustmentsPricingError(frappe.ValidationError):
+	pass
+
+
+def _positive_rate(value, precision):
+	"""EL contrato de precio en todo este módulo: > 0 (a la precisión del
+	campo) es un precio válido; 0, negativo o vacío es "SIN PRECIO" (None).
+	fg_invoice_public_rate/fg_invoice_rate son Currency NOT NULL default 0,
+	así que 0 nunca puede leerse como un precio real de $0."""
+	value = flt(value, precision)
+	return value if value > 0 else None
+
+
+@contextmanager
+def _invoice_pricing_write():
+	"""Bandera interna que autoriza, solo durante este bloque, escribir los
+	tres campos de precio. Nunca viene del navegador (ningún endpoint la
+	acepta como parámetro) y se restaura a su valor previo aunque el bloque
+	lance -- mismo patrón que frappe.flags.fg_billing_price_mode_insert en
+	api/cotizaciones.py."""
+	previous = frappe.flags.get(_INVOICE_PRICING_FLAG)
+	frappe.flags[_INVOICE_PRICING_FLAG] = True
+	try:
+		yield
+	finally:
+		frappe.flags[_INVOICE_PRICING_FLAG] = previous
+
+
+def _pricing_field_value(fieldname, value):
+	# Currency: NOT NULL default 0 en BD, así que None y 0 son lo mismo.
+	return (value or "") if fieldname == "fg_invoice_price_mode" else flt(value)
+
+
+def guard_invoice_pricing_fields(doc, method=None):
+	"""Pick List `validate` + `before_update_after_submit` (hooks.py):
+	rechaza cualquier cambio a fg_invoice_rate/fg_invoice_price_mode/
+	fg_invoice_public_rate que no venga de _invoice_pricing_write() --
+	Bodega tiene write/submit sobre Pick List y, sin esto, podría
+	reescribirlos por API (frappe.client.set_value) o crear un borrador ya
+	"con precio". Compara contra la versión previa del documento; un
+	documento nuevo debe traerlos vacíos."""
+	if frappe.flags.get(_INVOICE_PRICING_FLAG):
+		return
+	before = doc.get_doc_before_save()
+	old_rows = {row.name: row for row in (before.get("locations") or [])} if before else {}
+	for row in doc.get("locations") or []:
+		old = old_rows.get(row.name)
+		for fieldname in INVOICE_PRICING_FIELDS:
+			new_value = _pricing_field_value(fieldname, row.get(fieldname))
+			old_value = _pricing_field_value(fieldname, old.get(fieldname) if old else None)
+			if new_value != old_value:
+				frappe.throw(
+					_("Los precios de factura solo pueden modificarse desde Facturación."),
+					frappe.PermissionError,
+				)
+
+
+def _invoice_pricing_sales_orders(pl):
+	"""Sales Orders reales de las líneas del Pick List, cada uno con
+	permiso de lectura, misma Company y sometido. Líneas sin Sales Order
+	quedan sin precio del pedido (necesitan precio especial)."""
+	sales_orders = {}
+	for row in pl.get("locations") or []:
+		if row.sales_order and row.sales_order not in sales_orders:
+			so = frappe.get_doc("Sales Order", row.sales_order)
+			so.check_permission("read")
+			assert_same_company(so)
+			if so.docstatus != 1:
+				frappe.throw(
+					_("La Orden de Venta {0} no está vigente; no se pueden resolver sus precios.").format(so.name),
+					PickListNotReadyForInvoicingError,
+				)
+			sales_orders[so.name] = so
+	return sales_orders
+
+
+def _load_pricing_pick_list(pick_list_name, ptype):
+	"""Validación común de los endpoints comerciales: rol Facturación
+	(o System Manager/Administrator), permiso real, Company, sometido.
+	Devuelve (pl, sales_orders)."""
+	_require_login()
+	_require_facturacion_role()
+	pl = frappe.get_doc("Pick List", pick_list_name)
+	pl.check_permission(ptype)
+	assert_same_company(pl)
+	if pl.docstatus != 1:
+		frappe.throw(
+			_("Este Pick List no está sometido; todavía no se pueden definir sus precios."),
+			PickListNotReadyForInvoicingError,
+		)
+	return pl, _invoice_pricing_sales_orders(pl)
+
+
+def _assert_pricing_editable(pl):
+	if pl.fg_invoicing_status == FG_INVOICING_FACTURADO:
+		frappe.throw(
+			_("Este pedido ya fue facturado; sus precios están congelados."),
+			InvoicePricingLockedError,
+		)
+
+
+def _live_public_rates(pl, sales_orders):
+	"""Precio público vigente por línea (row.name -> rate), desde la
+	selling_price_list de SU Sales Order -- la misma fuente que Cotizaciones
+	(pricing.reference_selling_rates). Una consulta por Price List."""
+	rows_by_price_list = {}
+	for row in pl.get("locations") or []:
+		so = sales_orders.get(row.sales_order)
+		if so and so.selling_price_list:
+			rows_by_price_list.setdefault(so.selling_price_list, []).append(row)
+	result = {}
+	for price_list, rows in rows_by_price_list.items():
+		rates = reference_selling_rates({row.item_code for row in rows}, price_list)
+		for row in rows:
+			if flt(rates.get(row.item_code)) > 0:
+				result[row.name] = flt(rates[row.item_code])
+	return result
+
+
+def _detect_price_mode(final_rate, public_rate, precision):
+	"""Etiqueta visual de un precio NO persistido: el modo cuyo resultado
+	coincide exactamente (a la precisión del campo) o "Precio del pedido".
+	Nunca convierte un precio del pedido en "Precio especial"."""
+	if final_rate and final_rate > 0 and public_rate and public_rate > 0:
+		for code, percentage in PRICE_MODE_DISCOUNTS.items():
+			if discounted_rate(public_rate, percentage, precision, precision) == flt(final_rate, precision):
+				return PRICE_MODE_LABELS[code]
+	return INVOICE_PRICE_MODE_ORDER if final_rate else None
+
+
+def _resolve_invoice_lines(pl, sales_orders, public_by_row=None):
+	"""LA resolución de precio por línea. Precio final = fg_invoice_rate
+	persistido; si no hay, el rate del Sales Order. Precio público = el
+	congelado si el Pick List ya está Facturado, si no el vigente."""
+	frozen = pl.fg_invoicing_status == FG_INVOICING_FACTURADO
+	if public_by_row is None:
+		public_by_row = {} if frozen else _live_public_rates(pl, sales_orders)
+	so_items = {item.name: item for so in sales_orders.values() for item in so.items}
+
+	lines = []
+	for row in pl.get("locations") or []:
+		precision = row.precision("fg_invoice_rate")
+		so_item = so_items.get(row.sales_order_item)
+		order_rate = flt(so_item.rate, precision) if so_item else None
+		persisted_rate = _positive_rate(row.fg_invoice_rate, precision)
+		persisted = persisted_rate is not None
+		if frozen:
+			public_rate = _positive_rate(row.fg_invoice_public_rate, precision)
+		else:
+			public_rate = _positive_rate(public_by_row.get(row.name), precision)
+		final_rate = persisted_rate if persisted else _positive_rate(order_rate, precision)
+		if persisted and row.fg_invoice_price_mode:
+			price_mode = row.fg_invoice_price_mode
+		else:
+			price_mode = _detect_price_mode(final_rate, public_rate, precision)
+		qty = flt(row.picked_qty)
+		lines.append(
+			frappe._dict(
+				row_name=row.name,
+				item_code=row.item_code,
+				item_name=row.item_name,
+				qty=qty,
+				uom=row.uom,
+				public_rate=public_rate,
+				order_rate=order_rate,
+				final_rate=final_rate,
+				price_mode=price_mode,
+				is_special=price_mode == INVOICE_PRICE_MODE_SPECIAL,
+				is_persisted=persisted,
+				amount=flt(qty * final_rate, precision) if final_rate else None,
+				public_amount=flt(qty * public_rate, precision) if public_rate else None,
+				precision=precision,
+			)
+		)
+	return lines
+
+
+def _invoice_pricing_totals(lines):
+	"""Subtotal público / ajuste comercial / total final, en el servidor.
+	Ningún total se inventa: si falta un precio público, el subtotal público
+	y el ajuste son None (N/D); si falta un precio final, el total es None."""
+	precision = lines[0].precision if lines else 2
+	total = None
+	if lines and all(line.final_rate for line in lines):
+		total = flt(sum(line.amount for line in lines), precision)
+	public_subtotal = None
+	if lines and all(line.public_rate for line in lines):
+		public_subtotal = flt(sum(line.public_amount for line in lines), precision)
+	adjustment = flt(total - public_subtotal, precision) if total is not None and public_subtotal is not None else None
+	return {"public_subtotal": public_subtotal, "adjustment": adjustment, "total": total}
+
+
+def _pricing_payload(pl, sales_orders, lines=None):
+	lines = lines if lines is not None else _resolve_invoice_lines(pl, sales_orders)
+	currency = next((so.currency for so in sales_orders.values()), None)
+	return {
+		"pick_list": pl.name,
+		"fg_invoicing_status": pl.fg_invoicing_status or FG_INVOICING_PENDIENTE,
+		"locked": pl.fg_invoicing_status == FG_INVOICING_FACTURADO,
+		"currency": currency,
+		"price_lists": sorted({so.selling_price_list for so in sales_orders.values() if so.selling_price_list}),
+		"modes": [{"code": code, "label": PRICE_MODE_LABELS[code]} for code in PRICE_MODE_DISCOUNTS],
+		"lines": [
+			{key: value for key, value in line.items() if key not in ("precision", "public_amount")} for line in lines
+		],
+		"totals": _invoice_pricing_totals(lines),
+		"has_special": any(line.is_special for line in lines),
+		"missing_price_items": [line.item_code for line in lines if not line.final_rate],
+		"missing_public_items": [line.item_code for line in lines if not line.public_rate],
+		"order_adjustments": any(
+			flt(so.total_taxes_and_charges) or flt(so.discount_amount) for so in sales_orders.values()
+		),
+	}
+
+
+def _assert_no_order_adjustments(sales_orders):
+	"""Pedido con impuestos o descuento global: cambiar precios exigiría un
+	prorrateo fiscal que no está definido -- se rechaza ANTES de modificar
+	cualquier línea (el PDF lo re-valida como defensa en profundidad)."""
+	for so in sales_orders.values():
+		if flt(so.total_taxes_and_charges) or flt(so.discount_amount):
+			frappe.throw(
+				_(
+					"La Orden de Venta {0} tiene impuestos o descuento global; sus precios no pueden "
+					"modificarse desde Facturación sin una regla fiscal definida."
+				).format(so.name),
+				OrderAdjustmentsPricingError,
+			)
+
+
+def _save_invoice_pricing(pl):
+	with _invoice_pricing_write():
+		pl.save()  # real permission, no ignore_permissions -- Version registra el cambio
+
+
+def _parse_invoice_price(raw, precision):
+	"""Precio manual: numérico, finito, > 0 y sin más decimales que la
+	precisión monetaria del campo. Formato de máquina ("41500" o
+	"41500.50"): nunca adivina separadores de miles."""
+	if raw is None or isinstance(raw, bool):
+		frappe.throw(_("Ingresa un precio válido."), InvalidInvoicePriceError)
+	try:
+		value = Decimal(str(raw).strip())
+	except (InvalidOperation, ValueError):
+		frappe.throw(_("El precio debe ser un número."), InvalidInvoicePriceError)
+	if not value.is_finite():
+		frappe.throw(_("El precio debe ser un número finito."), InvalidInvoicePriceError)
+	if value <= 0:
+		frappe.throw(_("El precio debe ser mayor que cero."), InvalidInvoicePriceError)
+	if -value.as_tuple().exponent > cint(precision):
+		frappe.throw(
+			_("El precio admite como máximo {0} decimales.").format(cint(precision)), InvalidInvoicePriceError
+		)
+	return flt(value, precision)
+
+
+def _freeze_invoice_prices(pl, sales_orders):
+	"""mark_as_invoiced(): congela precio final, precio público de
+	referencia y modo de CADA línea (en memoria; el .save() lo hace el
+	llamador junto con el cambio de estado). Valida TODAS las líneas antes
+	de escribir cualquiera."""
+	lines = _resolve_invoice_lines(pl, sales_orders)
+	missing = [line.item_code for line in lines if not line.final_rate]
+	if missing:
+		frappe.throw(
+			_("No se puede facturar: estos productos no tienen un precio válido: {0}.").format(
+				", ".join(missing)
+			),
+			InvoiceLinePriceMissingError,
+		)
+	rows = {row.name: row for row in pl.get("locations") or []}
+	for line in lines:
+		row = rows[line.row_name]
+		row.fg_invoice_rate = line.final_rate
+		row.fg_invoice_price_mode = line.price_mode
+		row.fg_invoice_public_rate = line.public_rate or 0
+
+
+@frappe.whitelist()
+def get_invoicing_pricing(pick_list_name):
+	"""Vista comercial de un Pick List (endpoint separado a propósito:
+	get_invoicing_detail() mantiene su contrato sin dinero). Por línea:
+	precio público, precio del pedido, precio final, modo y total; más
+	subtotal público / ajuste comercial / total final. Solo lectura."""
+	pl, sales_orders = _load_pricing_pick_list(pick_list_name, "read")
+	return _pricing_payload(pl, sales_orders)
+
+
+@frappe.whitelist()
+def apply_invoice_price_mode(pick_list_name, price_mode, replace_special=0):
+	"""Descuento general: aplica `price_mode` (FULL/DISCOUNT_10/15/20/25) a
+	TODAS las líneas, siempre sobre el precio público vigente.
+
+	Atómico: si CUALQUIER línea no tiene precio público, lanza
+	MissingPublicPriceError nombrando los productos y no modifica ninguna.
+	Si hay precios especiales y replace_special no es 1, no modifica nada y
+	responde requires_confirmation=True (la UI pregunta y repite con
+	replace_special=1). Reaplicar el mismo modo no escribe (idempotente)."""
+	if price_mode not in PRICE_MODE_DISCOUNTS:
+		frappe.throw(_("Selecciona una modalidad de precio válida."), InvalidInvoicePriceError)
+
+	pl, sales_orders = _load_pricing_pick_list(pick_list_name, "write")
+	_assert_pricing_editable(pl)
+	_assert_no_order_adjustments(sales_orders)
+
+	public_by_row = _live_public_rates(pl, sales_orders)
+	rows = pl.get("locations") or []
+	missing = [
+		row.item_code
+		for row in rows
+		if _positive_rate(public_by_row.get(row.name), row.precision("fg_invoice_rate")) is None
+	]
+	if missing:
+		frappe.throw(
+			_("No se aplicó el descuento: estos productos no tienen precio público: {0}.").format(
+				", ".join(missing)
+			),
+			MissingPublicPriceError,
+		)
+
+	specials = [row.item_code for row in rows if row.fg_invoice_price_mode == INVOICE_PRICE_MODE_SPECIAL]
+	if specials and not cint(replace_special):
+		return {
+			"requires_confirmation": True,
+			"special_items": specials,
+			"changed": False,
+			"pricing": _pricing_payload(pl, sales_orders),
+		}
+
+	label = PRICE_MODE_LABELS[price_mode]
+	percentage = PRICE_MODE_DISCOUNTS[price_mode]
+	changed = False
+	for row in rows:
+		precision = row.precision("fg_invoice_rate")
+		public_rate = flt(public_by_row[row.name], precision)
+		new_rate = discounted_rate(public_rate, percentage, precision, precision)
+		current = (flt(row.fg_invoice_rate, precision), row.fg_invoice_price_mode, flt(row.fg_invoice_public_rate, precision))
+		if current != (new_rate, label, public_rate):
+			row.fg_invoice_rate = new_rate
+			row.fg_invoice_price_mode = label
+			row.fg_invoice_public_rate = public_rate
+			changed = True
+	if changed:
+		_save_invoice_pricing(pl)
+
+	return {
+		"requires_confirmation": False,
+		"special_items": [],
+		"changed": changed,
+		"pricing": _pricing_payload(pl, sales_orders),
+	}
+
+
+@frappe.whitelist()
+def set_invoice_line_price(pick_list_name, pick_list_item, rate):
+	"""Precio especial manual de UNA línea. Se permite por encima del
+	precio público (es un precio especial, no un descuento) y también en
+	líneas sin precio público (fg_invoice_public_rate queda vacío)."""
+	pl, sales_orders = _load_pricing_pick_list(pick_list_name, "write")
+	_assert_pricing_editable(pl)
+	_assert_no_order_adjustments(sales_orders)
+
+	row = next((r for r in (pl.get("locations") or []) if r.name == pick_list_item), None)
+	if not row:
+		frappe.throw(
+			_("La línea {0} no pertenece al Pick List {1}.").format(pick_list_item, pl.name),
+			frappe.DoesNotExistError,
+		)
+
+	precision = row.precision("fg_invoice_rate")
+	new_rate = _parse_invoice_price(rate, precision)
+	public_rate = flt(_live_public_rates(pl, sales_orders).get(row.name), precision)
+
+	current = (flt(row.fg_invoice_rate, precision), row.fg_invoice_price_mode, flt(row.fg_invoice_public_rate, precision))
+	changed = current != (new_rate, INVOICE_PRICE_MODE_SPECIAL, public_rate)
+	if changed:
+		row.fg_invoice_rate = new_rate
+		row.fg_invoice_price_mode = INVOICE_PRICE_MODE_SPECIAL
+		row.fg_invoice_public_rate = public_rate
+		_save_invoice_pricing(pl)
+
+	return {"changed": changed, "row_name": row.name, "pricing": _pricing_payload(pl, sales_orders)}

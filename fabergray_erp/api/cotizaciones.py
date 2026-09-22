@@ -78,6 +78,17 @@ from erpnext.stock.doctype.item.item import get_item_defaults
 from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
 from fabergray_erp.api.bodega import _require_login
+from fabergray_erp.pricing import (
+    PRICE_MODE_DISCOUNT_10,
+    PRICE_MODE_DISCOUNT_15,
+    PRICE_MODE_DISCOUNT_20,
+    PRICE_MODE_DISCOUNT_25,
+    PRICE_MODE_DISCOUNTS,
+    PRICE_MODE_FULL,
+    PRICE_MODE_LABELS,
+    discounted_rate,
+    reference_selling_rates,
+)
 from fabergray_erp.api.ventas import DEFAULT_DELIVERY_LEAD_DAYS
 from fabergray_erp.permission_conditions import assert_same_company
 
@@ -126,29 +137,16 @@ BILLING_REVIEW_RETURNED = "Devuelta"
 # -- those come from a completely different, unrelated source
 # (`item_wise_tax_details`, real tax configuration) and are entirely
 # untouched by this rename.
-PRICE_MODE_FULL = "FULL"
-PRICE_MODE_DISCOUNT_10 = "DISCOUNT_10"
-PRICE_MODE_DISCOUNT_15 = "DISCOUNT_15"
-PRICE_MODE_DISCOUNT_20 = "DISCOUNT_20"
-PRICE_MODE_DISCOUNT_25 = "DISCOUNT_25"
-PRICE_MODE_DISCOUNTS = {
-    PRICE_MODE_FULL: 0,
-    PRICE_MODE_DISCOUNT_10: 10,
-    PRICE_MODE_DISCOUNT_15: 15,
-    PRICE_MODE_DISCOUNT_20: 20,
-    PRICE_MODE_DISCOUNT_25: 25,
-}
+#
+# The closed set itself (codes, percentages, labels) now lives in
+# fabergray_erp/pricing.py, shared with Facturación's invoice pricing --
+# re-exported here under the exact same names so nothing that reads
+# `cotizaciones.PRICE_MODE_DISCOUNTS`/`_PRICE_MODE_LABELS` changes.
 # The Select field's own closed set of options (fixtures/custom_field.json)
 # -- `fg_billing_price_mode` stores ONE of these labels, never the raw
 # "FULL"/"DISCOUNT_10"/"DISCOUNT_15"/"DISCOUNT_20"/"DISCOUNT_25" code the
 # client sends.
-_PRICE_MODE_LABELS = {
-    PRICE_MODE_FULL: "Precio completo",
-    PRICE_MODE_DISCOUNT_10: "Descuento 10%",
-    PRICE_MODE_DISCOUNT_15: "Descuento 15%",
-    PRICE_MODE_DISCOUNT_20: "Descuento 20%",
-    PRICE_MODE_DISCOUNT_25: "Descuento 25%",
-}
+_PRICE_MODE_LABELS = PRICE_MODE_LABELS
 
 # Commit 25.13 review fix: the reference price list is READ from the
 # Quotation itself (`qtn.selling_price_list`, native field, resolved by
@@ -1174,14 +1172,7 @@ def _reference_selling_rates(item_codes, price_list):
     purchase-side field -- Facturación reviews what was SOLD for, compared
     to what the SAME selling catalog currently sells for, nothing about
     what it cost to acquire."""
-    if not item_codes or not price_list:
-        return {}
-    rows = frappe.get_list(
-        "Item Price",
-        filters={"price_list": price_list, "item_code": ["in", item_codes]},
-        fields=["item_code", "price_list_rate"],
-    )
-    return {r.item_code: r.price_list_rate for r in rows}
+    return reference_selling_rates(item_codes, price_list)  # shared: fabergray_erp/pricing.py
 
 
 def _resolve_billing_review_warehouse(item_code, company, line_warehouse=None):
@@ -1276,10 +1267,12 @@ def _expected_price_mode_rate(reference_rate, price_mode, row):
     discounted `rate`, so a discount can never compound on a previous one
     (Commit 25.15, section 7's own rule, the same base
     `apply_quotation_price_mode()` itself relies on)."""
-    reference_rate = flt(reference_rate)
-    discount_percentage = PRICE_MODE_DISCOUNTS[price_mode]
-    discount_amount = flt(reference_rate * discount_percentage / 100.0, row.precision("discount_amount"))
-    return flt(reference_rate - discount_amount, row.precision("rate"))
+    return discounted_rate(  # shared: fabergray_erp/pricing.py, identical arithmetic
+        reference_rate,
+        PRICE_MODE_DISCOUNTS[price_mode],
+        row.precision("discount_amount"),
+        row.precision("rate"),
+    )
 
 
 def has_price_mode_changes(qtn, price_mode, reference_rates=None):

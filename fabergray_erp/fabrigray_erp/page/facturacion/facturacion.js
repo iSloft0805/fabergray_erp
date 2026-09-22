@@ -63,6 +63,11 @@ fabergray_erp.Facturacion = class Facturacion {
 		this._review_pick_list = null;
 		this._review_detail = null;
 		this._review_saving_rows = new Set(); // row_name -> in-flight set_invoicing_item_checked() call
+		// Commit 25.25 -- vista comercial (get_invoicing_pricing()) del mismo
+		// Pick List. Solo refleja lo que devuelve el servidor; nunca calcula
+		// precios ni totales propios.
+		this._review_pricing = null;
+		this._review_pricing_busy = false;
 
 		// Commit 25.13 -- "COTIZACIONES PENDIENTES" (billing review of
 		// Quotation, entirely separate from the Pick List invoicing queue
@@ -659,6 +664,7 @@ fabergray_erp.Facturacion = class Facturacion {
 
 		this._review_pick_list = pick_list_name;
 		this._review_detail = null;
+		this._review_pricing = null;
 		this._review_saving_rows = new Set();
 
 		const dialog = new frappe.ui.Dialog({
@@ -680,10 +686,14 @@ fabergray_erp.Facturacion = class Facturacion {
 		dialog.show();
 		this._review_dialog = dialog;
 
-		this.call("get_invoicing_detail", { pick_list: pick_list_name })
-			.then((detail) => {
+		Promise.all([
+			this.call("get_invoicing_detail", { pick_list: pick_list_name }),
+			this.call("get_invoicing_pricing", { pick_list_name: pick_list_name }),
+		])
+			.then(([detail, pricing]) => {
 				if (this._review_pick_list !== pick_list_name) return; // dialog closed/reopened meanwhile
 				this._review_detail = detail;
+				this._review_pricing = pricing;
 				this.render_review_dialog_body();
 			})
 			.catch(() => dialog.hide());
@@ -719,8 +729,11 @@ fabergray_erp.Facturacion = class Facturacion {
 						<span class="fg-fact-review-col-idx">#</span>
 						<span class="fg-fact-review-col-product">${__("Producto")}</span>
 						<span class="fg-fact-review-col-code">${__("Código")}</span>
-						<span class="fg-fact-review-col-qty">${__("Cantidad solicitada")}</span>
+						<span class="fg-fact-review-col-qty">${__("Cantidad")}</span>
 						<span class="fg-fact-review-col-uom">${__("Unidad")}</span>
+						<span class="fg-fact-review-col-public">${__("Precio público")}</span>
+						<span class="fg-fact-review-col-final">${__("Precio final")}</span>
+						<span class="fg-fact-review-col-total">${__("Total")}</span>
 						<span class="fg-fact-review-col-status">${__("Estado")}</span>
 					</div>
 					<div class="fg-fact-review-table-body">${d.items
@@ -790,6 +803,8 @@ fabergray_erp.Facturacion = class Facturacion {
 				</div>
 			</div>
 
+			${this.render_review_pricing_section_html()}
+
 			${items_html}
 
 			<div class="fg-fact-review-callout">
@@ -812,6 +827,228 @@ fabergray_erp.Facturacion = class Facturacion {
 		this.refresh_review_primary_action();
 	}
 
+	// =====================================================================
+	// Commit 25.25 -- precios de factura (get_invoicing_pricing()/
+	// apply_invoice_price_mode()/set_invoice_line_price()). Todo número
+	// mostrado viene del servidor; el JS solo formatea.
+	// =====================================================================
+	review_pricing_line(row_name) {
+		const p = this._review_pricing;
+		return p ? (p.lines || []).find((l) => l.row_name === row_name) : null;
+	}
+
+	render_review_pricing_section_html() {
+		const p = this._review_pricing;
+		if (!p) {
+			return `<div class="fg-fact-pricing fg-fact-pricing--empty">${__("No se pudieron cargar los precios.")}</div>`;
+		}
+		const lines = p.lines || [];
+		const common_mode = lines.length && lines.every((l) => l.price_mode === lines[0].price_mode) ? lines[0].price_mode : null;
+		const modes_html = p.locked
+			? `<span class="fg-fact-pricing-locked">${icon("lock", "fg-icon-sm")} ${__("Precios congelados al facturar")}</span>`
+			: p.order_adjustments
+			? `<span class="fg-fact-pricing-locked">${icon("lock", "fg-icon-sm")} ${__("Precios del pedido (no editables)")}</span>`
+			: (p.modes || [])
+					.map(
+						(m) =>
+							`<button type="button" class="fg-fact-price-mode-btn ${common_mode === m.label ? "is-active" : ""}" data-mode="${
+								m.code
+							}" ${this._review_pricing_busy ? "disabled" : ""}>${frappe.utils.escape_html(price_mode_button_label(m))}</button>`
+					)
+					.join("");
+		const t = p.totals || {};
+		const adjustment_html =
+			t.adjustment === null || t.adjustment === undefined
+				? __("N/D")
+				: `${t.adjustment > 0 ? "+" : ""}${money(t.adjustment)}`;
+		const warnings = [];
+		if ((p.missing_price_items || []).length) {
+			warnings.push(
+				__("Sin precio: {0}. Define un precio especial para poder facturar.", [
+					frappe.utils.escape_html(p.missing_price_items.join(", ")),
+				])
+			);
+		}
+		if (p.order_adjustments) {
+			warnings.push(
+				__(
+					"El pedido tiene impuestos o descuento global: sus precios no pueden modificarse desde Facturación sin una regla fiscal definida."
+				)
+			);
+		}
+		return `
+			<div class="fg-fact-pricing">
+				<div class="fg-fact-pricing-modes">
+					<span class="fg-fact-pricing-label">${__("Precio general")}</span>
+					<div class="fg-fact-pricing-mode-btns">${modes_html}</div>
+				</div>
+				<div class="fg-fact-pricing-summary">
+					<div class="fg-fact-pricing-summary-item">
+						<span>${__("Subtotal público")}</span><strong>${money(t.public_subtotal)}</strong>
+					</div>
+					<div class="fg-fact-pricing-summary-item">
+						<span>${__("Ajuste comercial")}</span><strong>${adjustment_html}</strong>
+					</div>
+					<div class="fg-fact-pricing-summary-item fg-fact-pricing-summary-item--total">
+						<span>${__("Total final")}</span><strong>${money(t.total)}</strong>
+					</div>
+				</div>
+				${warnings.map((w) => `<div class="fg-fact-pricing-warning">${icon("triangle-alert", "fg-icon-sm")} ${w}</div>`).join("")}
+			</div>
+		`;
+	}
+
+	render_review_price_cells_html(row_name) {
+		const line = this.review_pricing_line(row_name);
+		const p = this._review_pricing;
+		if (!line) {
+			return `
+				<span class="fg-fact-review-col-public" data-label="${__("Precio público")}">—</span>
+				<span class="fg-fact-review-col-final" data-label="${__("Precio final")}">—</span>
+				<span class="fg-fact-review-col-total" data-label="${__("Total")}">—</span>
+			`;
+		}
+		const final_html = line.final_rate
+			? `<strong>${money(line.final_rate)}</strong>`
+			: `<strong class="fg-fact-price-missing">${__("SIN PRECIO")}</strong>`;
+		const mode_html = line.price_mode
+			? `<span class="fg-fact-price-mode-tag ${line.is_special ? "is-special" : ""}">${frappe.utils.escape_html(
+					line.is_special ? __("PRECIO ESPECIAL") : line.price_mode
+			  )}</span>`
+			: "";
+		const edit_html =
+			p && !p.locked && !p.order_adjustments
+				? `<button type="button" class="fg-fact-price-edit-btn" title="${__("Editar precio final")}" ${
+						this._review_pricing_busy ? "disabled" : ""
+				  }>${icon("pencil", "fg-icon-sm")} ${__("Editar")}</button>`
+				: "";
+		return `
+			<span class="fg-fact-review-col-public" data-label="${__("Precio público")}">${
+				line.public_rate ? money(line.public_rate) : `<span class="fg-fact-price-na">${__("SIN PRECIO")}</span>`
+			}</span>
+			<span class="fg-fact-review-col-final" data-label="${__("Precio final")}">
+				<span class="fg-fact-price-final">${final_html}${mode_html}</span>
+				${edit_html}
+			</span>
+			<span class="fg-fact-review-col-total" data-label="${__("Total")}">${
+				line.amount === null || line.amount === undefined ? "—" : `<strong>${money(line.amount)}</strong>`
+			}</span>
+		`;
+	}
+
+	// Reemplaza solo la sección comercial y las 3 celdas de precio de cada
+	// fila -- nunca el modal completo ni el contenedor con scroll.
+	refresh_review_pricing(pricing) {
+		if (pricing) this._review_pricing = pricing;
+		const dialog = this._review_dialog;
+		if (!dialog) return;
+		const $wrap = dialog.fields_dict.review_html.$wrapper;
+		$wrap.find(".fg-fact-pricing").replaceWith(this.render_review_pricing_section_html());
+		$wrap.find(".fg-fact-review-row").each((_i, el) => {
+			const $row = $(el);
+			$row.find(".fg-fact-review-col-public, .fg-fact-review-col-final, .fg-fact-review-col-total").remove();
+			$row.find(".fg-fact-review-col-uom").after(this.render_review_price_cells_html($row.data("row")));
+		});
+		this.refresh_review_primary_action();
+	}
+
+	set_review_pricing_busy(is_busy) {
+		this._review_pricing_busy = !!is_busy;
+		if (this._review_dialog) {
+			this._review_dialog.fields_dict.review_html.$wrapper
+				.find(".fg-fact-price-mode-btn, .fg-fact-price-edit-btn")
+				.prop("disabled", !!is_busy);
+		}
+		this.refresh_review_primary_action();
+	}
+
+	// Descuento general. Sin replace_special, si hay precios especiales el
+	// servidor NO modifica nada y responde requires_confirmation; solo tras
+	// confirmar se repite con replace_special=1 (el servidor lo exige).
+	apply_review_price_mode(price_mode, replace_special) {
+		const pick_list_name = this._review_pick_list;
+		if (!price_mode || !pick_list_name || this._review_pricing_busy) return;
+		this.set_review_pricing_busy(true);
+		this.call("apply_invoice_price_mode", {
+			pick_list_name: pick_list_name,
+			price_mode: price_mode,
+			replace_special: replace_special ? 1 : 0,
+		})
+			.then((result) => {
+				if (this._review_pick_list !== pick_list_name) return;
+				if (result.requires_confirmation) {
+					frappe.confirm(
+						__("Este cambio reemplazará los precios especiales establecidos manualmente. ¿Deseas continuar?"),
+						() => this.apply_review_price_mode(price_mode, true)
+					);
+					return;
+				}
+				this.refresh_review_pricing(result.pricing);
+				if (result.changed) {
+					frappe.show_alert({ message: __("Precios actualizados."), indicator: "green" }, 3);
+				}
+			})
+			.catch(() => {})
+			.finally(() => this.set_review_pricing_busy(false));
+	}
+
+	open_line_price_dialog(row_name) {
+		const line = this.review_pricing_line(row_name);
+		const pick_list_name = this._review_pick_list;
+		const p = this._review_pricing;
+		if (!line || !pick_list_name || !p || p.locked || p.order_adjustments) return;
+
+		const price_dialog = new frappe.ui.Dialog({
+			title: __("Precio especial"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "info_html",
+					options: `
+						<div class="fg-fact-price-dialog-info">
+							<div><span>${__("Producto")}</span><strong>${frappe.utils.escape_html(
+								line.item_name || line.item_code
+							)}</strong></div>
+							<div><span>${__("Precio público")}</span><strong>${
+								line.public_rate ? money(line.public_rate) : __("SIN PRECIO")
+							}</strong></div>
+							<div><span>${__("Precio actual")}</span><strong>${
+								line.final_rate ? money(line.final_rate) : __("SIN PRECIO")
+							}</strong></div>
+						</div>
+					`,
+				},
+				{ fieldtype: "Currency", fieldname: "rate", label: __("Nuevo precio especial"), reqd: 1 },
+			],
+			primary_action_label: __("GUARDAR"),
+			primary_action: (values) => {
+				if (!(flt(values.rate) > 0)) {
+					frappe.msgprint(__("El precio debe ser mayor que cero."));
+					return;
+				}
+				price_dialog.disable_primary_action();
+				this.set_review_pricing_busy(true);
+				this.call("set_invoice_line_price", {
+					pick_list_name: pick_list_name,
+					pick_list_item: row_name,
+					rate: values.rate,
+				})
+					.then((result) => {
+						price_dialog.hide();
+						if (this._review_pick_list !== pick_list_name) return;
+						this.refresh_review_pricing(result.pricing);
+					})
+					.catch(() => price_dialog.enable_primary_action())
+					.finally(() => this.set_review_pricing_busy(false));
+			},
+			secondary_action_label: __("CANCELAR"),
+			secondary_action: () => price_dialog.hide(),
+		});
+		price_dialog.$wrapper.addClass("fg-fact-price-dialog");
+		price_dialog.show();
+		if (line.final_rate) price_dialog.set_value("rate", line.final_rate);
+	}
+
 	render_review_item_row(item, idx, is_readonly) {
 		const checked = !!cint(item.checked);
 		return `
@@ -826,8 +1063,9 @@ fabergray_erp.Facturacion = class Facturacion {
 					<span class="fg-fact-review-item-name">${frappe.utils.escape_html(item.item_name || item.item_code)}</span>
 				</span>
 				<span class="fg-fact-review-col-code" data-label="${__("Código")}">${frappe.utils.escape_html(item.item_code)}</span>
-				<span class="fg-fact-review-col-qty" data-label="${__("Cantidad solicitada")}">${format_qty(item.qty)}</span>
+				<span class="fg-fact-review-col-qty" data-label="${__("Cantidad")}">${format_qty(item.qty)}</span>
 				<span class="fg-fact-review-col-uom" data-label="${__("Unidad")}">${frappe.utils.escape_html(item.uom || "—")}</span>
+				${this.render_review_price_cells_html(item.row_name)}
 				<span class="fg-fact-review-col-status" data-label="${__("Estado")}">
 					<span class="fg-fact-review-status-badge ${checked ? "is-revisado" : "is-pendiente"}">
 						${checked ? icon("check", "fg-icon-sm") : icon("circle", "fg-icon-sm")}
@@ -851,6 +1089,15 @@ fabergray_erp.Facturacion = class Facturacion {
 			const $row = $checkbox.closest(".fg-fact-review-row");
 			const row_name = $row.data("row");
 			this.toggle_review_item(row_name, $checkbox.is(":checked"));
+		});
+
+		// Commit 25.25 -- precios. Delegados sobre el wrapper: las celdas se
+		// reemplazan en sitio (refresh_review_pricing()) y siguen funcionando.
+		$wrap.off("click", ".fg-fact-price-mode-btn").on("click", ".fg-fact-price-mode-btn", (e) => {
+			this.apply_review_price_mode($(e.currentTarget).data("mode"));
+		});
+		$wrap.off("click", ".fg-fact-price-edit-btn").on("click", ".fg-fact-price-edit-btn", (e) => {
+			this.open_line_price_dialog($(e.currentTarget).closest(".fg-fact-review-row").data("row"));
 		});
 
 		$wrap.off("click", ".fg-fact-review-copy-btn").on("click", ".fg-fact-review-copy-btn", () => {
@@ -960,7 +1207,12 @@ fabergray_erp.Facturacion = class Facturacion {
 		const dialog = this._review_dialog;
 		const d = this._review_detail;
 		if (!dialog || !d) return;
-		const complete = d.total_items > 0 && d.checked_items === d.total_items && d.fg_invoicing_status !== "Facturado";
+		// Commit 25.25 -- también exige precio final en todas las líneas
+		// (mark_as_invoiced() lo re-valida en el servidor).
+		const p = this._review_pricing;
+		const prices_ok = !!p && !(p.missing_price_items || []).length && !this._review_pricing_busy;
+		const complete =
+			d.total_items > 0 && d.checked_items === d.total_items && d.fg_invoicing_status !== "Facturado" && prices_ok;
 		if (complete) {
 			dialog.enable_primary_action();
 		} else {
@@ -1736,6 +1988,17 @@ function cint(v) {
 
 function flt(v) {
 	return frappe.utils.flt ? frappe.utils.flt(v) : parseFloat(v) || 0;
+}
+
+// Commit 25.25 -- formato de dinero solo para mostrar valores del servidor.
+function money(v) {
+	return v === null || v === undefined ? __("N/D") : frappe.format(v, { fieldtype: "Currency" });
+}
+
+// "PRECIO COMPLETO" / "-10%" ... -- misma presentación que el selector de
+// Cotizaciones; la etiqueta persistida sigue siendo la del servidor.
+function price_mode_button_label(mode) {
+	return mode.code === "FULL" ? __("PRECIO COMPLETO") : mode.label.replace(/^Descuento /, "-");
 }
 
 function format_qty(v) {
