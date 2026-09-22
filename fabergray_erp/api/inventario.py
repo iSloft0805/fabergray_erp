@@ -39,7 +39,10 @@ frappe.has_permission(throw=True), never frappe.get_all() (bypasses
 permissions), never ignore_permissions=True, never frappe.set_user()
 outside of tests, never frappe.db.sql()/frappe.db.commit() (a request's
 own commit/rollback boundary is what makes each write endpoint atomic --
-see record_opening_count()'s own docstring).
+see record_opening_count()'s own docstring). One documented exception
+(Commit 25.21): _item_creation_catalogs() reads Item Group/UOM names via
+frappe.db, behind get_item_creation_options()'s role + Item-permission
+gate -- see its own docstring for why a Custom DocPerm is not an option.
 
 Stock is always aggregated with ONE grouped frappe.get_list() query over
 Bin (_bin_totals() below), never one query per Item -- the same "bulk
@@ -106,6 +109,27 @@ class MissingOpeningAccountError(frappe.ValidationError):
 
 
 class PurchaseRateRequiredForOpeningError(frappe.ValidationError):
+    pass
+
+
+# -- Commit 25.21: product management (create/deactivate/reactivate/delete) --
+class DuplicateItemCodeError(frappe.ValidationError):
+    pass
+
+
+class InvalidItemGroupError(frappe.ValidationError):
+    pass
+
+
+class InvalidUOMError(frappe.ValidationError):
+    pass
+
+
+class ItemHasStockError(frappe.ValidationError):
+    pass
+
+
+class ItemHasDependenciesError(frappe.ValidationError):
     pass
 
 
@@ -752,3 +776,231 @@ def update_item_master(item_code, item_group=None, purchase_rate=None, selling_r
             "Item Price", {"item_code": item_code, "price_list": PRICE_LIST}, "price_list_rate"
         ),
     }
+
+
+# =========================================================================
+# Commit 25.21 -- product management (create/deactivate/reactivate/delete)
+# =========================================================================
+#
+# Uses ERPNext's own native Item doctype end to end -- never a parallel
+# catalog table/doctype. Only Jefe de Bodega/System Manager/Administrator
+# can reach any of the four endpoints below: each one calls
+# frappe.has_permission("Item", <ptype>, throw=True) as its own first line,
+# a real server-side guard against fixtures/custom_docperm.json's actual
+# grants (this commit adds Item.create=1/delete=1 for both roles -- they
+# already had read=1/write=1 from Commit 22.6). Bodega keeps read=1/
+# write=0/create=0/delete=0 -- unchanged, still strictly read-only for the
+# product master, exactly like Commit 22.6 already established for
+# update_item_master(). can_edit_inventory() (inventario.js) only hides
+# the buttons; it is never the authorization boundary.
+#
+# create_inventory_item() never creates an Item Price (selling price stays
+# out of scope here -- update_item_master() already exists for that, once
+# a price is actually wanted) and never creates a Bin/Stock Reconciliation
+# row (opening stock stays exclusively record_opening_count()'s job,
+# unchanged) -- a brand-new Item starts with zero stock everywhere, on
+# purpose.
+#
+# deactivate_inventory_item()/reactivate_inventory_item() are a plain
+# Item.disabled flip via a normal doc.save() -- no cascading effect on any
+# other document; ERPNext's own native Sales Order/Quotation/Pick List
+# item-pickers already exclude disabled=1 Items on their own (nothing in
+# this app duplicates that filtering, so nothing here needed to change it
+# -- see this commit's own audit note in the STOP AND REPORT).
+#
+# delete_inventory_item() deliberately does NOT hand-enumerate every
+# doctype that might reference an Item (Sales Order Item, Quotation Item,
+# Sales Invoice Item, Delivery Note Item, Pick List Item, Stock Entry
+# Detail, Purchase Order Item, Purchase Receipt Item, Material Request
+# Item, Item Price, Stock Ledger Entry, Bin, ...): frappe.delete_doc()
+# already scans every Link-to-Item field in the whole system natively and
+# raises frappe.LinkExistsError the moment any one of them still
+# references this Item -- that IS the real protection, caught below and
+# translated into one friendly, functional message. The explicit Bin/
+# actual_qty check that runs first exists only to give a MORE SPECIFIC
+# message for that one common case (an Item with stock but otherwise no
+# other references yet) -- never a cascade, never frappe.db.delete(),
+# never a raw DELETE, never ignore_permissions.
+
+
+_ITEM_CODE_MAX_LENGTH = 140  # Item.item_code's own native Data field length cap
+
+# Commit 25.21 -- roles que administran productos desde esta Page
+# (Administrator siempre). Bodega también abre la Page, pero solo lectura.
+_INVENTORY_MANAGER_ROLES = ("Jefe de Bodega", "System Manager")
+
+
+def _require_inventory_manager():
+    """Rol explícito, además del permiso nativo sobre Item que cada
+    endpoint ya exige -- mismo patrón que cotizaciones._require_facturacion_role()."""
+    user = frappe.session.user
+    if user == "Administrator":
+        return
+    if not set(frappe.get_roles(user)) & set(_INVENTORY_MANAGER_ROLES):
+        frappe.throw(_("No tienes permiso para gestionar productos."), frappe.PermissionError)
+
+
+def _item_creation_catalogs():
+    """Item Groups (hoja, is_group=0) y UOM habilitadas, solo `name`,
+    ordenados. ÚNICA lectura de este módulo que no pasa por los permisos del
+    usuario, y es deliberada: Jefe de Bodega no tiene (ni debe tener)
+    permiso nativo sobre Item Group/UOM -- darle un Custom DocPerm haría que
+    Frappe ignore la matriz nativa COMPLETA de esos DocTypes para todos los
+    demás roles (Sales User, Stock User, Item Manager, ...). Son catálogos
+    maestros no sensibles; aquí se leen con frappe.db (la misma vía que
+    create_inventory_item()/update_item_master() ya usan para validar su
+    existencia con frappe.db.exists), solo el nombre, y solo detrás de
+    get_item_creation_options(), que exige rol + permiso sobre Item."""
+    item_groups = frappe.db.get_all("Item Group", filters={"is_group": 0}, pluck="name", order_by="name asc")
+    uoms = frappe.db.get_all("UOM", filters={"enabled": 1}, pluck="name", order_by="name asc")
+    return item_groups, uoms
+
+
+@frappe.whitelist()
+def get_item_creation_options():
+    """Opciones válidas para "+ NUEVO PRODUCTO" (y el grupo en "Editar"):
+    {"item_groups": [...], "uoms": [...]}. Reemplaza los campos Link, que
+    exigirían permiso de lectura sobre Item Group/UOM. El servidor vuelve a
+    validar cada valor en create_inventory_item(): nunca confía en estas
+    opciones tal como vuelven del navegador."""
+    _require_login()
+    _require_inventory_manager()
+    frappe.has_permission("Item", "write", throw=True)
+
+    item_groups, uoms = _item_creation_catalogs()
+    return {"item_groups": item_groups, "uoms": uoms}
+
+
+@frappe.whitelist()
+def create_inventory_item(item_code, item_name, item_group, stock_uom, is_stock_item=1, description=None):
+    """Creates one native Item via frappe.get_doc({...}).insert() -- never
+    ignore_permissions, never a direct db.insert(). item_code/item_name
+    are trimmed and required; item_code uniqueness is checked explicitly
+    here for a friendly message, on top of (not instead of) Item's own
+    native unique=1 constraint on the field. item_group/stock_uom must
+    already exist -- this endpoint never creates an Item Group or a UOM
+    on the fly (section 6/7 of the brief: the user creates those through
+    their own proper flow first)."""
+    _require_login()
+    _require_inventory_manager()
+    frappe.has_permission("Item", "create", throw=True)
+
+    item_code = (item_code or "").strip()
+    item_name = (item_name or "").strip()
+
+    if not item_code:
+        frappe.throw(_("El código del producto es obligatorio."))
+    if len(item_code) > _ITEM_CODE_MAX_LENGTH:
+        frappe.throw(
+            _("El código del producto no puede superar los {0} caracteres.").format(_ITEM_CODE_MAX_LENGTH)
+        )
+    if frappe.db.exists("Item", item_code):
+        frappe.throw(_("Ya existe un producto con el código {0}.").format(item_code), DuplicateItemCodeError)
+
+    if not item_name:
+        frappe.throw(_("El nombre del producto es obligatorio."))
+
+    if not item_group or not frappe.db.exists("Item Group", item_group):
+        frappe.throw(_("El grupo de artículos {0} no existe.").format(item_group), InvalidItemGroupError)
+    if cint(frappe.db.get_value("Item Group", item_group, "is_group")):
+        frappe.throw(
+            _("{0} es un grupo padre; elige un grupo de artículos final.").format(item_group),
+            InvalidItemGroupError,
+        )
+
+    if not stock_uom or not frappe.db.exists("UOM", stock_uom):
+        frappe.throw(_("La unidad de medida {0} no existe.").format(stock_uom), InvalidUOMError)
+    if not cint(frappe.db.get_value("UOM", stock_uom, "enabled")):
+        frappe.throw(_("La unidad de medida {0} está deshabilitada.").format(stock_uom), InvalidUOMError)
+
+    description = (description or "").strip() or None
+
+    doc = frappe.get_doc(
+        {
+            "doctype": "Item",
+            "item_code": item_code,
+            "item_name": item_name,
+            "item_group": item_group,
+            "stock_uom": stock_uom,
+            "is_stock_item": cint(is_stock_item),
+            "description": description,
+        }
+    )
+    doc.insert()
+
+    return {
+        "item_code": doc.item_code,
+        "item_name": doc.item_name,
+        "item_group": doc.item_group,
+        "stock_uom": doc.stock_uom,
+        "is_stock_item": doc.is_stock_item,
+        "disabled": doc.disabled,
+    }
+
+
+@frappe.whitelist()
+def deactivate_inventory_item(item_code):
+    """Item.disabled = 1 via a normal doc.save() -- native versioning/
+    hooks apply exactly as they would from the Desk form. Never touches
+    stock, price, or any dependent document; fully reversible via
+    reactivate_inventory_item(). Idempotent: calling this on an
+    already-disabled Item is a harmless no-op save, never an error."""
+    _require_login()
+    _require_inventory_manager()
+    frappe.has_permission("Item", "write", throw=True)
+
+    doc = frappe.get_doc("Item", item_code)
+    doc.check_permission("write")
+    doc.disabled = 1
+    doc.save()
+    return {"item_code": doc.item_code, "disabled": doc.disabled}
+
+
+@frappe.whitelist()
+def reactivate_inventory_item(item_code):
+    """Item.disabled = 0 -- the exact inverse of deactivate_inventory_item(),
+    same guard, same save() semantics."""
+    _require_login()
+    _require_inventory_manager()
+    frappe.has_permission("Item", "write", throw=True)
+
+    doc = frappe.get_doc("Item", item_code)
+    doc.check_permission("write")
+    doc.disabled = 0
+    doc.save()
+    return {"item_code": doc.item_code, "disabled": doc.disabled}
+
+
+@frappe.whitelist()
+def delete_inventory_item(item_code):
+    """Physical deletion, only when genuinely safe. See this section's own
+    module-level comment above for why the real protection is
+    frappe.delete_doc()'s native, system-wide link scan (frappe.
+    LinkExistsError) rather than a hand-enumerated list of doctypes here.
+    The stock check below runs first only to give a more specific message
+    for that one common case; frappe.get_doc(...).check_permission("delete")
+    is the real record-level authorization check, on top of the
+    doctype-level frappe.has_permission() above it."""
+    _require_login()
+    _require_inventory_manager()
+    frappe.has_permission("Item", "delete", throw=True)
+
+    doc = frappe.get_doc("Item", item_code)
+    doc.check_permission("delete")
+
+    stock_rows = frappe.get_list("Bin", filters={"item_code": item_code}, fields=["actual_qty"])
+    if any(flt(r.actual_qty) != 0 for r in stock_rows):
+        frappe.throw(_("No se puede eliminar porque tiene existencias."), ItemHasStockError)
+
+    try:
+        frappe.delete_doc("Item", item_code)
+    except frappe.LinkExistsError:
+        frappe.throw(
+            _(
+                "No se puede eliminar este producto porque ya tiene movimientos o documentos asociados. "
+                "Puedes desactivarlo."
+            ),
+            ItemHasDependenciesError,
+        )
+
+    return {"item_code": item_code, "deleted": True}

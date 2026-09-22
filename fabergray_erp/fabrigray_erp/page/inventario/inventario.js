@@ -40,7 +40,10 @@ fabergray_erp.Inventario = class Inventario {
 		this.summary = null;
 
 		// Lista (view: "dashboard").
-		this.list_filter = "all"; // "all" | "active" | "disabled" | "with_stock" | "out_of_stock"
+		// Commit 25.21, section 12 -- default is "active" (products already
+		// disabled/discontinued should not be the first thing a Jefe de
+		// Bodega/Bodega user sees when opening this Page).
+		this.list_filter = "active"; // "all" | "active" | "disabled" | "with_stock" | "out_of_stock"
 		this.list_search = "";
 		this.list_page = 1;
 		this.list_rows = [];
@@ -56,6 +59,7 @@ fabergray_erp.Inventario = class Inventario {
 		// Item+Warehouse que se está abriendo/ajustando ahora mismo.
 		this.qty_edit = null; // {warehouse, has_opening_stock, current_qty}
 		this._warehouse_options = null; // cache de Warehouse.get_list(), una vez por sesión de la Page
+		this._item_creation_options = null; // cache de get_item_creation_options(), una vez por sesión
 
 		this.state = { view: "dashboard" };
 
@@ -113,6 +117,12 @@ fabergray_erp.Inventario = class Inventario {
 					"arrow-left"
 			  )} ${__("Jefe de Bodega")}</button>`
 			: "";
+		// Ajuste visual -- "NUEVO PRODUCTO" ya no vive en este header global
+		// (movido a la fila del título "Productos", render_list_section()
+		// below) -- misma acción/permiso/modal, solo otra ubicación. No hay
+		// hueco reservado aquí: `.fg-header-user` es un flex row con `gap`,
+		// nunca un ancho fijo, así que quitar el botón simplemente colapsa
+		// el espacio.
 		this.$app.html(`
 			<div class="fg-header">
 				<div class="fg-header-brand">
@@ -292,9 +302,27 @@ fabergray_erp.Inventario = class Inventario {
 			)
 			.join("");
 
+		// Ajuste visual -- "NUEVO PRODUCTO" vive ahora en la MISMA fila que
+		// el título "Productos" (antes: header superior global de
+		// Inventario) -- misma acción/permiso/estilo, `.fg-section-head` ya
+		// es el wrapper flex `justify-content: space-between` que todas las
+		// demás Pages usan para esto (ej. Facturación's own
+		// "Cotizaciones pendientes" + contador), así que se reutiliza, no
+		// se crea uno nuevo. Mismo gate cosmético que el resto del Page --
+		// la frontera real sigue siendo `frappe.has_permission("Item",
+		// "create", throw=True)` dentro de create_inventory_item()
+		// (api/inventario.py), sin tocar.
+		const new_item_btn = can_edit_inventory()
+			? `<button type="button" class="fg-btn fg-btn--solid-primary fg-inv-new-item-btn">${icon(
+					"plus",
+					"fg-icon-sm"
+			  )} ${__("NUEVO PRODUCTO")}</button>`
+			: "";
+
 		return `
 			<div class="fg-section-head">
 				<div class="fg-section-title">${__("Productos")}</div>
+				${new_item_btn}
 			</div>
 			<div class="fg-inv-toolbar">
 				<div class="fg-inv-search-wrap">
@@ -328,6 +356,21 @@ fabergray_erp.Inventario = class Inventario {
 				? frappe.format(it.selling_rate, { fieldtype: "Currency" })
 				: `<span class="fg-inv-empty">${__("Sin precio")}</span>`;
 
+		// Commit 25.21, section 22 -- DESACTIVAR/REACTIVAR directly on the
+		// card, same cosmetic can_edit_inventory() gate as everywhere else
+		// in this file; ELIMINAR stays out of the card (section 18's own
+		// "priorizar DESACTIVAR... ELIMINAR en zona peligrosa"), only in the
+		// detail view's own "Zona de peligro" section.
+		const status_btn = can_edit_inventory()
+			? `<button type="button" class="fg-btn ${
+					it.disabled ? "fg-btn--outline-success" : "fg-btn--outline-danger"
+			  } fg-inv-card-toggle-status" data-code="${frappe.utils.escape_html(
+					it.item_code
+			  )}" data-name="${frappe.utils.escape_html(it.item_name)}" data-disabled="${it.disabled ? 1 : 0}">${
+					it.disabled ? __("REACTIVAR") : __("DESACTIVAR")
+			  }</button>`
+			: "";
+
 		return `
 			<div class="fg-inv-card" data-code="${frappe.utils.escape_html(it.item_code)}">
 				<div class="fg-inv-card-top">
@@ -346,6 +389,7 @@ fabergray_erp.Inventario = class Inventario {
 					<button type="button" class="fg-btn fg-btn--ghost fg-inv-card-detail" data-code="${frappe.utils.escape_html(
 						it.item_code
 					)}">${icon("eye", "fg-icon-sm")} ${__("VER DETALLE")}</button>
+					${status_btn}
 				</div>
 			</div>
 		`;
@@ -385,6 +429,15 @@ fabergray_erp.Inventario = class Inventario {
 	}
 
 	bind_list_section_events() {
+		// Ajuste visual -- rebinding aquí (no en render_shell(), llamado una
+		// sola vez) porque el botón ahora vive dentro de `.$body`, redibujado
+		// en cada render_dashboard()/load_dashboard() -- bind_list_section_
+		// events() ya corre justo después de cada uno de esos, mismo patrón
+		// que `.fg-inv-search-input`/`.fg-inv-tab` de abajo. Harmless si el
+		// botón no existe (can_edit_inventory() false para Bodega): jQuery
+		// simplemente no encuentra nada que enlazar.
+		this.$body.find(".fg-inv-new-item-btn").on("click", () => this.open_create_item_dialog());
+
 		this.$body.find(".fg-inv-search-input").on("input", (e) => {
 			const val = $(e.currentTarget).val();
 			clearTimeout(this._search_debounce);
@@ -408,6 +461,15 @@ fabergray_erp.Inventario = class Inventario {
 		this.$body.find(".fg-inv-cards").on("click", ".fg-inv-card-detail", (e) => {
 			e.stopPropagation();
 			this.open_detail($(e.currentTarget).data("code"));
+		});
+
+		// Commit 25.21 -- same delegated pattern; only rendered at all when
+		// can_edit_inventory() is true, but the handler itself is harmless
+		// to bind unconditionally (never fires if the button never exists).
+		this.$body.find(".fg-inv-cards").on("click", ".fg-inv-card-toggle-status", (e) => {
+			e.stopPropagation();
+			const $btn = $(e.currentTarget);
+			this.toggle_item_status($btn.data("code"), $btn.data("name"), !!$btn.data("disabled"));
 		});
 
 		this.$body.find(".fg-inv-pagination").on("click", ".fg-inv-pagination-prev", () => {
@@ -518,6 +580,9 @@ fabergray_erp.Inventario = class Inventario {
 								"pencil",
 								"fg-icon-sm"
 							)} ${__("EDITAR GRUPO Y PRECIOS")}</button>
+							<button type="button" class="fg-btn ${
+								d.disabled ? "fg-btn--outline-success" : "fg-btn--outline-danger"
+							} fg-inv-toggle-status-btn">${d.disabled ? __("REACTIVAR") : __("DESACTIVAR")}</button>
 						</div>`
 						: ""
 				}
@@ -542,12 +607,31 @@ fabergray_erp.Inventario = class Inventario {
 				<div class="fg-inv-section-title">${__("Movimientos recientes")}</div>
 				${this.render_movement_rows(d.recent_movements)}
 			</div>
+
+			${
+				can_edit
+					? `<div class="fg-inv-section fg-inv-danger-zone">
+						<div class="fg-inv-section-title">${__("Zona de peligro")}</div>
+						<p class="fg-inv-empty">${__(
+							"Solo para productos creados por error y nunca utilizados. Si el producto ya se vendió o tiene stock, usa DESACTIVAR en su lugar."
+						)}</p>
+						<button type="button" class="fg-btn fg-btn--outline-danger fg-inv-delete-item-btn">${icon(
+							"trash-2",
+							"fg-icon-sm"
+						)} ${__("ELIMINAR PRODUCTO")}</button>
+					</div>`
+					: ""
+			}
 		`);
 
 		this.$body.find(".fg-np-back").on("click", () => this.back_to_dashboard());
 
 		if (can_edit) {
 			this.$body.find(".fg-inv-edit-master-btn").on("click", () => this.open_master_editor());
+			this.$body.find(".fg-inv-toggle-status-btn").on("click", () => {
+				this.toggle_item_status(d.item_code, d.item_name, !!d.disabled);
+			});
+			this.$body.find(".fg-inv-delete-item-btn").on("click", () => this.open_delete_item_dialog());
 			this.$body.find(".fg-inv-new-warehouse-btn").on("click", () => this.open_new_warehouse_picker());
 			this.$body.find(".fg-inv-warehouse-row-edit").on("click", (e) => {
 				this.open_qty_editor($(e.currentTarget).data("warehouse"));
@@ -584,6 +668,162 @@ fabergray_erp.Inventario = class Inventario {
 	}
 
 	// =====================================================================
+	// Commit 25.21 -- gestión de productos: crear / desactivar / reactivar /
+	// eliminar. Las cuatro llaman exclusivamente a los 4 endpoints nuevos de
+	// api/inventario.py (create_inventory_item/deactivate_inventory_item/
+	// reactivate_inventory_item/delete_inventory_item) -- nunca una
+	// escritura directa desde aquí, mismo patrón que las 3 escrituras del
+	// Commit 22.6 justo abajo.
+	// =====================================================================
+
+	// Grupo/UOM: opciones de get_item_creation_options() (endpoint
+	// controlado) en vez de campos Link -- un Link exigiría permiso de
+	// lectura sobre Item Group/UOM, y darlo por Custom DocPerm haría que
+	// Frappe ignore la matriz nativa de esos DocTypes para los demás roles.
+	// El servidor re-valida cada valor al crear/guardar.
+	load_item_creation_options() {
+		if (this._item_creation_options) return Promise.resolve(this._item_creation_options);
+		return this.call("get_item_creation_options").then((options) => {
+			this._item_creation_options = options;
+			return options;
+		});
+	}
+
+	// Sección 3-8 del brief: código/nombre obligatorios, grupo/UOM desde el
+	// catálogo controlado de arriba, "Maneja inventario" por defecto
+	// activado. Nunca crea Item Price ni stock inicial -- ver el propio
+	// docstring del endpoint en api/inventario.py.
+	open_create_item_dialog() {
+		this.load_item_creation_options()
+			.then((options) => this.render_create_item_dialog(options))
+			.catch(() => {});
+	}
+
+	render_create_item_dialog(options) {
+		const dialog = new frappe.ui.Dialog({
+			title: __("Nuevo producto"),
+			fields: [
+				{ fieldtype: "Data", fieldname: "item_code", label: __("Código del producto"), reqd: 1 },
+				{ fieldtype: "Data", fieldname: "item_name", label: __("Nombre del producto"), reqd: 1 },
+				{ fieldtype: "Column Break" },
+				{
+					fieldtype: "Select",
+					fieldname: "item_group",
+					label: __("Grupo de artículos"),
+					options: [""].concat(options.item_groups || []),
+					reqd: 1,
+				},
+				{
+					fieldtype: "Select",
+					fieldname: "stock_uom",
+					label: __("Unidad de medida"),
+					options: [""].concat(options.uoms || []),
+					reqd: 1,
+				},
+				{ fieldtype: "Section Break" },
+				{
+					fieldtype: "Check",
+					fieldname: "is_stock_item",
+					label: __("Maneja inventario"),
+					default: 1,
+				},
+				{ fieldtype: "Small Text", fieldname: "description", label: __("Descripción (opcional)") },
+			],
+			primary_action_label: __("Crear producto"),
+			primary_action: (values) => on_create(values),
+		});
+		const on_create = (values) => {
+			dialog.set_primary_action(__("Creando..."), null);
+			this.call("create_inventory_item", {
+				item_code: values.item_code,
+				item_name: values.item_name,
+				item_group: values.item_group,
+				stock_uom: values.stock_uom,
+				is_stock_item: values.is_stock_item ? 1 : 0,
+				description: values.description || null,
+			})
+				.then(() => {
+					dialog.hide();
+					frappe.show_alert({ message: "✓ " + __("Producto creado"), indicator: "green" });
+					this.list_filter = "active";
+					this.list_page = 1;
+					this.load_dashboard();
+				})
+				.catch(() => dialog.set_primary_action(__("Crear producto"), on_create));
+		};
+		dialog.show();
+	}
+
+	// Sección 10-11: un solo confirm() explícito antes de llamar al
+	// servidor, mensaje distinto según dirección. Refresca la vista donde
+	// el usuario realmente está (detalle o lista) -- nunca navega a otra
+	// parte de la Page como efecto secundario de esta acción.
+	toggle_item_status(item_code, item_name, currently_disabled) {
+		const action = currently_disabled ? "reactivate_inventory_item" : "deactivate_inventory_item";
+		const message = currently_disabled
+			? __("¿Reactivar {0}? Volverá a estar disponible para nuevas operaciones.", [item_name])
+			: __(
+					"¿Desactivar {0}? El producto dejará de estar disponible para nuevas operaciones, pero conservará su historial.",
+					[item_name]
+			  );
+		frappe.confirm(message, () => {
+			this.set_busy(true);
+			this.call(action, { item_code })
+				.then(() => {
+					frappe.show_alert({
+						message: "✓ " + (currently_disabled ? __("Producto reactivado") : __("Producto desactivado")),
+						indicator: "green",
+					});
+					if (this.state.view === "detail" && this.detail_code === item_code) {
+						this.open_detail(item_code);
+					} else {
+						this.refresh_list_cards();
+					}
+				})
+				.catch(() => {})
+				.finally(() => this.set_busy(false));
+		});
+	}
+
+	// Sección 17-18: modal dedicado, muestra código+nombre, exige el botón
+	// rojo "ELIMINAR DEFINITIVAMENTE" -- nunca el mismo botón primario
+	// genérico de los otros diálogos de esta Page. Un rechazo del servidor
+	// (existencias o dependencias, api/inventario.py) llega como el propio
+	// diálogo de error nativo de frappe.call() -- nada adicional que
+	// interpretar aquí, el mensaje ya es el funcional exacto del backend.
+	open_delete_item_dialog() {
+		const d = this.detail;
+		const dialog = new frappe.ui.Dialog({
+			title: __("Eliminar producto"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "warning_html",
+					options: `
+						<p>${__("Esta acción elimina definitivamente el producto si nunca ha sido utilizado.")}</p>
+						<p><strong>${__("Código")}:</strong> ${frappe.utils.escape_html(d.item_code)}</p>
+						<p><strong>${__("Nombre")}:</strong> ${frappe.utils.escape_html(d.item_name)}</p>
+					`,
+				},
+			],
+			primary_action_label: __("ELIMINAR DEFINITIVAMENTE"),
+			primary_action: () => on_delete(),
+		});
+		const on_delete = () => {
+			dialog.set_primary_action(__("Eliminando..."), null);
+			this.call("delete_inventory_item", { item_code: d.item_code })
+				.then(() => {
+					dialog.hide();
+					frappe.show_alert({ message: "✓ " + __("Producto eliminado"), indicator: "green" });
+					this.back_to_dashboard();
+				})
+				.catch(() => dialog.set_primary_action(__("ELIMINAR DEFINITIVAMENTE"), on_delete));
+		};
+		dialog.get_primary_btn().removeClass("btn-primary").addClass("btn-danger");
+		dialog.show();
+	}
+
+	// =====================================================================
 	// Commit 22.6 -- edición: grupo/precios (sin confirmación) y cantidad
 	// (con confirmación explícita antes de enviar). Ambas rutas llaman
 	// exclusivamente a fabergray_erp.api.inventario.update_item_master()/
@@ -592,15 +832,25 @@ fabergray_erp.Inventario = class Inventario {
 	// =====================================================================
 
 	open_master_editor() {
+		this.load_item_creation_options()
+			.then((options) => this.render_master_editor(options))
+			.catch(() => {});
+	}
+
+	render_master_editor(options) {
 		const d = this.detail;
+		// El grupo actual siempre aparece, aunque no esté entre los grupos
+		// finales ofrecidos (p. ej. un Item histórico) -- nunca se pierde.
+		const group_options = (options.item_groups || []).slice();
+		if (d.item_group && !group_options.includes(d.item_group)) group_options.unshift(d.item_group);
 		const dialog = new frappe.ui.Dialog({
 			title: __("Editar grupo y precios"),
 			fields: [
 				{
-					fieldtype: "Link",
+					fieldtype: "Select",
 					fieldname: "item_group",
 					label: __("Grupo de producto"),
-					options: "Item Group",
+					options: group_options,
 					default: d.item_group,
 				},
 				{ fieldtype: "Currency", fieldname: "purchase_rate", label: __("Valor de compra") },

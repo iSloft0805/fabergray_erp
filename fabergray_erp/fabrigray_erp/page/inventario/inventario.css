@@ -55,13 +55,20 @@
 }
 
 /* ------------------------------------------------------------------ */
-/* Section head                                                        */
+/* Section head -- también el wrapper de "Productos" + NUEVO PRODUCTO   */
+/* (ajuste visual: el botón se movió aquí desde el header superior      */
+/* global de Inventario, reutilizando este mismo `.fg-section-head`     */
+/* que "Stock por almacén" ya usa más abajo, en vez de crear un wrapper */
+/* nuevo). `justify-content: space-between` ya empuja el botón al       */
+/* extremo derecho del contenedor; `flex-wrap: wrap` ya es el           */
+/* comportamiento responsive pedido -- en una pantalla angosta el botón */
+/* simplemente baja a su propia fila bajo el título, sin CSS adicional. */
 /* ------------------------------------------------------------------ */
 .fg-inventario .fg-section-head {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
-	gap: 12px;
+	gap: 16px;
 	flex-wrap: wrap;
 }
 
@@ -199,7 +206,9 @@
 
 .fg-inventario .fg-inv-card-actions {
 	display: flex;
+	flex-wrap: wrap;
 	justify-content: flex-end;
+	gap: 8px;
 	margin-top: 4px;
 }
 
@@ -373,8 +382,22 @@
 /* ------------------------------------------------------------------ */
 .fg-inventario .fg-inv-detail-actions {
 	display: flex;
+	flex-wrap: wrap;
 	justify-content: flex-end;
+	gap: 8px;
 	margin-top: 4px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Zona de peligro (Commit 25.21) -- ELIMINAR PRODUCTO, deliberately   */
+/* visually de-emphasized vs. DESACTIVAR (section 18 of the brief).   */
+/* ------------------------------------------------------------------ */
+.fg-inventario .fg-inv-danger-zone {
+	border-left: 3px solid var(--fg-danger);
+}
+
+.fg-inventario .fg-inv-danger-zone .fg-inv-empty {
+	margin-bottom: 12px;
 }
 
 .fg-inventario .fg-inv-warehouse-row {

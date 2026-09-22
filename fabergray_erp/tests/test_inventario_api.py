@@ -52,7 +52,17 @@ _READ_ENDPOINTS = ("get_inventory_summary", "get_inventory_items", "get_inventor
 # guardrail (test_module_never_writes_directly_to_bin_sle_or_gl below).
 _WRITE_ENDPOINTS = ("record_opening_count", "adjust_item_quantity", "update_item_master")
 
-_ALL_ENDPOINTS = _READ_ENDPOINTS + _WRITE_ENDPOINTS
+# Commit 25.21 -- gestión de productos (catálogo controlado + crear/
+# desactivar/reactivar/eliminar), sujetos a los mismos guardrails.
+_PRODUCT_ENDPOINTS = (
+    "get_item_creation_options",
+    "create_inventory_item",
+    "deactivate_inventory_item",
+    "reactivate_inventory_item",
+    "delete_inventory_item",
+)
+
+_ALL_ENDPOINTS = _READ_ENDPOINTS + _WRITE_ENDPOINTS + _PRODUCT_ENDPOINTS
 
 _FORBIDDEN_CALLS = {"frappe.set_user", "frappe.get_all", "frappe.db.commit", "frappe.db.sql"}
 
@@ -327,7 +337,7 @@ class TestInventarioApi(IntegrationTestCase):
     # -- Guardrails estructurales -------------------------------------------------------
 
     def test_module_exposes_exactly_the_expected_public_endpoints(self):
-        """Commit 22.6: 3 read + 3 write, nothing else public."""
+        """Commit 22.6: 3 read + 3 write; Commit 25.21: + 5 product endpoints. Nothing else public."""
         own_functions = {
             name
             for name, fn in inspect.getmembers(api, inspect.isfunction)
