@@ -711,6 +711,39 @@ both review dialogs (never on the queue cards, to keep them compact). */
 	color: var(--fg-text-muted, #667085);
 }
 
+/* -- Observaciones del pedido (Hotfix 25.26.1) ---------------------------- */
+/* Read-only text the Vendedora typed in Ventas; rendered only when present.  */
+.fg-fact-review-observations {
+	background: var(--fg-warning-tint, #fff7e0);
+	border: 1px solid var(--fg-border, #e5e9f0);
+	border-left: 4px solid var(--fg-warning-dark, #b45309);
+	border-radius: 14px;
+	padding: 14px 18px;
+	margin-bottom: 22px;
+	min-width: 0;
+}
+
+.fg-fact-review-observations-label {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 0.76rem;
+	font-weight: 700;
+	letter-spacing: 0.03em;
+	color: var(--fg-warning-dark, #b45309);
+	margin-bottom: 6px;
+}
+
+.fg-fact-review-observations-text {
+	font-size: 0.92rem;
+	line-height: 1.5;
+	color: var(--fg-text, #101828);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+	max-width: 100%;
+}
+
 /* -- Progress card ------------------------------------------------------ */
 .fg-fact-review-progress-card {
 	background: var(--fg-bg, #f8fafc);

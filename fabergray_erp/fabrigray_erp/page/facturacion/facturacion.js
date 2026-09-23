@@ -723,6 +723,17 @@ fabergray_erp.Facturacion = class Facturacion {
 					"Este cliente no tiene Empresa / Tipo de facturación definido. Actualízalo en Gestión de Clientes antes de facturar."
 			  )}</div>`;
 
+		// Hotfix 25.26.1 -- the Vendedora's own observación (Sales Order
+		// fg_observations, read-only): escaped text, whole block omitted when
+		// there is none. Never an input -- Facturación cannot edit it here.
+		const observations = (d.order_observations || "").trim();
+		const observations_html = observations
+			? `<div class="fg-fact-review-observations">
+					<div class="fg-fact-review-observations-label">${icon("file-text", "fg-icon-sm")} ${__("OBSERVACIONES DEL PEDIDO")}</div>
+					<div class="fg-fact-review-observations-text">${frappe.utils.escape_html(observations)}</div>
+				</div>`
+			: "";
+
 		const items_html = (d.items || []).length
 			? `<div class="fg-fact-review-table">
 					<div class="fg-fact-review-table-head">
@@ -791,6 +802,8 @@ fabergray_erp.Facturacion = class Facturacion {
 					</div>
 				</div>
 			</div>
+
+			${observations_html}
 
 			<div class="fg-fact-review-progress-card ${pct >= 100 ? "is-complete" : ""}">
 				<div class="fg-fact-review-progress-head">

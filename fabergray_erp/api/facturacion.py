@@ -158,6 +158,30 @@ def _sales_order_of(pick_list_doc):
 	return next((row.sales_order for row in pick_list_doc.get("locations") if row.sales_order), None)
 
 
+def _clean_order_observations(value):
+	"""Hotfix 25.26.1 -- `Sales Order.fg_observations` (the observación the
+	Vendedora typed in Ventas) normalized for display: surrounding
+	whitespace trimmed, internal line breaks untouched, "" when there is no
+	real content. The ONLY source of this text is the Sales Order itself --
+	never copied/snapshotted onto the Pick List: `fg_observations` has no
+	allow_on_submit, and a Sales Order with a submitted Pick List can be
+	neither modified (modification_blockers_for) nor cancelled, so the text
+	an invoiced Pick List reads here cannot change after the fact
+	(test_facturacion_order_observations pins that guarantee)."""
+	return (value or "").strip()
+
+
+def _order_observations(sales_order):
+	"""Read-only lookup of one Sales Order's observación, for callers that
+	only hold the name (get_invoicing_detail()). The caller has already
+	authorised the Pick List that references this Sales Order -- same
+	single-value read pattern get_pending_pick_lists() already uses for
+	that Sales Order's transaction_date."""
+	if not sales_order:
+		return ""
+	return _clean_order_observations(frappe.db.get_value("Sales Order", sales_order, "fg_observations"))
+
+
 def _customer_company_types(customer_names):
 	"""Commit 25.22 -- bulk lookup of Customer.fg_customer_company_type
 	for exactly these customer names, one query (never one get_doc() per
@@ -867,6 +891,8 @@ def get_invoicing_detail(pick_list):
 		"customer_name": pl.customer_name,
 		"fg_customer_company_type": _customer_company_type(pl.customer),
 		"fg_invoicing_status": pl.fg_invoicing_status or FG_INVOICING_PENDIENTE,
+		# Hotfix 25.26.1 -- read-only; "" when the order has none.
+		"order_observations": _order_observations(sales_order),
 		"total_items": total_items,
 		"total_qty": sum(flt(i["qty"]) for i in items),
 		"checked_items": checked_items,
@@ -1384,6 +1410,9 @@ def _build_invoice_pdf_context(pl, so):
 
 	pl.fg_pdf_customer = _resolve_invoice_customer(so)
 	pl.fg_pdf_seller_name = _resolve_pdf_advisor_name(so)
+	# Hotfix 25.26.1 -- print-only context (like every fg_pdf_*), never
+	# saved; the template hides the whole section when this is "".
+	pl.fg_pdf_order_observations = _clean_order_observations(so.fg_observations)
 
 	lines, totals = _build_invoice_lines_and_totals(pl, so)
 	pl.fg_pdf_lines = lines
