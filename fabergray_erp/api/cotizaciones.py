@@ -45,6 +45,13 @@ nothing here duplicates or second-guesses that.
 Stock/inventory is out of scope entirely for this module, by design (the
 user's explicit instruction) -- unlike `api/ventas.py`'s `get_item_info()`,
 this module's own `get_item_info()` never reads `Bin`/`get_actual_qty()`.
+Commit 25.26 -- the one deliberate exception is
+`get_quick_search_item_details()` (buscador rápido de "Nueva cotización"):
+it returns an informative, read-only `qty_disponible` and the public
+SELLING price (`public_price`) so the Vendedora can quote faster -- see
+its own docstring for the narrowly-scoped Item Price read. `get_item_info()`
+and every other Vendedora read keep their historical contract untouched,
+and the create/update payload is still `{item_code, qty}` only.
 
 Commit 25.13 -- Facturación billing review, added at the bottom of this
 module: before this commit a Quotation went straight from "created" to
@@ -87,9 +94,10 @@ from fabergray_erp.pricing import (
     PRICE_MODE_FULL,
     PRICE_MODE_LABELS,
     discounted_rate,
+    public_selling_rates,
     reference_selling_rates,
 )
-from fabergray_erp.api.ventas import DEFAULT_DELIVERY_LEAD_DAYS
+from fabergray_erp.api.ventas import DEFAULT_DELIVERY_LEAD_DAYS, _default_warehouse_for_item
 from fabergray_erp.permission_conditions import assert_same_company
 
 # The only two fields a Quotation Item line may carry in from the client,
@@ -184,6 +192,114 @@ def get_item_info(item_code):
         "stock_uom": item.stock_uom,
         "image": item.image,
     }
+
+
+# Commit 25.26 -- tope del lote de get_quick_search_item_details(): el mismo
+# límite de 20 filas que ya devuelve ventas.search_items() (su propio
+# `limit_page_length=20`), así una búsqueda del buscador rápido siempre cabe
+# en UNA sola llamada de detalle.
+QUICK_SEARCH_MAX_ITEMS = 20
+
+# Las ÚNICAS claves que get_quick_search_item_details() devuelve por
+# producto. Construidas campo por campo -- nunca un documento serializado.
+QUICK_SEARCH_DETAIL_FIELDS = ("item_code", "qty_disponible", "public_price", "has_public_price")
+
+
+def _parse_quick_search_item_codes(item_codes):
+    """Lista de item_codes (JSON o lista) -> lista deduplicada, en el mismo
+    orden, de strings no vacíos. Lanza ValidationError si llega algo que no
+    sea una lista de strings o si supera QUICK_SEARCH_MAX_ITEMS."""
+    if isinstance(item_codes, str):
+        item_codes = frappe.parse_json(item_codes)
+    if not isinstance(item_codes, (list, tuple)):
+        frappe.throw(_("item_codes debe ser una lista de códigos de producto."))
+
+    codes = []
+    for code in item_codes:
+        if not isinstance(code, str) or not code.strip():
+            frappe.throw(_("item_codes debe ser una lista de códigos de producto."))
+        if code not in codes:
+            codes.append(code)
+
+    if len(codes) > QUICK_SEARCH_MAX_ITEMS:
+        frappe.throw(
+            _("Máximo {0} productos por consulta.").format(QUICK_SEARCH_MAX_ITEMS)
+        )
+    return codes
+
+
+@frappe.whitelist()
+def get_quick_search_item_details(item_codes):
+    """Commit 25.26 -- detalle por LOTES para el buscador rápido de "Nueva
+    cotización": UNA llamada por búsqueda (tras ventas.search_items()), en
+    lugar de una llamada get_item_info() por resultado.
+
+    Devuelve, por cada producto válido, EXACTAMENTE
+    QUICK_SEARCH_DETAIL_FIELDS:
+      - `qty_disponible`: informativo, mismo origen que ventas.get_item_info()
+        (`_default_warehouse_for_item()` + `get_actual_qty()`, solo lectura
+        de Bin); None si el producto no tiene bodega por defecto. Nunca
+        bloquea nada: una Quotation se crea igual con stock 0.
+      - `public_price`/`has_public_price`: precio público de VENTA vía
+        `pricing.reference_selling_rates()` -- la misma fuente que
+        Facturación usa para sus modos de precio. Precio ausente, 0 o
+        negativo -> `None`/`False` ("SIN PRECIO"), nunca 0 como válido.
+
+    EXCEPCIÓN DE PERMISOS DOCUMENTADA: la Vendedora no tiene DocPerm sobre
+    Item Price y NO se le otorga. El precio sale de
+    `pricing.public_selling_rates()` -- la única lectura privilegiada de
+    Item Price, acotada allí a la Selling Price List por defecto
+    (habilitada, de venta, no de compra; nunca elegida por el cliente) y a
+    `price_list_rate` > 0 -- y solo para los item_codes que ya pasaron aquí
+    el filtro de producto vendible leído con los permisos reales de la
+    usuaria. Nada de valuation_rate/last_purchase_rate/listas de compra/
+    márgenes se lee siquiera.
+
+    Productos inexistentes, deshabilitados, no vendibles, plantillas con
+    variantes o no legibles para la usuaria simplemente no aparecen en la
+    respuesta. Mostrar el precio NO cambia lo que se envía: la Quotation se
+    sigue creando solo con {item_code, qty} (`_ALLOWED_ITEM_FIELDS`).
+    """
+    _require_login()
+    _require_vendedora_role()
+    frappe.has_permission("Item", "read", throw=True)
+
+    codes = _parse_quick_search_item_codes(item_codes)
+    if not codes:
+        return []
+
+    # Mismos filtros de "producto vendible" que ventas.search_items(), leídos
+    # con los permisos reales de la usuaria (get_list, no get_all).
+    valid = {
+        row.name
+        for row in frappe.get_list(
+            "Item",
+            filters={"name": ["in", codes], "disabled": 0, "is_sales_item": 1, "has_variants": 0},
+            fields=["name"],
+            limit_page_length=QUICK_SEARCH_MAX_ITEMS,
+        )
+    }
+    codes = [code for code in codes if code in valid]
+    if not codes:
+        return []
+
+    rates = public_selling_rates(codes)
+
+    company = frappe.defaults.get_global_default("company")
+    result = []
+    for code in codes:
+        warehouse = _default_warehouse_for_item(code, company)
+        rate = flt(rates.get(code))
+        has_price = rate > 0
+        result.append(
+            {
+                "item_code": code,
+                "qty_disponible": flt(get_actual_qty(code, warehouse)) if warehouse else None,
+                "public_price": rate if has_price else None,
+                "has_public_price": has_price,
+            }
+        )
+    return result
 
 
 @frappe.whitelist()

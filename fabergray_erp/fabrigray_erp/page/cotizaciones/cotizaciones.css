@@ -564,87 +564,455 @@
 }
 
 /* ------------------------------------------------------------------ */
-/* Product results grid -- no disponibilidad row (explicit design:      */
-/* inventory has no role in a Quotation), so cards are slightly         */
-/* shorter than Ventas' own equivalent.                                 */
+/* "2. Agregar productos" -- selector de modo (Commit 25.26): Buscar    */
+/* manualmente / Cotización rápida. Same pill language as Ventas' own   */
+/* switch; 50/50 on phones, stacked below 360px.                        */
 /* ------------------------------------------------------------------ */
-.fg-cotizaciones .fg-item-results {
-	display: grid;
-	grid-template-columns: repeat(2, 1fr);
-	gap: 12px;
-	margin-top: 16px;
-}
-
-.fg-cotizaciones .fg-product-skeleton {
-	height: 84px;
-}
-
-.fg-cotizaciones .fg-product-card {
-	background: var(--fg-bg);
-	border: 1.5px solid var(--fg-border);
-	border-radius: var(--fg-radius-md);
-	padding: 12px;
+.fg-cotizaciones .fg-item-mode-switch {
 	display: flex;
-	align-items: center;
-	gap: 10px;
-	transition: border-color var(--fg-transition), background var(--fg-transition);
+	gap: 8px;
+	margin-bottom: 16px;
+	flex-wrap: wrap;
 }
 
-.fg-cotizaciones .fg-product-card--in-cart {
-	border-color: var(--fg-primary);
-	background: var(--fg-primary-tint);
-}
-
-.fg-cotizaciones .fg-product-thumb {
-	width: 52px;
-	height: 52px;
-	border-radius: var(--fg-radius-sm);
-	background: var(--fg-card);
-	border: 1px solid var(--fg-border);
-	color: var(--fg-text-faint);
+.fg-cotizaciones .fg-item-mode-btn {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	flex-shrink: 0;
-	overflow: hidden;
+	gap: 8px;
+	min-height: var(--fg-touch);
+	padding: 0 16px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-pill);
+	background: var(--fg-card);
+	color: var(--fg-text-muted);
+	font-weight: 600;
+	font-size: 0.86rem;
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition), color var(--fg-transition);
 }
 
-.fg-cotizaciones .fg-product-thumb .fg-icon {
-	width: 24px;
-	height: 24px;
+.fg-cotizaciones .fg-item-mode-btn:hover {
+	border-color: var(--fg-primary);
 }
 
-.fg-cotizaciones .fg-product-thumb-img {
+.fg-cotizaciones .fg-item-mode-btn.is-active {
+	background: var(--fg-primary);
+	border-color: var(--fg-primary);
+	color: #fff;
+}
+
+/* ------------------------------------------------------------------ */
+/* Cotización rápida (Commit 25.26) -- panel, líneas interpretadas,     */
+/* barra de "AGREGAR A COTIZACIÓN". Cards, never a <table>, so a line   */
+/* collapses to one column on phones without horizontal scroll.         */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-cq-panel {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	min-width: 0;
+}
+
+.fg-cotizaciones .fg-cq-title {
+	font-weight: 700;
+	font-size: 1rem;
+}
+
+.fg-cotizaciones .fg-cq-subtitle {
+	font-size: 0.82rem;
+	color: var(--fg-text-muted);
+	line-height: 1.5;
+	margin-top: 2px;
+}
+
+/* Ayuda de formato: discreta (texto pequeño, fondo suave), pero siempre */
+/* visible -- cantidad al inicio, un producto por línea.                 */
+.fg-cotizaciones .fg-cq-help {
+	font-size: 0.8rem;
+	line-height: 1.5;
+	color: var(--fg-text-muted);
+	background: var(--fg-card);
+	border: 1px dashed var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 8px 12px;
+}
+
+.fg-cotizaciones .fg-cq-help-label {
+	font-weight: 600;
+	margin-top: 4px;
+}
+
+.fg-cotizaciones .fg-cq-help-example {
+	margin: 2px 0 0;
+	padding: 0;
+	background: none;
+	border: 0;
+	font-family: inherit;
+	font-size: 0.8rem;
+	color: var(--fg-text);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.fg-cotizaciones .fg-cq-label {
+	font-size: 0.82rem;
+	font-weight: 600;
+	margin-top: 6px;
+}
+
+.fg-cotizaciones .fg-cq-textarea {
 	width: 100%;
-	height: 100%;
-	object-fit: cover;
+	box-sizing: border-box;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 12px 14px;
+	font-size: 0.9rem;
+	font-family: inherit;
+	color: var(--fg-text);
+	background: var(--fg-card);
+	resize: vertical;
+	min-height: 140px;
 }
 
-.fg-cotizaciones .fg-product-info {
+.fg-cotizaciones .fg-cq-textarea:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+.fg-cotizaciones .fg-cq-actions-row {
+	display: flex;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.fg-cotizaciones .fg-cq-actions-row .fg-btn,
+.fg-cotizaciones .fg-cq-ignore,
+.fg-cotizaciones .fg-cq-apply-btn {
+	min-height: var(--fg-touch);
+}
+
+.fg-cotizaciones .fg-cq-results {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	margin-top: 6px;
+}
+
+.fg-cotizaciones .fg-cq-line {
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 12px 14px;
+	background: var(--fg-bg);
+	min-width: 0;
+	transition: opacity var(--fg-transition);
+}
+
+.fg-cotizaciones .fg-cq-line--ignored {
+	opacity: 0.55;
+}
+
+.fg-cotizaciones .fg-cq-line-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
+}
+
+.fg-cotizaciones .fg-cq-line-main {
 	flex: 1;
 	min-width: 0;
 }
 
-.fg-cotizaciones .fg-product-name {
+.fg-cotizaciones .fg-cq-line-title {
+	font-weight: 700;
+	font-size: 0.92rem;
+	line-height: 1.25;
+	overflow-wrap: anywhere;
+}
+
+.fg-cotizaciones .fg-cq-line-code {
+	font-size: 0.76rem;
+	color: var(--fg-text-faint);
+	overflow-wrap: anywhere;
+}
+
+.fg-cotizaciones .fg-cq-line-source {
+	font-size: 0.8rem;
+	font-style: italic;
+	color: var(--fg-text-muted);
+	margin-top: 2px;
+	overflow-wrap: anywhere;
+}
+
+/* Estado: texto + color, nunca solo color. */
+.fg-cotizaciones .fg-cq-status {
+	display: inline-flex;
+	align-items: center;
+	white-space: nowrap;
+	border-radius: var(--fg-radius-pill);
+	padding: 5px 12px;
+	font-size: 0.76rem;
+	font-weight: 700;
+}
+
+.fg-cotizaciones .fg-cq-status--high {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-cotizaciones .fg-cq-status--review {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-cotizaciones .fg-cq-status--low {
+	background: var(--fg-border);
+	color: var(--fg-text-muted);
+}
+
+.fg-cotizaciones .fg-cq-status--not-found {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+.fg-cotizaciones .fg-cq-line-body {
+	display: flex;
+	align-items: flex-end;
+	justify-content: space-between;
+	gap: 10px;
+	flex-wrap: wrap;
+	margin: 10px 0;
+}
+
+.fg-cotizaciones .fg-cq-qty {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	font-size: 0.76rem;
+	font-weight: 600;
+	color: var(--fg-text-muted);
+	margin: 0;
+}
+
+.fg-cotizaciones .fg-cq-qty-input {
+	width: 120px;
+	height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 0 12px;
+	font-size: 0.92rem;
+	font-weight: 700;
+	background: var(--fg-card);
+	color: var(--fg-text);
+}
+
+.fg-cotizaciones .fg-cq-qty-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+}
+
+.fg-cotizaciones .fg-cq-candidates {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.fg-cotizaciones .fg-cq-candidate {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	width: 100%;
+	min-height: var(--fg-touch);
+	padding: 8px 12px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	text-align: left;
+	cursor: pointer;
+	transition: border-color var(--fg-transition), background var(--fg-transition);
+}
+
+.fg-cotizaciones .fg-cq-candidate:hover {
+	border-color: var(--fg-primary);
+}
+
+.fg-cotizaciones .fg-cq-candidate.is-selected {
+	border-color: var(--fg-primary);
+	background: var(--fg-primary-tint);
+}
+
+.fg-cotizaciones .fg-cq-candidate:disabled {
+	cursor: not-allowed;
+}
+
+.fg-cotizaciones .fg-cq-candidate-name {
+	font-weight: 600;
+	font-size: 0.86rem;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.fg-cotizaciones .fg-cq-candidate-meta {
+	display: flex;
+	gap: 8px;
+	flex-shrink: 0;
+	font-size: 0.76rem;
+	color: var(--fg-text-faint);
+}
+
+.fg-cotizaciones .fg-cq-candidate-score {
+	font-weight: 700;
+}
+
+.fg-cotizaciones .fg-cq-candidate-score--high {
+	color: var(--fg-success-dark);
+}
+
+.fg-cotizaciones .fg-cq-candidate-score--medium {
+	color: var(--fg-warning-dark);
+}
+
+.fg-cotizaciones .fg-cq-apply-bar {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin-top: 4px;
+}
+
+.fg-cotizaciones .fg-cq-warning {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 0.82rem;
+	font-weight: 600;
+	color: var(--fg-warning-dark);
+	background: var(--fg-warning-tint);
+	border-radius: var(--fg-radius-sm);
+	padding: 8px 12px;
+	flex: 1;
+	min-width: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Buscador rápido de productos (Commit 25.26) -- one compact row per   */
+/* result: name/code, public price (or SIN PRECIO), informative stock,  */
+/* "+ AGREGAR". Single column so ArrowUp/ArrowDown map to what the eye  */
+/* sees; names wrap instead of overflowing.                              */
+/* ------------------------------------------------------------------ */
+.fg-cotizaciones .fg-item-results {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 6px;
+	margin-top: 12px;
+}
+
+.fg-cotizaciones .fg-product-skeleton {
+	height: 64px;
+}
+
+.fg-cotizaciones .fg-qs-row {
+	background: var(--fg-bg);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 8px 10px 8px 12px;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-width: 0;
+	transition: border-color var(--fg-transition), background var(--fg-transition);
+}
+
+.fg-cotizaciones .fg-qs-row--in-cart {
+	background: var(--fg-primary-tint);
+}
+
+.fg-cotizaciones .fg-qs-row.is-active {
+	border-color: var(--fg-primary);
+	box-shadow: 0 0 0 2px var(--fg-primary-tint);
+}
+
+.fg-cotizaciones .fg-qs-info {
+	flex: 1;
+	min-width: 0;
+}
+
+.fg-cotizaciones .fg-qs-name {
 	font-weight: 700;
 	font-size: 0.9rem;
 	line-height: 1.25;
 	overflow-wrap: anywhere;
 }
 
-.fg-cotizaciones .fg-product-code {
+.fg-cotizaciones .fg-qs-code {
 	font-size: 0.76rem;
 	color: var(--fg-text-faint);
 	margin-top: 1px;
+	overflow-wrap: anywhere;
 }
 
-.fg-cotizaciones .fg-product-meta {
+.fg-cotizaciones .fg-qs-meta {
 	display: flex;
-	gap: 10px;
-	font-size: 0.76rem;
+	flex-wrap: wrap;
+	gap: 4px 14px;
+	font-size: 0.78rem;
 	color: var(--fg-text-muted);
 	margin-top: 4px;
-	flex-wrap: wrap;
+}
+
+.fg-cotizaciones .fg-qs-price {
+	font-weight: 700;
+	color: var(--fg-text);
+	white-space: nowrap;
+}
+
+.fg-cotizaciones .fg-qs-price--none {
+	color: var(--fg-warning-dark);
+	letter-spacing: 0.02em;
+}
+
+.fg-cotizaciones .fg-qs-stock--ok {
+	color: var(--fg-success-dark);
+	font-weight: 600;
+}
+
+.fg-cotizaciones .fg-qs-stock--zero {
+	color: var(--fg-danger);
+	font-weight: 600;
+}
+
+.fg-cotizaciones .fg-qs-stock--none {
+	color: var(--fg-text-faint);
+}
+
+.fg-cotizaciones .fg-qs-in-cart {
+	color: var(--fg-primary);
+	font-weight: 600;
+}
+
+.fg-cotizaciones .fg-qs-in-cart:empty {
+	display: none;
+}
+
+.fg-cotizaciones .fg-qs-add {
+	flex-shrink: 0;
+	min-height: var(--fg-touch);
+	min-width: var(--fg-touch);
+	white-space: nowrap;
+}
+
+/* Desktop: keep the result list compact so the cart stays in view; */
+/* ArrowUp/ArrowDown scroll the active row into view.               */
+@media (min-width: 861px) {
+	.fg-cotizaciones .fg-qs-results {
+		max-height: 420px;
+		overflow-y: auto;
+	}
 }
 
 /* ------------------------------------------------------------------ */
@@ -998,10 +1366,6 @@
 		grid-template-columns: repeat(2, 1fr);
 	}
 
-	.fg-cotizaciones .fg-item-results {
-		grid-template-columns: 1fr;
-	}
-
 	.fg-cotizaciones .fg-quotation-card-meta {
 		gap: 10px;
 	}
@@ -1038,16 +1402,31 @@
 		max-width: 100%;
 	}
 
-	/* Stepper drops to its own row on mobile, same convention as Ventas --
-	 * thumb/name/code/UOM keep the first row, tap targets unchanged. */
-	.fg-cotizaciones .fg-product-card {
+	/* Commit 25.26 -- "+ AGREGAR" drops to its own full-width row on
+	 * mobile; mode buttons go 50/50; Cotización rápida buttons full width. */
+	.fg-cotizaciones .fg-qs-row {
 		flex-wrap: wrap;
 	}
 
-	.fg-cotizaciones .fg-product-card .fg-stepper {
+	.fg-cotizaciones .fg-qs-add {
 		flex-basis: 100%;
-		justify-content: flex-end;
-		margin-top: 4px;
+		justify-content: center;
+	}
+
+	.fg-cotizaciones .fg-item-mode-btn {
+		flex: 1 1 0;
+		padding: 0 10px;
+	}
+
+	.fg-cotizaciones .fg-cq-candidate {
+		flex-direction: column;
+		align-items: flex-start;
+	}
+
+	.fg-cotizaciones .fg-cq-actions-row .fg-btn,
+	.fg-cotizaciones .fg-cq-apply-btn {
+		flex: 1 1 100%;
+		justify-content: center;
 	}
 
 	.fg-cotizaciones .fg-quotation-detail-panel {
@@ -1058,5 +1437,11 @@
 
 	.fg-cotizaciones .fg-quotation-detail-overlay {
 		align-items: flex-end;
+	}
+}
+
+@media (max-width: 360px) {
+	.fg-cotizaciones .fg-item-mode-btn {
+		flex-basis: 100%;
 	}
 }

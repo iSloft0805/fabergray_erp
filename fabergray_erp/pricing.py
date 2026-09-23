@@ -18,7 +18,7 @@ _reference_selling_rates, _expected_price_mode_rate) como alias de esto.
 """
 
 import frappe
-from frappe.utils import flt
+from frappe.utils import cint, flt
 
 PRICE_MODE_FULL = "FULL"
 PRICE_MODE_DISCOUNT_10 = "DISCOUNT_10"
@@ -47,11 +47,17 @@ PRICE_MODE_LABELS = {
 }
 
 
-def reference_selling_rates(item_codes, price_list):
+def reference_selling_rates(item_codes, price_list, ignore_permissions=False):
 	"""Precio público vigente: `Item Price.price_list_rate` de exactamente
 	estos item_codes en `price_list` (la Selling Price List real del
 	documento -- `selling_price_list` de la Quotation/Sales Order), en UNA
 	consulta. Nunca valuation_rate, costo ni precio de compra.
+
+	`ignore_permissions` (Commit 25.26) lo pasa en True ÚNICAMENTE
+	`public_selling_rates()` de abajo, que antes verifica que la lista es la
+	Selling Price List por defecto, habilitada, de venta y no de compra.
+	Todos los demás llamadores conservan el valor por defecto (False) y leen
+	con los permisos reales de su propia sesión, exactamente como antes.
 
 	Limitación conocida (heredada, sin cambios): no filtra por UOM,
 	vigencia, cliente ni moneda. Hoy es exacto porque "Standard Selling"
@@ -63,8 +69,51 @@ def reference_selling_rates(item_codes, price_list):
 		"Item Price",
 		filters={"price_list": price_list, "item_code": ["in", list(item_codes)]},
 		fields=["item_code", "price_list_rate"],
+		ignore_permissions=bool(ignore_permissions),
 	)
 	return {r.item_code: r.price_list_rate for r in rows}
+
+
+def default_public_selling_price_list():
+	"""Commit 25.26 -- la Price List de referencia para el precio público del
+	buscador rápido de Cotizaciones: la Selling Price List por defecto
+	(Selling Settings), la misma que ERPNext asigna como
+	`selling_price_list` a las Quotation que crea la app (cuando el cliente
+	no tiene una propia) y por tanto la misma base que Facturación usa luego
+	para PRECIO COMPLETO/-10/-15/-20/-25.
+
+	Solo se acepta si está habilitada, es de VENTA y NO es también de
+	compra. Devuelve None si no hay una lista válida (-> "SIN PRECIO")."""
+	price_list = frappe.db.get_single_value("Selling Settings", "selling_price_list")
+	if not price_list:
+		return None
+	pl = frappe.db.get_value("Price List", price_list, ["enabled", "selling", "buying"], as_dict=True)
+	if not pl or not cint(pl.enabled) or not cint(pl.selling) or cint(pl.buying):
+		return None
+	return price_list
+
+
+def public_selling_rates(item_codes):
+	"""Commit 25.26 -- precio público de VENTA de `item_codes`, para mostrar
+	a la Vendedora en el buscador rápido de Cotizaciones.
+
+	EXCEPCIÓN DE PERMISOS DOCUMENTADA Y ÚNICA: la Vendedora no tiene (ni se
+	le otorga) DocPerm sobre Item Price. Esta es la única función que llama
+	reference_selling_rates() con `ignore_permissions=True`, y queda acotada
+	por construcción a:
+	  - la lista de `default_public_selling_price_list()` (nunca elegida por
+	    el cliente, nunca una lista de compra);
+	  - `price_list_rate` únicamente (reference_selling_rates() no lee otra
+	    columna);
+	  - solo precios > 0: ausente/0/negativo no aparece en el resultado.
+	Vive aquí, fuera de api/*, a propósito: ningún módulo whitelisted
+	escribe `ignore_permissions=True` (guardrail de test_regression.py).
+	El llamador debe haber validado ya usuario/rol/producto."""
+	price_list = default_public_selling_price_list()
+	if not item_codes or not price_list:
+		return {}
+	rates = reference_selling_rates(item_codes, price_list, ignore_permissions=True)
+	return {code: flt(rate) for code, rate in rates.items() if flt(rate) > 0}
 
 
 def discounted_rate(reference_rate, discount_percentage, discount_precision, rate_precision):

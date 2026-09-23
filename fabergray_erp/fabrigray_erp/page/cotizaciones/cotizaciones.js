@@ -17,10 +17,13 @@ frappe.pages["cotizaciones"].on_page_load = function (wrapper) {
 // if_owner-scoped) and fabergray_erp.api.ventas.
 // search_customers/search_items (Commit 20.5's own instruction: reuse those two
 // verbatim, they are generic and already whitelisted -- never duplicated here).
-// No inventory field is ever requested or rendered (no qty_disponible/Bin/Pick
-// List anywhere in this file -- a Quotation may be created with stock 0, by
-// design). No economic field (rate/price_list_rate/discount/amount/taxes/
-// grand_total or any equivalent) is ever read from a server response or
+// Commit 25.26 -- the ONE exception to "no stock/no price here": the quick
+// product search reads get_quick_search_item_details() (one batched call per
+// search) and SHOWS, read-only, qty_disponible and the public selling price
+// (or "SIN PRECIO"). Stock never blocks adding (a Quotation may be created
+// with stock 0, by design) and neither value is ever stored in the cart or
+// sent back. No other economic field (rate/price_list_rate/discount/amount/
+// taxes/grand_total or any equivalent) is ever read from a server response or
 // constructed here -- build_quotation_payload() below is the one place a
 // create_and_submit_quotation() body is assembled, and it only ever sends
 // item_code/qty per line plus customer/valid_till/terms at the document level.
@@ -46,7 +49,10 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		this.nc = this.blank_nueva_cotizacion_state();
 		this._customer_search_seq = 0;
 		this._item_search_seq = 0;
-		this._item_info_cache = new Map(); // item_code -> get_item_info() response
+		// Commit 25.26 -- item_code -> get_quick_search_item_details() row
+		// ({item_code, qty_disponible, public_price, has_public_price}), for
+		// display in search results ONLY -- never copied into this.nc.cart.
+		this._item_details_cache = new Map();
 
 		this.state = { view: "dashboard" };
 
@@ -68,9 +74,34 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 			cart: new Map(), // item_code -> {item_code, item_name, stock_uom, qty}
 			customer_results: [],
 			item_results: [],
+			// Commit 25.26 -- buscador rápido: which result row ArrowUp/
+			// ArrowDown/Enter act on (-1 = none), and the exact input text
+			// item_results belong to -- Enter is ignored while the input no
+			// longer matches it (results still stale/in flight), so it can
+			// never add a product from a previous query.
+			active_index: -1,
+			results_txt: "",
+			// true after Escape/add/clear -- a debounced search already queued
+			// before that moment must not reopen the results; the next real
+			// keystroke sets it back to false.
+			search_dismissed: false,
+			// Commit 25.26 -- "2. Agregar productos" has two input modes
+			// sharing the ONE cart above: "manual" (buscador rápido, always
+			// the default) and "quick" ("Cotización rápida", pasted text
+			// interpreted by ventas.parse_quick_order). Switching modes never
+			// touches the cart.
+			item_mode: "manual",
+			quick: this.blank_quick_quote_state(),
 			valid_till: "",
 			terms: "",
 		};
+	}
+
+	// Commit 25.26 -- "Cotización rápida" working state, client-side only
+	// until "AGREGAR A COTIZACIÓN" feeds the shared cart. `lines` holds one
+	// entry per parse_quick_order() line (see build_quick_quote_line()).
+	blank_quick_quote_state() {
+		return { text: "", lines: [], loading: false };
 	}
 
 	// -------------------------------------------------------------------
@@ -743,7 +774,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 	// =====================================================================
 	open_nueva_cotizacion() {
 		this.nc = this.blank_nueva_cotizacion_state();
-		this._item_info_cache = new Map();
+		this._item_details_cache = new Map();
 		this.state.view = "nueva_cotizacion";
 		this.set_busy(false);
 		this.render_nueva_cotizacion();
@@ -758,7 +789,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 	open_edit_cotizacion(name) {
 		if (!name) return;
 		this.nc = this.blank_nueva_cotizacion_state();
-		this._item_info_cache = new Map();
+		this._item_details_cache = new Map();
 		this.state.view = "nueva_cotizacion";
 		this.set_busy(true);
 
@@ -794,7 +825,7 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 	open_modify_cotizacion(name) {
 		if (!name) return;
 		this.nc = this.blank_nueva_cotizacion_state();
-		this._item_info_cache = new Map();
+		this._item_details_cache = new Map();
 		this.state.view = "nueva_cotizacion";
 		this.set_busy(true);
 
@@ -838,11 +869,15 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 
 			<div class="fg-np-section">
 				<div class="fg-np-section-title">${__("2. Agregar productos")}</div>
-				<div class="fg-search-box">
-					${icon("search")}
-					<input type="text" class="fg-search-box-input fg-item-search-input" placeholder="${__("Buscar producto...")}">
+				<div class="fg-item-mode-switch" role="tablist">
+					<button type="button" class="fg-item-mode-btn ${this.nc.item_mode === "manual" ? "is-active" : ""}" data-mode="manual" role="tab" aria-selected="${this.nc.item_mode === "manual"}">
+						${icon("search", "fg-icon-sm")} ${__("Buscar manualmente")}
+					</button>
+					<button type="button" class="fg-item-mode-btn ${this.nc.item_mode === "quick" ? "is-active" : ""}" data-mode="quick" role="tab" aria-selected="${this.nc.item_mode === "quick"}">
+						${icon("clipboard-list", "fg-icon-sm")} ${__("Cotización rápida")}
+					</button>
 				</div>
-				<div class="fg-item-results"></div>
+				<div class="fg-item-mode-body"></div>
 			</div>
 
 			<div class="fg-np-section">
@@ -851,9 +886,46 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 			</div>
 		`);
 		this.render_customer_area();
-		this.render_item_results_empty_prompt();
+		this.render_item_mode_body();
 		this.render_summary();
 		this.bind_nueva_cotizacion_events();
+	}
+
+	// Commit 25.26 -- renders whichever input mode is active into
+	// "2. Agregar productos". Manual mode = the buscador rápido (fresh, empty
+	// prompt); quick mode = the Cotización rápida panel, re-rendered from
+	// this.nc.quick so switching back and forth never loses its text/lines.
+	// Neither branch touches this.nc.cart.
+	render_item_mode_body() {
+		const $wrap = this.$body.find(".fg-item-mode-body");
+		if (this.nc.item_mode === "quick") {
+			this.close_item_results();
+			$wrap.html(this.quick_quote_panel_html());
+			this.bind_quick_quote_panel_events();
+			this.render_quick_quote_lines();
+			return;
+		}
+		$wrap.html(`
+			<div class="fg-search-box">
+				${icon("search")}
+				<input type="text" class="fg-search-box-input fg-item-search-input" placeholder="${__("Buscar por nombre o código...")}" autocomplete="off" aria-label="${__("Buscar producto")}">
+			</div>
+			<div class="fg-item-results fg-qs-results" role="listbox"></div>
+		`);
+		this.close_item_results();
+		this.bind_item_search_input();
+	}
+
+	set_item_mode(mode) {
+		if (mode !== "manual" && mode !== "quick") return;
+		if (mode === this.nc.item_mode) return;
+		this.nc.item_mode = mode;
+		this.$body.find(".fg-item-mode-btn").each((i, el) => {
+			const active = $(el).data("mode") === mode;
+			$(el).toggleClass("is-active", active).attr("aria-selected", String(active));
+		});
+		this.render_item_mode_body();
+		if (mode === "manual") this.$body.find(".fg-item-search-input").trigger("focus");
 	}
 
 	render_item_results_skeleton() {
@@ -876,19 +948,96 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 
 	bind_nueva_cotizacion_events() {
 		this.$body.find(".fg-np-back").on("click", () => this.back_to_dashboard());
+		this.$body.find(".fg-item-mode-btn").on("click", (e) => this.set_item_mode($(e.currentTarget).data("mode")));
+	}
 
+	// (Re)bound every time render_item_mode_body() puts the manual search
+	// box back on screen.
+	bind_item_search_input() {
 		const $item_input = this.$body.find(".fg-item-search-input");
 		const debounced_item_search = frappe.utils.debounce((txt) => this.search_items(txt), 300);
 		$item_input.on("input", (e) => {
 			const txt = $(e.currentTarget).val();
 			if (!txt || !txt.trim()) {
-				this._item_search_seq++; // invalidate any in-flight search
-				this.nc.item_results = [];
-				this.render_item_results_empty_prompt();
+				this.close_item_results();
 				return;
 			}
+			this.nc.search_dismissed = false;
 			debounced_item_search(txt);
 		});
+		$item_input.on("keydown", (e) => this.handle_item_search_keydown(e));
+	}
+
+	// -- Buscador rápido: teclado (Commit 25.26) ---------------------------------
+	//
+	// ArrowDown/ArrowUp move the active row, Enter adds the active row
+	// (through add_item_from_search(), the SAME function the "+ AGREGAR"
+	// button calls -- one add path, never two), Escape closes the results.
+	// Enter does nothing while the rendered results don't belong to the
+	// input's current text (results_txt) -- typing fast and pressing Enter
+	// before the new search lands must never add a product from the
+	// previous query.
+	handle_item_search_keydown(e) {
+		const results = this.nc.item_results;
+		const current_txt = $(e.currentTarget).val();
+		const fresh = results.length > 0 && this.nc.results_txt === current_txt;
+
+		if (e.key === "ArrowDown") {
+			if (!fresh) return;
+			e.preventDefault();
+			this.set_active_result(Math.min(this.nc.active_index + 1, results.length - 1));
+		} else if (e.key === "ArrowUp") {
+			if (!fresh) return;
+			e.preventDefault();
+			this.set_active_result(Math.max(this.nc.active_index - 1, 0));
+		} else if (e.key === "Enter") {
+			e.preventDefault();
+			if (!fresh || this.nc.active_index < 0) return;
+			this.add_item_from_search(this.nc.active_index);
+		} else if (e.key === "Escape") {
+			e.preventDefault();
+			this.close_item_results();
+		}
+	}
+
+	// Moves the highlight without re-rendering the list (keeps focus and
+	// scroll untouched), scrolling the new active row into view if needed.
+	set_active_result(index) {
+		this.nc.active_index = index;
+		const $rows = this.$body.find(".fg-qs-results .fg-qs-row");
+		$rows.removeClass("is-active").attr("aria-selected", "false");
+		const $active = $rows.eq(index);
+		$active.addClass("is-active").attr("aria-selected", "true");
+		if ($active.length && $active[0].scrollIntoView) $active[0].scrollIntoView({ block: "nearest" });
+	}
+
+	// Escape / empty input: invalidates any in-flight search (same
+	// _item_search_seq guard search_items() already relies on) and goes back
+	// to the empty prompt. Leaves the input's own text alone.
+	close_item_results() {
+		this._item_search_seq++;
+		this.nc.search_dismissed = true;
+		this.nc.item_results = [];
+		this.nc.active_index = -1;
+		this.nc.results_txt = "";
+		this.render_item_results_empty_prompt();
+	}
+
+	// THE one add path for the quick search -- called by Enter and by the
+	// "+ AGREGAR" button alike. Always +1 over whatever the cart already
+	// holds for that item_code (this.nc.cart is a Map keyed by item_code,
+	// so re-adding never creates a second line), through the existing
+	// set_cart_qty(). Stock is never checked here -- stock 0 adds exactly
+	// like any other product. Then: clear input, close results, refocus
+	// the input so the next product can be typed straight away.
+	add_item_from_search(index) {
+		const r = this.nc.item_results[index];
+		if (!r) return;
+		this.set_cart_qty(r.item_code, this.cart_qty(r.item_code) + 1);
+		const $input = this.$body.find(".fg-item-search-input");
+		$input.val("");
+		this.close_item_results();
+		$input.trigger("focus");
 	}
 
 	// -- Paso 1: Cliente -----------------------------------------------------
@@ -993,44 +1142,45 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		});
 	}
 
-	// -- Paso 2: Productos ----------------------------------------------------
-	// No inventory field is ever requested or shown (no "Disponible", no
-	// stock, no faltantes, no projected qty) -- get_item_info() below never
-	// returns one either (unlike ventas.get_item_info()'s qty_disponible).
-	// A product may be added at any quantity regardless of physical stock.
+	// -- Paso 2: Productos (buscador rápido, Commit 25.26) ----------------------
+	// ventas.search_items() finds the products; ONE batched
+	// get_quick_search_item_details() call adds, for display only, the
+	// public selling price (or "SIN PRECIO") and an informative stock
+	// figure. Stock never blocks anything: a product may be added at any
+	// quantity regardless of physical stock, stock 0 included.
 
 	search_items(txt) {
 		if (!txt || !txt.trim()) {
-			this._item_search_seq++;
-			this.nc.item_results = [];
-			this.render_item_results_empty_prompt();
+			this.close_item_results();
 			return Promise.resolve();
 		}
+		if (this.nc.search_dismissed) return Promise.resolve();
 		const seq = ++this._item_search_seq;
 		this.render_item_results_skeleton();
 		return this.call_ventas("search_items", { txt: txt }).then((results) => {
 			if (seq !== this._item_search_seq) return;
-			this.nc.item_results = results || [];
-			return this.hydrate_item_details(this.nc.item_results).then(() => {
+			const rows = results || [];
+			return this.hydrate_item_details(rows).then(() => {
 				if (seq !== this._item_search_seq) return;
+				this.nc.item_results = rows;
+				this.nc.results_txt = txt;
+				// First row pre-selected so "deseng" + Enter adds immediately.
+				this.nc.active_index = rows.length ? 0 : -1;
 				this.render_item_results();
 			});
 		});
 	}
 
-	// get_item_info() (api/cotizaciones.py) is called per currently-displayed
-	// search result, cached by item_code for this "Nueva cotización" session
-	// -- same pattern as Ventas' hydrate_item_availability(), minus any
-	// availability field (cotizaciones.get_item_info() never returns one).
+	// Commit 25.26 -- ONE batched get_quick_search_item_details() call per
+	// search (search_items() returns at most 20 rows, the endpoint's own
+	// maximum), only for item_codes not already cached in this "Nueva
+	// cotización" session -- never one get_item_info() call per row.
 	hydrate_item_details(results) {
-		return Promise.all(
-			results.map((r) => {
-				if (this._item_info_cache.has(r.item_code)) return Promise.resolve();
-				return this.call("get_item_info", { item_code: r.item_code }).then((info) => {
-					this._item_info_cache.set(r.item_code, info);
-				});
-			})
-		);
+		const missing = results.map((r) => r.item_code).filter((code) => !this._item_details_cache.has(code));
+		if (!missing.length) return Promise.resolve();
+		return this.call("get_quick_search_item_details", { item_codes: missing }).then((rows) => {
+			for (const row of rows || []) this._item_details_cache.set(row.item_code, row);
+		});
 	}
 
 	render_item_results() {
@@ -1042,56 +1192,351 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 			return;
 		}
 
-		$results.html(results.map((r) => this.render_item_result_card(r)).join(""));
+		$results.html(results.map((r, i) => this.render_item_result_card(r, i)).join(""));
 		this.bind_item_result_events();
 	}
 
-	// Product card shows only image/name/code/UOM/stepper -- no
-	// disponibilidad, no stock, no faltantes (explicit instruction, Commit
-	// 20.5): inventory has no role in a Quotation.
-	render_item_result_card(r) {
-		const info = this._item_info_cache.get(r.item_code);
-		const stock_uom = r.stock_uom || (info && info.stock_uom) || "";
-		const qty = this.cart_qty(r.item_code);
-		const thumb = r.image
-			? `<img class="fg-product-thumb-img" src="${frappe.utils.escape_html(r.image)}" alt="">`
-			: icon("image");
+	// Commit 25.26 -- compact quick-search row: name, code, public price (or
+	// "SIN PRECIO"), stock (purely informative, 0 shown as 0, never
+	// disables anything) and "+ AGREGAR". Both values come from
+	// _item_details_cache for display only.
+	render_item_result_card(r, index) {
+		const details = this._item_details_cache.get(r.item_code);
+		const has_price = !!details && details.has_public_price && details.public_price != null;
+		const price_html = has_price
+			? `<span class="fg-qs-price">${format_money(details.public_price)}</span>`
+			: `<span class="fg-qs-price fg-qs-price--none">${__("SIN PRECIO")}</span>`;
+		const has_qty = !!details && details.qty_disponible != null;
+		const stock_class = !has_qty ? "fg-qs-stock--none" : flt(details.qty_disponible) > 0 ? "fg-qs-stock--ok" : "fg-qs-stock--zero";
+		const stock_txt = has_qty ? format_qty(details.qty_disponible) : "—";
+		const in_cart = this.cart_qty(r.item_code);
+		const active = index === this.nc.active_index;
 
 		return `
-			<div class="fg-product-card ${qty > 0 ? "fg-product-card--in-cart" : ""}" data-item-code="${frappe.utils.escape_html(r.item_code)}">
-				<div class="fg-product-thumb">${thumb}</div>
-				<div class="fg-product-info">
-					<div class="fg-product-name">${frappe.utils.escape_html(r.item_name)}</div>
-					<div class="fg-product-code">${frappe.utils.escape_html(r.item_code)}</div>
-					<div class="fg-product-meta">
-						<span>${frappe.utils.escape_html(stock_uom)}</span>
+			<div class="fg-qs-row ${active ? "is-active" : ""} ${in_cart > 0 ? "fg-qs-row--in-cart" : ""}" role="option" aria-selected="${active}" data-index="${index}" data-item-code="${frappe.utils.escape_html(r.item_code)}">
+				<div class="fg-qs-info">
+					<div class="fg-qs-name">${frappe.utils.escape_html(r.item_name)}</div>
+					<div class="fg-qs-code">${frappe.utils.escape_html(r.item_code)}</div>
+					<div class="fg-qs-meta">
+						<span>${__("Precio público")}: ${price_html}</span>
+						<span class="${stock_class}">${__("Stock")}: ${stock_txt}</span>
+						<span class="fg-qs-in-cart">${in_cart > 0 ? `${__("En cotización")}: ${format_qty(in_cart)}` : ""}</span>
 					</div>
 				</div>
-				<div class="fg-stepper">
-					<button type="button" class="fg-stepper-btn fg-stepper-minus" ${qty <= 0 ? "disabled" : ""}>${icon("minus")}</button>
-					<input type="number" inputmode="decimal" class="fg-stepper-input" value="${qty}" min="0">
-					<button type="button" class="fg-stepper-btn fg-stepper-plus">${icon("plus")}</button>
-				</div>
+				<button type="button" class="fg-btn fg-btn--solid-primary fg-qs-add">${icon("plus", "fg-icon-sm")} ${__("AGREGAR")}</button>
 			</div>
 		`;
 	}
 
 	bind_item_result_events() {
-		this.$body.find(".fg-item-results .fg-product-card").each((i, el) => {
-			const $card = $(el);
-			const item_code = $card.data("item-code");
-			const $input = $card.find(".fg-stepper-input");
-
-			$card.find(".fg-stepper-minus").on("click", () => {
-				this.set_cart_qty(item_code, Math.max(this.cart_qty(item_code) - 1, 0));
-			});
-			$card.find(".fg-stepper-plus").on("click", () => {
-				this.set_cart_qty(item_code, this.cart_qty(item_code) + 1);
-			});
-			$input.on("change", () => {
-				this.set_cart_qty(item_code, Math.max(flt($input.val()), 0));
-			});
+		this.$body.find(".fg-qs-results .fg-qs-row").each((i, el) => {
+			const $row = $(el);
+			const index = cint($row.data("index"));
+			// mousedown + preventDefault keeps focus in the search input on
+			// desktop, then click runs the SAME add path as Enter.
+			$row.find(".fg-qs-add")
+				.on("mousedown", (e) => e.preventDefault())
+				.on("click", () => this.add_item_from_search(index));
+			$row.on("mouseenter", () => this.set_active_result(index));
 		});
+	}
+
+	// -- Cotización rápida (Commit 25.26) ---------------------------------------
+	//
+	// Reuses Ventas' quick-order engine as-is: the SAME whitelisted,
+	// read-only fabergray_erp.api.ventas.parse_quick_order endpoint (called
+	// through call_ventas(), exactly like search_items()), so the same text
+	// yields the same interpretation, candidates, confidence, ambiguity and
+	// preselection in both pages -- nothing is parsed or scored here. The
+	// accepted format is that parser's own (one product per line, quantity
+	// at the start: "5 galones desengrasante"); no new syntax.
+	//
+	// Only a line the SERVER preselected (preselected_item: high confidence
+	// AND not ambiguous) starts selected; every other line needs an explicit
+	// pick or "Ignorar" before "AGREGAR A COTIZACIÓN" enables. Nothing in the
+	// pasted text can set a price: this section only ever produces
+	// {item_code, qty} additions to the shared cart, through set_cart_qty().
+
+	quick_quote_panel_html() {
+		return `
+			<div class="fg-cq-panel">
+				<div class="fg-cq-intro">
+					<div class="fg-cq-title">${__("COTIZACIÓN RÁPIDA")}</div>
+					<div class="fg-cq-subtitle">
+						${__("Pega o escribe varios productos con sus cantidades.")}
+					</div>
+				</div>
+				<div class="fg-cq-help">
+					<div>${__("Pega o escribe un producto por línea.")}</div>
+					<div>${__("Escribe primero la cantidad y después el producto.")}</div>
+					<div class="fg-cq-help-label">${__("Ejemplo:")}</div>
+					<pre class="fg-cq-help-example">${frappe.utils.escape_html(QUICK_QUOTE_EXAMPLE)}</pre>
+				</div>
+				<label class="fg-cq-label" for="fg-cq-textarea">${__("Productos")}</label>
+				<textarea
+					id="fg-cq-textarea"
+					class="fg-cq-textarea"
+					rows="6"
+					placeholder="${frappe.utils.escape_html(QUICK_QUOTE_EXAMPLE)}"
+				>${frappe.utils.escape_html(this.nc.quick.text || "")}</textarea>
+				<div class="fg-cq-actions-row">
+					<button type="button" class="fg-btn fg-btn--solid-primary fg-cq-process-btn">
+						${icon("search", "fg-icon-sm")} ${__("PROCESAR COTIZACIÓN")}
+					</button>
+					<button type="button" class="fg-btn fg-btn--ghost fg-cq-clear-btn">
+						${icon("trash-2", "fg-icon-sm")} ${__("Limpiar")}
+					</button>
+				</div>
+				<div class="fg-cq-results"></div>
+				<div class="fg-cq-apply-bar"></div>
+			</div>
+		`;
+	}
+
+	bind_quick_quote_panel_events() {
+		this.$body.find(".fg-cq-textarea").on("input", (e) => {
+			this.nc.quick.text = $(e.currentTarget).val();
+		});
+		this.$body.find(".fg-cq-process-btn").on("click", () => this.process_quick_quote());
+		this.$body.find(".fg-cq-clear-btn").on("click", () => this.clear_quick_quote());
+	}
+
+	// Client-side mirrors of parse_quick_order()'s own input limits
+	// (QUICK_ORDER_MAX_CHARS/QUICK_ORDER_MAX_LINES in api/ventas.py) so the
+	// Vendedora gets a Cotización-worded message instead of the server's
+	// "pedido" wording; the server still enforces both on its own.
+	process_quick_quote() {
+		if (this.nc.quick.loading) return;
+		const text = (this.$body.find(".fg-cq-textarea").val() || "").trim();
+		if (!text) {
+			frappe.show_alert({ message: __("Escribe o pega productos antes de procesar."), indicator: "orange" });
+			return;
+		}
+		if (text.length > QUICK_QUOTE_MAX_CHARS) {
+			frappe.show_alert({ message: __("El texto es demasiado largo (máximo {0} caracteres).", [QUICK_QUOTE_MAX_CHARS]), indicator: "orange" });
+			return;
+		}
+		if (text.split("\n").filter((l) => l.trim()).length > QUICK_QUOTE_MAX_LINES) {
+			frappe.show_alert({ message: __("Máximo {0} líneas por cotización rápida.", [QUICK_QUOTE_MAX_LINES]), indicator: "orange" });
+			return;
+		}
+
+		this.nc.quick.loading = true;
+		this.nc.quick.text = text;
+		const $btn = this.$body.find(".fg-cq-process-btn").prop("disabled", true).addClass("fg-btn--loading");
+		this.render_quick_quote_skeleton();
+
+		// Re-processing REPLACES the lines, never appends.
+		this.call_ventas("parse_quick_order", { text: text })
+			.then((response) => {
+				this.nc.quick.lines = ((response && response.lines) || []).map((line) => this.build_quick_quote_line(line));
+			})
+			.catch(() => {
+				// frappe.call's own error dialog already showed the message.
+			})
+			.finally(() => {
+				this.nc.quick.loading = false;
+				$btn.prop("disabled", false).removeClass("fg-btn--loading");
+				this.render_quick_quote_lines();
+			});
+	}
+
+	// Server data copied as-is; `selected` starts ONLY from the server's own
+	// preselected_item, `ignored` is the Vendedora's explicit opt-out.
+	build_quick_quote_line(server_line) {
+		const pre = server_line.preselected_item;
+		return {
+			source_text: server_line.source_text,
+			qty: server_line.qty,
+			confidence: server_line.confidence,
+			ambiguous: server_line.ambiguous,
+			candidates: server_line.candidates || [],
+			selected: pre ? { item_code: pre.item_code, item_name: pre.item_name, stock_uom: pre.stock_uom } : null,
+			ignored: false,
+		};
+	}
+
+	render_quick_quote_skeleton() {
+		this.$body.find(".fg-cq-results").html(`
+			<div class="fg-skeleton fg-product-skeleton"></div>
+			<div class="fg-skeleton fg-product-skeleton"></div>
+		`);
+		this.$body.find(".fg-cq-apply-bar").empty();
+	}
+
+	render_quick_quote_lines() {
+		const $area = this.$body.find(".fg-cq-results");
+		if (!$area.length) return; // mode switched away before the response landed
+		const lines = this.nc.quick.lines;
+		if (!lines.length) {
+			$area.html(`<div class="fg-empty fg-empty--sm">${__('Escribe los productos y presiona "PROCESAR COTIZACIÓN".')}</div>`);
+			this.$body.find(".fg-cq-apply-bar").empty();
+			return;
+		}
+		$area.html(lines.map((line, i) => this.render_quick_quote_line(line, i)).join(""));
+		lines.forEach((_, i) => this.bind_quick_quote_line_events(i));
+		this.render_quick_quote_apply_bar();
+	}
+
+	render_quick_quote_line_at(index) {
+		const line = this.nc.quick.lines[index];
+		const $old = this.$body.find(`.fg-cq-line[data-index="${index}"]`);
+		if (!line || !$old.length) return;
+		$old.replaceWith(this.render_quick_quote_line(line, index));
+		this.bind_quick_quote_line_events(index);
+		this.render_quick_quote_apply_bar();
+	}
+
+	// Same five states, same order and same rules as Ventas' own
+	// quick_order_line_status() -- "no encontrado" is checked first.
+	quick_quote_line_status(line) {
+		if (!line.candidates.length) return { label: __("No encontrado"), mod: "not-found" };
+		if (line.confidence === "high" && !line.ambiguous) return { label: __("Encontrado"), mod: "high" };
+		if (line.confidence === "high" && line.ambiguous) return { label: __("Revisar alternativas"), mod: "review" };
+		if (line.confidence === "medium") return { label: __("Revisar sugerencia"), mod: "review" };
+		return { label: __("Selecciona producto"), mod: "low" };
+	}
+
+	render_quick_quote_line(line, index) {
+		const status = this.quick_quote_line_status(line);
+		const title = line.selected ? line.selected.item_name : line.source_text;
+		const candidates_html = line.candidates.length
+			? line.candidates.map((c) => this.render_quick_quote_candidate(line, c, index)).join("")
+			: `<div class="fg-empty fg-empty--sm">${__('Sin coincidencias. Ignora la línea o búscalo en "Buscar manualmente".')}</div>`;
+
+		return `
+			<div class="fg-cq-line ${line.ignored ? "fg-cq-line--ignored" : ""}" data-index="${index}">
+				<div class="fg-cq-line-header">
+					<div class="fg-cq-line-main">
+						<div class="fg-cq-line-title">${frappe.utils.escape_html(title)}</div>
+						${line.selected ? `<div class="fg-cq-line-code">${frappe.utils.escape_html(line.selected.item_code)}</div>` : ""}
+						<div class="fg-cq-line-source">${__("Texto")}: ${frappe.utils.escape_html(line.source_text)}</div>
+					</div>
+					<span class="fg-cq-status fg-cq-status--${status.mod}">${status.mod === "high" ? "✓ " : status.mod === "not-found" ? "⚠ " : ""}${status.label}</span>
+				</div>
+				<div class="fg-cq-line-body">
+					<label class="fg-cq-qty">
+						<span>${__("Cantidad")}</span>
+						<input type="number" inputmode="decimal" class="fg-cq-qty-input" value="${line.qty}" min="0" ${line.ignored ? "disabled" : ""}>
+					</label>
+					<button type="button" class="fg-btn fg-btn--ghost fg-cq-ignore" aria-pressed="${line.ignored}">
+						${line.ignored ? icon("circle-check", "fg-icon-sm") + " " + __("Reactivar") : icon("x", "fg-icon-sm") + " " + __("Ignorar")}
+					</button>
+				</div>
+				<div class="fg-cq-candidates">${candidates_html}</div>
+			</div>
+		`;
+	}
+
+	render_quick_quote_candidate(line, candidate, line_index) {
+		const is_selected = !!line.selected && line.selected.item_code === candidate.item_code;
+		return `
+			<button type="button" class="fg-cq-candidate ${is_selected ? "is-selected" : ""}" data-line="${line_index}" data-item-code="${frappe.utils.escape_html(candidate.item_code)}" aria-pressed="${is_selected}" ${line.ignored ? "disabled" : ""}>
+				<span class="fg-cq-candidate-name">${frappe.utils.escape_html(candidate.item_name)}</span>
+				<span class="fg-cq-candidate-meta">
+					<span>${frappe.utils.escape_html(candidate.item_code)}</span>
+					<span class="fg-cq-candidate-score fg-cq-candidate-score--${candidate.confidence}">${candidate.score}%</span>
+				</span>
+			</button>
+		`;
+	}
+
+	bind_quick_quote_line_events(index) {
+		const $line = this.$body.find(`.fg-cq-line[data-index="${index}"]`);
+		$line.find(".fg-cq-qty-input").on("change", (e) => {
+			const line = this.nc.quick.lines[index];
+			if (!line) return;
+			line.qty = Math.max(flt($(e.currentTarget).val()), 0);
+			this.render_quick_quote_line_at(index);
+		});
+		$line.find(".fg-cq-candidate").on("click", (e) => {
+			const line = this.nc.quick.lines[index];
+			const candidate = line && line.candidates.find((c) => c.item_code === $(e.currentTarget).data("item-code"));
+			if (!candidate) return;
+			line.selected = { item_code: candidate.item_code, item_name: candidate.item_name, stock_uom: candidate.stock_uom };
+			this.render_quick_quote_line_at(index);
+		});
+		$line.find(".fg-cq-ignore").on("click", () => {
+			const line = this.nc.quick.lines[index];
+			if (!line) return;
+			line.ignored = !line.ignored;
+			this.render_quick_quote_line_at(index);
+		});
+	}
+
+	// Same rule as Ventas' validate_quick_order_lines(): every NON-ignored
+	// line must have a selected product and qty > 0, and at least one line
+	// must be active. Not-found/ambiguous lines therefore block adding until
+	// the Vendedora picks a product or explicitly ignores the line -- never
+	// silently dropped, never silently added.
+	validate_quick_quote_lines() {
+		const active = this.nc.quick.lines.filter((l) => !l.ignored);
+		const missing = active.filter((l) => !l.selected || !(flt(l.qty) > 0));
+		return { valid: active.length > 0 && missing.length === 0, missing_count: missing.length };
+	}
+
+	render_quick_quote_apply_bar() {
+		const $bar = this.$body.find(".fg-cq-apply-bar");
+		if (!$bar.length) return;
+		if (!this.nc.quick.lines.length) {
+			$bar.empty();
+			return;
+		}
+		const { valid, missing_count } = this.validate_quick_quote_lines();
+		$bar.html(`
+			${
+				missing_count > 0
+					? `<div class="fg-cq-warning">${icon("triangle-alert", "fg-icon-sm")} ${__("Faltan {0} línea(s) por resolver: elige un producto o ignora la línea.", [missing_count])}</div>`
+					: ""
+			}
+			<button type="button" class="fg-btn fg-btn--solid-primary fg-btn--lg fg-cq-apply-btn" ${valid ? "" : "disabled"}>
+				${icon("plus", "fg-icon-sm")} ${__("AGREGAR A COTIZACIÓN")}
+			</button>
+		`);
+		$bar.find(".fg-cq-apply-btn").on("click", () => this.apply_quick_quote_to_cart());
+	}
+
+	// The one place Cotización rápida touches the cart -- the SAME Map the
+	// manual search feeds, through the SAME set_cart_qty(). Lines resolving
+	// to the same item_code are summed first, then added on top of what the
+	// cart already holds (cart 2 + rápida 5 -> 7, one line). Only
+	// {item_code, qty} (+ display name/UOM) ever reaches the cart; stock is
+	// never consulted, so stock 0 adds like anything else. The Quotation is
+	// NOT created here -- CREAR COTIZACIÓN / GUARDAR CAMBIOS stays the only
+	// path to create_and_submit_quotation()/update_*/modify_*.
+	apply_quick_quote_to_cart() {
+		if (!this.validate_quick_quote_lines().valid) return;
+
+		const additions = new Map(); // item_code -> {qty, item_name, stock_uom}
+		for (const line of this.nc.quick.lines) {
+			if (line.ignored || !line.selected) continue;
+			const qty = flt(line.qty);
+			if (qty <= 0) continue;
+			const current = additions.get(line.selected.item_code);
+			if (current) {
+				current.qty += qty;
+			} else {
+				additions.set(line.selected.item_code, { qty: qty, item_name: line.selected.item_name, stock_uom: line.selected.stock_uom });
+			}
+		}
+		if (!additions.size) return;
+
+		for (const [item_code, a] of additions) {
+			this.set_cart_qty(item_code, this.cart_qty(item_code) + a.qty, { item_name: a.item_name, stock_uom: a.stock_uom });
+		}
+
+		frappe.show_alert(
+			{ message: __("{0} producto(s) agregado(s) a la cotización", [additions.size]), indicator: "green" },
+			5
+		);
+		this.clear_quick_quote();
+	}
+
+	// "Limpiar" and the post-apply cleanup share this -- never touches the cart.
+	clear_quick_quote() {
+		this.nc.quick = this.blank_quick_quote_state();
+		this.$body.find(".fg-cq-textarea").val("");
+		this.render_quick_quote_lines();
 	}
 
 	// -- Cart / Paso 3: Resumen -----------------------------------------------
@@ -1101,18 +1546,20 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		return line ? line.qty : 0;
 	}
 
-	set_cart_qty(item_code, qty) {
+	// `meta` ({item_name, stock_uom}, optional) -- display fallback for an
+	// item that never appeared in the manual search results (Cotización
+	// rápida). Name/UOM only: nothing economic is ever stored per line.
+	set_cart_qty(item_code, qty, meta) {
 		qty = flt(qty);
 		if (qty <= 0) {
 			this.nc.cart.delete(item_code);
 		} else {
 			const result = this.nc.item_results.find((r) => r.item_code === item_code);
-			const info = this._item_info_cache.get(item_code);
 			const existing = this.nc.cart.get(item_code);
 			this.nc.cart.set(item_code, {
 				item_code: item_code,
-				item_name: (result && result.item_name) || (info && info.item_name) || (existing && existing.item_name) || item_code,
-				stock_uom: (result && result.stock_uom) || (info && info.stock_uom) || (existing && existing.stock_uom) || "",
+				item_name: (result && result.item_name) || (existing && existing.item_name) || (meta && meta.item_name) || item_code,
+				stock_uom: (result && result.stock_uom) || (existing && existing.stock_uom) || (meta && meta.stock_uom) || "",
 				qty: qty,
 			});
 		}
@@ -1121,16 +1568,15 @@ fabergray_erp.Cotizaciones = class Cotizaciones {
 		this.refresh_confirm_state();
 	}
 
-	// Updates only the one affected product card's stepper (if it is
-	// currently rendered in the search results) instead of re-rendering the
-	// whole grid -- keeps the search input focused while tapping +/-.
+	// Updates only the one affected quick-search row's "En cotización"
+	// badge (if it is currently rendered) instead of re-rendering the whole
+	// list -- keeps the search input focused while editing the cart.
 	sync_item_result_card(item_code) {
-		const $card = this.$body.find(`.fg-item-results .fg-product-card[data-item-code="${css_escape(item_code)}"]`);
-		if (!$card.length) return;
+		const $row = this.$body.find(`.fg-qs-results .fg-qs-row[data-item-code="${css_escape(item_code)}"]`);
+		if (!$row.length) return;
 		const qty = this.cart_qty(item_code);
-		$card.toggleClass("fg-product-card--in-cart", qty > 0);
-		$card.find(".fg-stepper-input").val(qty);
-		$card.find(".fg-stepper-minus").prop("disabled", qty <= 0);
+		$row.toggleClass("fg-qs-row--in-cart", qty > 0);
+		$row.find(".fg-qs-in-cart").text(qty > 0 ? `${__("En cotización")}: ${format_qty(qty)}` : "");
 	}
 
 	render_summary() {
@@ -1509,6 +1955,26 @@ function flt(v) {
 function format_qty(v) {
 	const n = flt(v);
 	return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+// Commit 25.26 -- mirror of api/ventas.py's QUICK_ORDER_MAX_CHARS/
+// QUICK_ORDER_MAX_LINES (server remains the authority).
+const QUICK_QUOTE_MAX_CHARS = 10000;
+const QUICK_QUOTE_MAX_LINES = 50;
+// The official Cotización rápida format IS Ventas' quick-order format (same
+// parser): quantity FIRST, then the product, one per line. Shown as help
+// and as the textarea placeholder.
+const QUICK_QUOTE_EXAMPLE = "5 Desengrasante 1 Galón\n3 Escoba Industrial\n10 Hipoclorito Galón";
+
+function cint(v) {
+	return frappe.utils.cint ? frappe.utils.cint(v) : parseInt(v, 10) || 0;
+}
+
+// Commit 25.26 -- display-only money formatting for the public price the
+// server returned (same frappe.format Currency formatter facturacion.js's
+// own money() uses). Never parsed back, never sent.
+function format_money(v) {
+	return frappe.format(v, { fieldtype: "Currency" }, { inline: true });
 }
 
 function css_escape(v) {
