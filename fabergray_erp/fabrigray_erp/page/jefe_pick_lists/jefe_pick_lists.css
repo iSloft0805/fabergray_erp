@@ -328,6 +328,55 @@
 	color: var(--fg-text-muted);
 }
 
+/* Hotfix 25.26.2 -- "OBSERVACIONES DEL PEDIDO" inside VER DETALLE: read-only,
+   informative (same language as Bodega/Facturación), before the item table,
+   long text wraps without horizontal scroll. */
+.fg-pl-detail-dialog .fg-order-observations {
+	background: var(--fg-warning-tint, #fff7e0);
+	border: 1px solid var(--fg-border, #e5e9f0);
+	border-left: 4px solid var(--fg-warning-dark, #b45309);
+	border-radius: 12px;
+	padding: 12px 14px;
+	margin-bottom: 14px;
+	min-width: 0;
+	max-width: 100%;
+	box-sizing: border-box;
+}
+
+.fg-pl-detail-dialog .fg-order-observations-label {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 0.76rem;
+	font-weight: 700;
+	letter-spacing: 0.03em;
+	color: var(--fg-warning-dark, #b45309);
+	margin-bottom: 6px;
+}
+
+.fg-pl-detail-dialog .fg-order-observations-entry + .fg-order-observations-entry {
+	margin-top: 8px;
+	padding-top: 8px;
+	border-top: 1px dashed var(--fg-border, #e5e9f0);
+}
+
+.fg-pl-detail-dialog .fg-order-observations-order {
+	font-size: 0.76rem;
+	font-weight: 700;
+	color: var(--fg-text-muted, #667085);
+	margin-bottom: 2px;
+	overflow-wrap: anywhere;
+}
+
+.fg-pl-detail-dialog .fg-order-observations-text {
+	font-size: 0.86rem;
+	line-height: 1.5;
+	color: var(--fg-text, #101828);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
 .fg-pl-detail-table {
 	width: 100%;
 	border-collapse: collapse;

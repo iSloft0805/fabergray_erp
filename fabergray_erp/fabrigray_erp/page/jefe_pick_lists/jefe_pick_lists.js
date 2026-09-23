@@ -506,6 +506,7 @@ fabergray_erp.JefePickLists = class JefePickLists {
 							${row_kv(__("Iniciado por"), detail.fg_started_by || "—")}
 							${row_kv(__("Iniciado el"), detail.fg_started_on ? frappe.datetime.str_to_user(detail.fg_started_on) : "—")}
 						</div>
+						${render_order_observations_html(detail.order_observations)}
 						<table class="fg-pl-detail-table">
 							<thead>
 								<tr><th>${__("Item")}</th><th>${__("Nombre")}</th><th>${__("Solicitado")}</th><th>${__("Alistado")}</th><th></th></tr>
@@ -543,6 +544,38 @@ fabergray_erp.JefePickLists = class JefePickLists {
 		dialog.show();
 	}
 };
+
+// Hotfix 25.26.2 -- "OBSERVACIONES DEL PEDIDO" from bodega.get_pick_list()'s
+// order_observations (read-only). Same contract as bodega.js's own helper
+// (duplicated per page, this file's convention): "" when empty, PEDIDO #
+// labels only when more than one Sales Order, every value escaped.
+function render_order_observations_html(observations) {
+	const list = (observations || []).filter((o) => o && (o.text || "").trim());
+	if (!list.length) return "";
+	const multiple = list.length > 1;
+	const entries = list
+		.map(
+			(o) => `
+				<div class="fg-order-observations-entry">
+					${
+						multiple
+							? `<div class="fg-order-observations-order">${__("PEDIDO")} #${frappe.utils.escape_html(
+									o.commercial_name || o.sales_order || ""
+							  )}</div>`
+							: ""
+					}
+					<div class="fg-order-observations-text">${frappe.utils.escape_html(o.text.trim())}</div>
+				</div>
+			`
+		)
+		.join("");
+	return `
+		<div class="fg-order-observations">
+			<div class="fg-order-observations-label">${icon("file-text", "fg-icon-sm")} ${__("OBSERVACIONES DEL PEDIDO")}</div>
+			${entries}
+		</div>
+	`;
+}
 
 function row_kv(label, value) {
 	return `<div class="fg-pl-detail-row"><span>${label}</span><strong>${frappe.utils.escape_html(String(value))}</strong></div>`;

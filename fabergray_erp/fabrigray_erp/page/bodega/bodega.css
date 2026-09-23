@@ -2098,6 +2098,55 @@
 	font-weight: 700;
 }
 
+/* Hotfix 25.26.2 -- "OBSERVACIONES DEL PEDIDO": read-only, informative (not
+   an error), normal flow (never fixed/sticky), full width on every
+   breakpoint, long text wraps without horizontal scroll. */
+.fg-order-observations {
+	background: var(--fg-warning-tint);
+	border: 1px solid var(--fg-border);
+	border-left: 4px solid var(--fg-warning-dark);
+	border-radius: var(--fg-radius-lg);
+	padding: 14px 18px;
+	margin-bottom: 22px;
+	min-width: 0;
+	max-width: 100%;
+	box-sizing: border-box;
+}
+
+.fg-order-observations-label {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 0.78rem;
+	font-weight: 700;
+	letter-spacing: 0.03em;
+	color: var(--fg-warning-dark);
+	margin-bottom: 6px;
+}
+
+.fg-order-observations-entry + .fg-order-observations-entry {
+	margin-top: 10px;
+	padding-top: 10px;
+	border-top: 1px dashed var(--fg-border);
+}
+
+.fg-order-observations-order {
+	font-size: 0.78rem;
+	font-weight: 700;
+	color: var(--fg-text-muted);
+	margin-bottom: 2px;
+	overflow-wrap: anywhere;
+}
+
+.fg-order-observations-text {
+	font-size: 0.95rem;
+	line-height: 1.5;
+	color: var(--fg-text);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	word-break: break-word;
+}
+
 /* Big progress card */
 .fg-progress-card {
 	background: var(--fg-card);
@@ -2762,5 +2811,14 @@
 	.fg-shortages-pagination-controls,
 	.fg-history-pagination-controls {
 		justify-content: center;
+	}
+}
+
+/* Hotfix 25.26.2 -- observaciones del pedido on phones: tighter padding,
+   still full width and in normal flow (before the item cards). */
+@media (max-width: 640px) {
+	.fg-order-observations {
+		padding: 12px 14px;
+		margin-bottom: 16px;
 	}
 }

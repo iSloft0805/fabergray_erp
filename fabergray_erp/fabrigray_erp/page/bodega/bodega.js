@@ -1526,6 +1526,8 @@ fabergray_erp.Bodega = class Bodega {
 				${started_banner}${done_banner}
 			</div>
 
+			${render_order_observations_html(detail.order_observations)}
+
 			<div class="fg-progress-card">
 				<div>
 					<div class="fg-progress-card-head">${__("Progreso del alistamiento")}</div>
@@ -1897,6 +1899,39 @@ fabergray_erp.Bodega = class Bodega {
 // -------------------------------------------------------------------------
 // Small render helpers -- pure presentation, no server calls, no state.
 // -------------------------------------------------------------------------
+// Hotfix 25.26.2 -- "OBSERVACIONES DEL PEDIDO" (Sales Order.fg_observations,
+// read-only, from get_pick_list()'s order_observations). One section;
+// each observation labelled with its PEDIDO # only when the Pick List
+// (exceptionally) spans more than one Sales Order. Returns "" -- no block
+// at all -- when there is nothing to show. Every server value is escaped.
+function render_order_observations_html(observations) {
+	const list = (observations || []).filter((o) => o && (o.text || "").trim());
+	if (!list.length) return "";
+	const multiple = list.length > 1;
+	const entries = list
+		.map(
+			(o) => `
+				<div class="fg-order-observations-entry">
+					${
+						multiple
+							? `<div class="fg-order-observations-order">${__("PEDIDO")} #${frappe.utils.escape_html(
+									o.commercial_name || o.sales_order || ""
+							  )}</div>`
+							: ""
+					}
+					<div class="fg-order-observations-text">${frappe.utils.escape_html(o.text.trim())}</div>
+				</div>
+			`
+		)
+		.join("");
+	return `
+		<div class="fg-order-observations">
+			<div class="fg-order-observations-label">${icon("file-text", "fg-icon-sm")} ${__("OBSERVACIONES DEL PEDIDO")}</div>
+			${entries}
+		</div>
+	`;
+}
+
 function icon(name, extra_class) {
 	return `<svg class="fg-icon ${extra_class || ""}"><use href="#icon-${name}"></use></svg>`;
 }

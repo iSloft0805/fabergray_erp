@@ -362,6 +362,48 @@ def _open_shortage_pick_lists(names):
 	)
 
 
+def _normalize_order_observation(value):
+	"""Hotfix 25.26.2 -- same contract as facturacion._clean_order_observations()
+	(kept local on purpose: facturacion.py already imports from this module,
+	so importing back would be circular): None/""/whitespace-only -> "",
+	otherwise trimmed at the ends only, internal line breaks untouched."""
+	return (value or "").strip()
+
+
+def _order_observations_for(pl):
+	"""Hotfix 25.26.2 -- read-only `Sales Order.fg_observations` (the ONLY
+	source) for every DISTINCT Sales Order referenced by an already-
+	authorized Pick List, in order of first appearance in `locations`.
+	One query for all of them (never one per row), and only Sales Orders
+	of the Pick List's own Company are ever exposed. Entries whose
+	observation is empty after trimming are omitted -- the page renders no
+	block at all when this list is empty."""
+	sales_orders = []
+	for row in pl.get("locations") or []:
+		if row.sales_order and row.sales_order not in sales_orders:
+			sales_orders.append(row.sales_order)
+	if not sales_orders:
+		return []
+
+	rows = frappe.db.get_values(
+		"Sales Order",
+		{"name": ["in", sales_orders]},
+		["name", "company", "fg_observations"],
+		as_dict=True,
+	)
+	by_name = {r.name: r for r in rows}
+
+	result = []
+	for so in sales_orders:
+		row = by_name.get(so)
+		if not row or row.company != pl.company:
+			continue
+		text = _normalize_order_observation(row.fg_observations)
+		if text:
+			result.append({"sales_order": so, "commercial_name": root_commercial_name(so), "text": text})
+	return result
+
+
 @frappe.whitelist()
 def get_pick_list(name):
 	"""Minimal, UI-ready view of one Pick List -- not the full document.
@@ -414,6 +456,8 @@ def get_pick_list(name):
 		"commercial_name": root_commercial_name(sales_order) if sales_order else None,
 		"fg_started_by": pl.fg_started_by,
 		"fg_started_on": pl.fg_started_on,
+		# Hotfix 25.26.2 -- read-only; [] when no order has an observation.
+		"order_observations": _order_observations_for(pl),
 		"rows": rows,
 	}
 
