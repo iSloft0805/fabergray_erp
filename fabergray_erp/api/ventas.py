@@ -747,6 +747,10 @@ def get_my_orders(limit=50, view="active"):
                 "customer": so.customer,
                 "customer_name": so.customer_name,
                 "transaction_date": so.transaction_date,
+                # Hotfix 25.26.3 -- native `creation` of THIS (vigente)
+                # Sales Order, for the card's "fecha · hora" -- never
+                # `modified`, never walked back through `amended_from`.
+                "creation": so.creation,
                 "delivery_date": so.delivery_date,
                 "status": so.status,
                 "item_count": len(so.items),
@@ -824,6 +828,8 @@ def get_order_detail(name):
         "customer": so.customer,
         "customer_name": so.customer_name,
         "transaction_date": so.transaction_date,
+        # Hotfix 25.26.3 -- same as get_my_orders() above.
+        "creation": so.creation,
         "delivery_date": so.delivery_date,
         "status": so.status,
         "item_count": len(so.items),

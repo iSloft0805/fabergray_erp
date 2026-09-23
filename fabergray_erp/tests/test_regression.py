@@ -566,6 +566,9 @@ class TestStaticGuardrails(IntegrationTestCase):
 			"driver_name",
 			"dispatched_on",
 			"delivered_on",
+			# Hotfix 25.26.3 -- native Sales Order.creation (when this
+			# version of the order was created), never an economic field.
+			"creation",
 		}
 		economic_keys = {
 			"rate",

@@ -385,7 +385,7 @@ fabergray_erp.Ventas = class Ventas {
 				<div class="fg-order-card-customer">${icon("user", "fg-icon-sm")} ${customer_label}</div>
 				${quotation_origin_html}
 				<div class="fg-order-card-meta">
-					<span>${icon("calendar", "fg-icon-sm")} ${frappe.datetime.str_to_user(o.transaction_date)}</span>
+					<span>${icon("calendar", "fg-icon-sm")} ${format_order_date_with_time(o.transaction_date, o.creation)}</span>
 					<span>${icon("truck", "fg-icon-sm")} ${__("Entrega")}: ${entrega}</span>
 				</div>
 				<div class="fg-order-card-counts">
@@ -748,7 +748,7 @@ fabergray_erp.Ventas = class Ventas {
 						: ""
 				}
 				<div class="fg-order-detail-meta">
-					<span>${icon("calendar", "fg-icon-sm")} ${frappe.datetime.str_to_user(detail.transaction_date)}</span>
+					<span>${icon("calendar", "fg-icon-sm")} ${format_order_date_with_time(detail.transaction_date, detail.creation)}</span>
 					<span>${icon("truck", "fg-icon-sm")} ${__("Entrega")}: ${entrega}</span>
 				</div>
 				${logistics.info_html}
@@ -2116,6 +2116,28 @@ function get_initials(name) {
 
 function flt(v) {
 	return frappe.utils.flt ? frappe.utils.flt(v) : parseFloat(v) || 0;
+}
+
+// Hotfix 25.26.3 -- hora de creación del pedido (Sales Order.creation del
+// pedido vigente), shared by the order cards and "VER PEDIDO". Frappe
+// stores datetimes in the SYSTEM time zone; convert_to_user_tz() moves
+// it to the user's effective time zone (frappe.boot.time_zone) -- no
+// manual offset, no hardcoded zone. 12-hour, no seconds.
+const CREATED_TIME_FORMAT = "h:mm A";
+
+function format_created_time(creation) {
+	if (!creation) return "";
+	const m = frappe.datetime.convert_to_user_tz(creation, false);
+	return m && m.isValid() ? m.format(CREATED_TIME_FORMAT) : "";
+}
+
+// "23-09-2026 · 3:42 PM" -- the date stays exactly what it always was
+// (transaction_date in the site's date format); the time is appended only
+// when creation is present and valid, never "undefined"/"Invalid date".
+function format_order_date_with_time(transaction_date, creation) {
+	const date = frappe.datetime.str_to_user(transaction_date);
+	const time = format_created_time(creation);
+	return time ? `${date} · ${time}` : date;
 }
 
 function format_qty(v) {
