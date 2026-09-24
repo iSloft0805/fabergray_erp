@@ -91,11 +91,13 @@ version of this claim.
 """
 
 import functools
+import io
 
 import frappe
 from frappe import _
 from frappe.contacts.doctype.address.address import get_address_display
-from frappe.utils import cint, flt, now_datetime, nowdate
+from frappe.utils import cint, flt, now_datetime, nowdate, strip_html
+from PIL import Image, ImageOps
 
 from erpnext import get_default_company
 
@@ -103,6 +105,10 @@ from fabergray_erp import geocoding
 from fabergray_erp.api.bodega import _require_login
 from fabergray_erp.api.clientes import _primary_address_name
 from fabergray_erp.api.facturacion import FG_INVOICING_FACTURADO, _sales_order_of
+from fabergray_erp.fabrigray_erp.doctype.recorrido_parada.recorrido_parada import (
+	PAYMENT_STATUS_PAID,
+	PAYMENT_STATUSES,
+)
 from fabergray_erp.sales_order_naming import root_commercial_name
 from fabergray_erp.search_utils import normalize_search_date
 
@@ -670,6 +676,15 @@ def get_route_detail(route_name):
 			"geolocation_status",
 			"geolocation_source",
 			"status",
+			# Fase 26.3 -- additive: when/by whom a stop was delivered. The
+			# evidence file_urls are deliberately NOT listed here; they stay
+			# on the stop itself, behind its own File permissions.
+			"delivered_on",
+			"delivered_by",
+			# Fase 26.3 (extensión) -- operational outcome only; notes,
+			# issue details and the proof URL stay on the stop itself.
+			"payment_status",
+			"has_delivery_issues",
 		],
 		order_by="sequence asc",
 	)
@@ -1230,6 +1245,381 @@ def start_route(route_name):
 
 	detail = get_route_detail(route.name)
 	detail["already_started"] = False
+	return detail
+
+
+# ---------------------------------------------------------------------------
+# Fase 26.3 -- Entrega por parada (foto + firma)
+# ---------------------------------------------------------------------------
+
+#: Input limits, checked server-side on the raw upload before decoding. The
+#: page compresses the photo client-side (max 1600px, JPEG ~0.8), so a real
+#: payload is far below these.
+DELIVERY_PHOTO_MAX_BYTES = 8 * 1024 * 1024
+DELIVERY_SIGNATURE_MAX_BYTES = 1 * 1024 * 1024
+DELIVERY_NOTES_MAX_LENGTH = 1000
+
+#: Decoded formats accepted as INPUT (PIL's own detection from the bytes --
+#: never the browser's MIME type or file extension). Output is always
+#: re-encoded: the photo as JPEG, the signature as PNG.
+DELIVERY_PHOTO_INPUT_FORMATS = ("JPEG", "PNG", "WEBP")
+DELIVERY_SIGNATURE_INPUT_FORMATS = ("PNG",)
+
+DELIVERY_PHOTO_MAX_SIDE = 1600
+#: Hard cap on decoded pixels, well under PIL's own decompression-bomb
+#: threshold -- a small file must not expand into a huge bitmap.
+DELIVERY_IMAGE_MAX_PIXELS = 40_000_000
+
+#: A signature needs at least this many "ink" pixels once flattened on
+#: white -- rejects an empty canvas and a stray tap.
+DELIVERY_SIGNATURE_MIN_INK_PIXELS = 50
+
+
+class DeliveryEvidenceError(frappe.ValidationError):
+	pass
+
+
+class StopNotDeliverableError(frappe.ValidationError):
+	pass
+
+
+def _read_uploaded_file(key, max_bytes):
+	"""Reads one multipart file ONCE (a werkzeug stream cannot be re-read,
+	which is why deliver_stop() does this before the retryable block).
+	Reads at most max_bytes + 1 so an oversized upload is detected without
+	trusting any client-declared size. Returns bytes, or None if absent."""
+	request = getattr(frappe.local, "request", None)
+	files = getattr(request, "files", None) or {}
+	upload = files.get(key)
+	if not upload:
+		return None
+	content = upload.stream.read(max_bytes + 1)
+	if len(content) > max_bytes:
+		frappe.throw(
+			_("El archivo {0} supera el tamaño máximo de {1} MB.").format(key, max_bytes // (1024 * 1024)),
+			DeliveryEvidenceError,
+		)
+	return content
+
+
+def _open_verified_image(content, allowed_formats, label):
+	"""Decodes `content` with PIL and checks what it REALLY is. verify()
+	catches truncated/corrupt data, then a fresh open + load() gives a
+	usable image (verify() leaves the first one unusable)."""
+	try:
+		probe = Image.open(io.BytesIO(content))
+		image_format = probe.format
+		probe.verify()
+		image = Image.open(io.BytesIO(content))
+		image.load()
+	except Exception:
+		frappe.throw(_("{0}: el archivo no es una imagen válida.").format(label), DeliveryEvidenceError)
+
+	if image_format not in allowed_formats:
+		frappe.throw(
+			_("{0}: formato de imagen no permitido ({1}).").format(label, image_format or "?"),
+			DeliveryEvidenceError,
+		)
+	width, height = image.size
+	if width * height > DELIVERY_IMAGE_MAX_PIXELS:
+		frappe.throw(_("{0}: la imagen es demasiado grande.").format(label), DeliveryEvidenceError)
+	return image
+
+
+def _normalize_delivery_photo(content):
+	"""Required."""
+	if not content:
+		frappe.throw(_("La foto de entrega es obligatoria."), DeliveryEvidenceError)
+	return _reencode_photo(content, _("Foto de entrega"))
+
+
+def _normalize_payment_proof(content):
+	"""Optional payment proof (only ever called with content, and only for
+	payment_status == "Pagado") -- exactly the same safe pipeline as the
+	delivery photo."""
+	return _reencode_photo(content, _("Comprobante de pago"))
+
+
+def _reencode_photo(content, label):
+	"""Server-side re-encode to a fresh JPEG: applies the EXIF orientation
+	first (so the site's strip-EXIF setting can never leave it sideways),
+	caps the long side at DELIVERY_PHOTO_MAX_SIDE, flattens to RGB and saves
+	WITHOUT any EXIF/metadata (no GPS, no device info). Anything that is not
+	really an image never survives this step."""
+	if len(content) > DELIVERY_PHOTO_MAX_BYTES:
+		frappe.throw(_("{0}: supera el tamaño máximo permitido.").format(label), DeliveryEvidenceError)
+
+	image = _open_verified_image(content, DELIVERY_PHOTO_INPUT_FORMATS, label)
+	image = ImageOps.exif_transpose(image)
+	if image.mode != "RGB":
+		image = image.convert("RGB")
+	image.thumbnail((DELIVERY_PHOTO_MAX_SIDE, DELIVERY_PHOTO_MAX_SIDE), Image.Resampling.LANCZOS)
+
+	output = io.BytesIO()
+	image.save(output, format="JPEG", quality=82, optimize=True)
+	return output.getvalue()
+
+
+def _normalize_customer_signature(content):
+	"""Required, PNG only. Flattened onto white (a transparent canvas export
+	would otherwise look blank), rejected if visually empty, re-encoded as a
+	fresh PNG."""
+	if not content:
+		frappe.throw(_("La firma del cliente es obligatoria."), DeliveryEvidenceError)
+	if len(content) > DELIVERY_SIGNATURE_MAX_BYTES:
+		frappe.throw(_("La firma del cliente supera el tamaño máximo permitido."), DeliveryEvidenceError)
+
+	image = _open_verified_image(content, DELIVERY_SIGNATURE_INPUT_FORMATS, _("Firma del cliente"))
+	rgba = image.convert("RGBA")
+	flattened = Image.new("RGB", rgba.size, (255, 255, 255))
+	flattened.paste(rgba, mask=rgba.getchannel("A"))
+
+	ink = ImageOps.invert(flattened.convert("L")).point(lambda p: 255 if p > 60 else 0)
+	if ink.histogram()[255] < DELIVERY_SIGNATURE_MIN_INK_PIXELS:
+		frappe.throw(_("La firma del cliente está vacía."), DeliveryEvidenceError)
+
+	output = io.BytesIO()
+	flattened.save(output, format="PNG", optimize=True)
+	return output.getvalue()
+
+
+def _clean_delivery_text(value, label):
+	"""Free text reported by the driver: HTML stripped, trimmed, at most
+	DELIVERY_NOTES_MAX_LENGTH characters (rejected, never silently cut).
+	Returns None when empty."""
+	value = strip_html(value or "").strip()
+	if len(value) > DELIVERY_NOTES_MAX_LENGTH:
+		frappe.throw(
+			_("{0}: no puede superar {1} caracteres.").format(label, DELIVERY_NOTES_MAX_LENGTH),
+			DeliveryEvidenceError,
+		)
+	return value or None
+
+
+def _clean_delivery_notes(notes):
+	return _clean_delivery_text(notes, _("Observaciones de entrega"))
+
+
+def _parse_strict_bool(value, label):
+	"""has_delivery_issues arrives from FormData as a string. Only an explicit
+	yes/no is accepted: 1/0, true/false (any case) or a real bool; empty means
+	the UI default (NO). Anything else is rejected, never guessed."""
+	if value is None or value == "":
+		return False
+	if isinstance(value, bool):
+		return value
+	if isinstance(value, int) and value in (0, 1):
+		return bool(value)
+	text = str(value).strip().lower()
+	if text in ("1", "true"):
+		return True
+	if text in ("0", "false"):
+		return False
+	frappe.throw(_("{0}: valor inválido.").format(label), DeliveryEvidenceError)
+
+
+def _validate_delivery_report(has_delivery_issues, delivery_issues, payment_status, payment_note, has_payment_proof):
+	"""Fase 26.3 (extensión) -- the driver's report beyond the evidence:
+	faltantes/cambios and the payment status. Returns the normalized values.
+
+	payment_status is only what the driver REPORTS -- it never creates or
+	touches Payment Entry/Sales Invoice/GL/Customer credit; it is not an
+	accounting confirmation."""
+	has_issues = _parse_strict_bool(has_delivery_issues, _("Faltantes / cambios"))
+	issues = _clean_delivery_text(delivery_issues, _("Detalle de faltantes / cambios"))
+	if has_issues and not issues:
+		frappe.throw(_("Describe los faltantes / cambios del pedido."), DeliveryEvidenceError)
+	if not has_issues and issues:
+		frappe.throw(
+			_("Se indicó que no hay faltantes / cambios, pero se envió un detalle."), DeliveryEvidenceError
+		)
+
+	if not payment_status:
+		frappe.throw(_("El estado del pago es obligatorio."), DeliveryEvidenceError)
+	if payment_status not in PAYMENT_STATUSES:
+		frappe.throw(_("Estado del pago inválido: {0}.").format(payment_status), DeliveryEvidenceError)
+	if has_payment_proof and payment_status != PAYMENT_STATUS_PAID:
+		frappe.throw(
+			_("El comprobante de pago solo se admite cuando el estado del pago es Pagado."),
+			DeliveryEvidenceError,
+		)
+
+	return {
+		"has_delivery_issues": 1 if has_issues else 0,
+		"delivery_issues": issues,
+		"payment_status": payment_status,
+		"payment_note": _clean_delivery_text(payment_note, _("Observación del pago")),
+	}
+
+
+def _save_delivery_evidence_file(stop, fieldname, file_name, content):
+	"""A PRIVATE File attached to this exact stop and field, created by the
+	server (the client never supplies a file_url). Inserted inside the
+	delivery's own transaction: if anything later fails, Frappe's
+	File.on_rollback (registered on insert) deletes the file from disk, so a
+	failed delivery leaves no File row and no orphaned file behind."""
+	file_doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": file_name,
+			"attached_to_doctype": "Recorrido Parada",
+			"attached_to_name": stop.name,
+			"attached_to_field": fieldname,
+			"is_private": 1,
+			"content": content,
+		}
+	)
+	file_doc.insert()
+	return file_doc
+
+
+@frappe.whitelist(methods=["POST"])
+def deliver_stop(
+	route_name,
+	stop_name,
+	notes=None,
+	has_delivery_issues=None,
+	delivery_issues=None,
+	payment_status=None,
+	payment_note=None,
+):
+	"""Fase 26.3 -- confirms delivery of ONE stop of an En Ruta route, with
+	a mandatory photo and customer signature sent as multipart files
+	("photo", "signature"), the driver's faltantes/cambios report, the
+	REPORTED payment status and an optional payment proof image
+	("payment_proof", only for "Pagado"). The client only ever sends
+	identifiers, those reported values and the images: status, delivered_on,
+	delivered_by, every file_url and every stop/route value are decided here.
+
+	The upload streams are read exactly once, HERE, before the retryable
+	block (_deliver_stop() is wrapped in @_retrying_on_deadlock, and a
+	retry could not re-read a consumed stream)."""
+	_require_login()
+	photo = _read_uploaded_file("photo", DELIVERY_PHOTO_MAX_BYTES)
+	signature = _read_uploaded_file("signature", DELIVERY_SIGNATURE_MAX_BYTES)
+	payment_proof = _read_uploaded_file("payment_proof", DELIVERY_PHOTO_MAX_BYTES)
+	report = {
+		"has_delivery_issues": has_delivery_issues,
+		"delivery_issues": delivery_issues,
+		"payment_status": payment_status,
+		"payment_note": payment_note,
+	}
+	return _deliver_stop(route_name, stop_name, notes, photo, signature, report=report, payment_proof_content=payment_proof)
+
+
+@_retrying_on_deadlock
+def _deliver_stop(
+	route_name, stop_name, notes, photo_content, signature_content, report=None, payment_proof_content=None
+):
+	"""The whole delivery, one transaction. Order:
+
+	1. permissions (Recorrido + Recorrido Parada write, the route's own
+	   check_permission) and Company -- before any expensive work;
+	2. evidence decoded/validated/re-encoded -- still before taking any
+	   lock, so image work never holds a row lock;
+	3. locks: Recorrido row, then the stop row (same order as start_route()/
+	   refresh_route_geolocation(), so no lock cycle), and every decision
+	   from those fresh locked values, never a possibly stale plain read;
+	4. idempotency: a stop already "Entregado" (double tap / retried
+	   request) returns the detail with already_completed=True -- nothing is
+	   created or changed;
+	5. the Pick List is still eligible and not claimed by another route;
+	6. two private Files (+ an optional third, the payment proof) and the
+	   stop's delivery/report fields, saved via the ORM
+	   (RecorridoParada.validate() re-checks the transition). A failure
+	   anywhere rolls back every File, row and file on disk alike.
+
+	arrived_on is deliberately left empty -- a future "LLEGUÉ" action owns
+	it; filling it here would fake the arrival -> delivery metric.
+
+	KNOWN DEBT (Fase 26.2): Driver is not linked to User, so any authorized
+	Recorrido user of the same Company can deliver any route's stops;
+	delivered_by at least records who did."""
+	_require_login()
+	frappe.has_permission("Recorrido", "write", throw=True)
+	frappe.has_permission("Recorrido Parada", "write", throw=True)
+
+	route = frappe.get_doc("Recorrido", route_name)
+	route.check_permission("write")
+	if route.company != get_default_company():
+		frappe.throw(_("Este recorrido pertenece a otra empresa."), frappe.PermissionError)
+
+	photo_jpeg = _normalize_delivery_photo(photo_content)
+	signature_png = _normalize_customer_signature(signature_content)
+	clean_notes = _clean_delivery_notes(notes)
+	report = report or {}
+	delivery_report = _validate_delivery_report(
+		report.get("has_delivery_issues"),
+		report.get("delivery_issues"),
+		report.get("payment_status"),
+		report.get("payment_note"),
+		has_payment_proof=bool(payment_proof_content),
+	)
+	payment_proof_jpeg = _normalize_payment_proof(payment_proof_content) if payment_proof_content else None
+
+	route_status = frappe.db.get_value("Recorrido", route.name, "status", for_update=True)
+	if route_status != "En Ruta":
+		frappe.throw(_("Solo se pueden entregar paradas de un recorrido En Ruta."), RouteNotEditableError)
+
+	locked_stop = frappe.db.get_value(
+		"Recorrido Parada",
+		stop_name,
+		["name", "recorrido", "status", "delivered_on", "delivered_by"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not locked_stop or locked_stop.recorrido != route.name:
+		frappe.throw(_("La parada no pertenece a este recorrido."), StopNotDeliverableError)
+
+	if locked_stop.status == "Entregado":
+		detail = get_route_detail(route.name)
+		for s in detail["stops"]:
+			if s["name"] == locked_stop.name:
+				s["status"] = locked_stop.status
+				s["delivered_on"] = locked_stop.delivered_on
+				s["delivered_by"] = locked_stop.delivered_by
+		detail["already_completed"] = True
+		detail["delivered_stop"] = locked_stop.name
+		return detail
+
+	if locked_stop.status != "Pendiente":
+		frappe.throw(
+			_("Solo se puede entregar una parada Pendiente (estado actual: {0}).").format(_(locked_stop.status)),
+			StopNotDeliverableError,
+		)
+
+	stop = frappe.get_doc("Recorrido Parada", locked_stop.name)
+	stop.check_permission("write")
+
+	pick_list = frappe.get_doc("Pick List", stop.pick_list)
+	pick_list.check_permission("read")
+	assigned = _lock_and_get_assigned([stop.pick_list], exclude_route=route.name)
+	_validate_pick_list_eligible(pick_list, route.company, assigned)
+
+	photo_file = _save_delivery_evidence_file(stop, "delivery_photo", f"{stop.name}-foto.jpg", photo_jpeg)
+	signature_file = _save_delivery_evidence_file(
+		stop, "customer_signature", f"{stop.name}-firma.png", signature_png
+	)
+
+	payment_proof_file = None
+	if payment_proof_jpeg:
+		payment_proof_file = _save_delivery_evidence_file(
+			stop, "payment_proof", f"{stop.name}-comprobante.jpg", payment_proof_jpeg
+		)
+
+	stop.delivery_photo = photo_file.file_url
+	stop.customer_signature = signature_file.file_url
+	stop.payment_proof = payment_proof_file.file_url if payment_proof_file else None
+	stop.update(delivery_report)
+	stop.delivery_note = clean_notes
+	stop.delivered_by = frappe.session.user
+	stop.delivered_on = now_datetime()
+	stop.status = "Entregado"
+	stop.save()
+
+	detail = get_route_detail(route.name)
+	detail["already_completed"] = False
+	detail["delivered_stop"] = stop.name
 	return detail
 
 

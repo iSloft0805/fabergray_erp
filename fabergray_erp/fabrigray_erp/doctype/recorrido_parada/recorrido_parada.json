@@ -29,7 +29,20 @@
   "status",
   "arrived_on",
   "delivered_on",
-  "delivery_note"
+  "delivery_note",
+  "delivered_by",
+  "section_break_evidence",
+  "delivery_photo",
+  "column_break_evidence",
+  "customer_signature",
+  "section_break_issues",
+  "has_delivery_issues",
+  "delivery_issues",
+  "section_break_payment",
+  "payment_status",
+  "payment_note",
+  "column_break_payment",
+  "payment_proof"
  ],
  "fields": [
   {
@@ -191,7 +204,88 @@
    "description": "Texto libre reservado para uso futuro -- deliberadamente NO es un Link a la Delivery Note nativa de ERPNext: Recorridos nunca crea ni referencia Delivery Note en este commit.",
    "fieldname": "delivery_note",
    "fieldtype": "Small Text",
-   "label": "Nota de entrega",
+   "label": "Observaciones de entrega",
+   "read_only": 1
+  },
+  {
+   "description": "Fase 26.3 -- usuario que confirmó la entrega (frappe.session.user), lo decide el servidor en api.recorridos.deliver_stop(). Inmutable una vez escrito.",
+   "fieldname": "delivered_by",
+   "fieldtype": "Link",
+   "label": "Entregado por",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_evidence",
+   "fieldtype": "Section Break",
+   "label": "Evidencia de entrega"
+  },
+  {
+   "description": "Fase 26.3 -- File privado adjunto a esta parada, creado por el servidor en api.recorridos.deliver_stop(). Nunca base64.",
+   "fieldname": "delivery_photo",
+   "fieldtype": "Attach Image",
+   "label": "Foto de entrega",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_evidence",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Fase 26.3 -- PNG privado adjunto a esta parada, creado por el servidor en api.recorridos.deliver_stop(). Nunca base64 ni el tipo Signature.",
+   "fieldname": "customer_signature",
+   "fieldtype": "Attach Image",
+   "label": "Firma del cliente",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_issues",
+   "fieldtype": "Section Break",
+   "label": "Faltantes / cambios"
+  },
+  {
+   "default": "0",
+   "description": "Fase 26.3 -- reportado por el conductor al confirmar la entrega (api.recorridos.deliver_stop()).",
+   "fieldname": "has_delivery_issues",
+   "fieldtype": "Check",
+   "label": "Faltantes / cambios",
+   "read_only": 1
+  },
+  {
+   "depends_on": "has_delivery_issues",
+   "fieldname": "delivery_issues",
+   "fieldtype": "Small Text",
+   "label": "Detalle de faltantes / cambios",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_payment",
+   "fieldtype": "Section Break",
+   "label": "Pago"
+  },
+  {
+   "description": "Fase 26.3 -- estado de pago REPORTADO por el conductor. Solo informativo: no es un pago contablemente confirmado y no crea Payment Entry/GL.",
+   "fieldname": "payment_status",
+   "fieldtype": "Select",
+   "label": "Estado del pago",
+   "options": "\nPagado\nPendiente por Pago\nCrédito",
+   "read_only": 1
+  },
+  {
+   "fieldname": "payment_note",
+   "fieldtype": "Small Text",
+   "label": "Observación del pago",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_payment",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Fase 26.3 -- opcional, solo con estado Pagado. File privado adjunto a esta parada, creado por el servidor en api.recorridos.deliver_stop().",
+   "fieldname": "payment_proof",
+   "fieldtype": "Attach Image",
+   "label": "Comprobante de pago",
    "read_only": 1
   }
  ],
@@ -199,7 +293,7 @@
  "index_web_pages_for_search": 1,
  "is_submittable": 0,
  "links": [],
- "modified": "2026-08-30 00:00:00.000000",
+ "modified": "2026-09-24 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Fabrigray ERP",
  "name": "Recorrido Parada",

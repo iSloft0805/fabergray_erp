@@ -412,7 +412,7 @@ fabergray_erp.Recorridos = class Recorridos {
 	render_available_card(r) {
 		const is_selected = this.selected.has(r.pick_list);
 		const pedido_label = r.commercial_name || r.sales_order || r.pick_list;
-		const address = r.address_display ? frappe.utils.escape_html(r.address_display) : __("Sin dirección registrada");
+		const address = address_html(r.address_display);
 		return `
 			<label class="fg-recorridos-avail-card ${is_selected ? "is-selected" : ""}" data-pick-list="${frappe.utils.escape_html(
 			r.pick_list
@@ -642,7 +642,7 @@ fabergray_erp.Recorridos = class Recorridos {
 			.map((pick_list, idx) => {
 				const r = this.selected.get(pick_list) || {};
 				const pedido_label = r.commercial_name || r.sales_order || pick_list;
-				const address = r.address_display ? frappe.utils.escape_html(r.address_display) : __("Sin dirección registrada");
+				const address = address_html(r.address_display);
 				return `
 					<div class="fg-route-card" data-pick-list="${frappe.utils.escape_html(pick_list)}">
 						<div class="fg-route-card-handle">${icon("grip-vertical")}</div>
@@ -1170,7 +1170,7 @@ fabergray_erp.Recorridos = class Recorridos {
 			? d.stops
 					.map((s, idx) => {
 						const pedido_label = s.commercial_name || s.sales_order || s.pick_list;
-						const address = s.address_display ? frappe.utils.escape_html(s.address_display) : __("Sin dirección registrada");
+						const address = address_html(s.address_display);
 						const edit_actions = is_borrador
 							? `
 							<div class="fg-route-card-actions">
@@ -1466,7 +1466,7 @@ fabergray_erp.Recorridos = class Recorridos {
 					fieldname: "address_display_field",
 					label: __("Dirección"),
 					read_only: 1,
-					default: stop.address_display || __("Sin dirección registrada"),
+					default: address_text(stop.address_display, "\n") || __("Sin dirección registrada"),
 				},
 				{ fieldtype: "Section Break" },
 				{
@@ -1661,6 +1661,10 @@ fabergray_erp.Recorridos = class Recorridos {
 	enter_active_route(detail) {
 		this.view = "active-route";
 		this.active_route = detail;
+		// Fase 26.3 -- "stop" (current stop + Waze/Maps) | "delivery"
+		// (ENTREGAR PEDIDO panel). Any evidence already captured for a stop
+		// stays in this._delivery, so a refresh never loses it.
+		this.active_panel = "stop";
 		this.render_active_route();
 		window.scrollTo(0, 0);
 	}
@@ -1668,12 +1672,14 @@ fabergray_erp.Recorridos = class Recorridos {
 	exit_active_route() {
 		this.view = "list";
 		this.active_route = null;
+		this.reset_delivery_state();
 		this.active_tab = "recorridos";
 		this._routes_loaded = false;
 		return this.load_all();
 	}
 
 	render_active_route() {
+		if (this.active_panel === "delivery") return this.render_delivery_panel();
 		const d = this.active_route;
 		const stops = d.stops || [];
 		const current = current_stop_of(stops);
@@ -1695,8 +1701,8 @@ fabergray_erp.Recorridos = class Recorridos {
 			: `
 				<div class="fg-active-route-done">
 					${icon("circle-check")}
-					<div class="fg-active-route-done-title">${__("Sin paradas pendientes")}</div>
-					<div class="fg-active-route-done-sub">${__("Todas las paradas de este recorrido ya fueron atendidas.")}</div>
+					<div class="fg-active-route-done-title">${__("TODAS LAS PARADAS FUERON PROCESADAS")}</div>
+					<div class="fg-active-route-done-sub">${__("Este recorrido ya no tiene entregas pendientes.")}</div>
 				</div>
 			`;
 
@@ -1706,7 +1712,7 @@ fabergray_erp.Recorridos = class Recorridos {
 					<div class="fg-active-route-label">${__("Próxima parada")}</div>
 					<div class="fg-active-route-next-name">${frappe.utils.escape_html(next.customer_name || next.customer || __("Sin cliente"))}</div>
 					<div class="fg-active-route-next-address">${
-						next.address_display ? frappe.utils.escape_html(next.address_display) : __("Sin dirección registrada")
+						address_html(next.address_display)
 					}</div>
 				</div>
 			`
@@ -1746,6 +1752,7 @@ fabergray_erp.Recorridos = class Recorridos {
 		`);
 
 		this.$body.find(".fg-active-route-back").on("click", () => this.exit_active_route());
+		this.$body.find(".fg-active-route-deliver-btn").on("click", (e) => this.open_delivery_panel($(e.currentTarget).data("name")));
 	}
 
 	render_active_stop_html(stop, position, total) {
@@ -1778,7 +1785,7 @@ fabergray_erp.Recorridos = class Recorridos {
 				<div class="fg-active-route-customer">${frappe.utils.escape_html(stop.customer_name || stop.customer || __("Sin cliente"))}</div>
 				<div class="fg-active-route-label">${__("Dirección")}</div>
 				<div class="fg-active-route-address">${
-					stop.address_display ? frappe.utils.escape_html(stop.address_display) : __("Sin dirección registrada")
+					address_html(stop.address_display)
 				}</div>
 				<div class="fg-active-route-order">
 					<span class="fg-badge fg-badge--route-pedido">${__("PEDIDO")} #${frappe.utils.escape_html(pedido_label || "")}</span>
@@ -1787,8 +1794,485 @@ fabergray_erp.Recorridos = class Recorridos {
 		)} · ${format_qty(stop.total_qty)} ${__("uds")}</span>
 				</div>
 				${nav_html}
+				${
+					this.active_route && this.active_route.status === "En Ruta"
+						? `<button type="button" class="fg-btn fg-active-route-deliver-btn" data-name="${frappe.utils.escape_html(stop.name)}">${icon(
+								"package-check"
+						  )} ${__("ENTREGAR PEDIDO")}</button>`
+						: ""
+				}
 			</div>
 		`;
+	}
+
+	// =====================================================================
+	// Fase 26.3 -- ENTREGAR PEDIDO: foto + firma + observaciones.
+	// A panel INSIDE active-route (this.active_panel = "delivery"), never a
+	// Dialog. Evidence lives only in memory (this._delivery) until the one
+	// multipart deliver_stop() request -- the server creates the private
+	// Files; this page never uploads anything beforehand and never sends a
+	// file_url. A failed request keeps the photo/signature for a retry.
+	// =====================================================================
+	open_delivery_panel(stop_name) {
+		const stop = (this.active_route.stops || []).find((s) => s.name === stop_name);
+		if (!stop || stop.status !== "Pendiente" || this.active_route.status !== "En Ruta") return;
+		if (!this._delivery || this._delivery.stop_name !== stop_name) {
+			this.reset_delivery_state();
+			this._delivery = {
+				stop_name: stop_name,
+				photo_blob: null,
+				photo_url: null,
+				signature_blob: null,
+				signature_url: null,
+				notes: "",
+				processing_photo: false,
+				submitting: false,
+				// Fase 26.3 (extensión) -- faltantes / cambios + pago.
+				has_issues: false,
+				issues_text: "",
+				payment_status: null,
+				payment_note: "",
+				proof_blob: null,
+				proof_url: null,
+				processing_proof: false,
+			};
+		}
+		this.active_panel = "delivery";
+		this.render_active_route();
+		window.scrollTo(0, 0);
+	}
+
+	close_delivery_panel() {
+		// Evidence is kept (this._delivery) -- coming back to the same stop
+		// restores it. Only a successful delivery or leaving the route
+		// discards it.
+		this.teardown_signature_pad();
+		this.active_panel = "stop";
+		this.render_active_route();
+	}
+
+	reset_delivery_state() {
+		this.teardown_signature_pad();
+		if (this._delivery) {
+			if (this._delivery.photo_url) URL.revokeObjectURL(this._delivery.photo_url);
+			if (this._delivery.signature_url) URL.revokeObjectURL(this._delivery.signature_url);
+			if (this._delivery.proof_url) URL.revokeObjectURL(this._delivery.proof_url);
+		}
+		this._delivery = null;
+	}
+
+	render_delivery_panel() {
+		const d = this.active_route;
+		const state = this._delivery;
+		const stop = state && (d.stops || []).find((s) => s.name === state.stop_name);
+		if (!stop || stop.status !== "Pendiente") {
+			this.reset_delivery_state();
+			this.active_panel = "stop";
+			return this.render_active_route();
+		}
+		const pedido_label = stop.commercial_name || stop.sales_order || stop.pick_list;
+
+		this.$body.html(`
+			<div class="fg-active-route fg-delivery">
+				<div class="fg-active-route-bar">
+					<button type="button" class="fg-btn fg-btn--ghost fg-delivery-back">${icon("arrow-left", "fg-icon-sm")} ${__("VOLVER")}</button>
+					<div class="fg-active-route-bar-status">
+						${status_badge_html(d.status)}
+						<span class="fg-active-route-bar-id">${frappe.utils.escape_html(d.name)}</span>
+					</div>
+				</div>
+
+				<div class="fg-active-route-stop fg-delivery-summary">
+					<div class="fg-delivery-title">${__("ENTREGAR PEDIDO")}</div>
+					<div class="fg-active-route-label">${__("Cliente")}</div>
+					<div class="fg-active-route-customer">${frappe.utils.escape_html(stop.customer_name || stop.customer || __("Sin cliente"))}</div>
+					<div class="fg-active-route-label">${__("Pedido")}</div>
+					<div><span class="fg-badge fg-badge--route-pedido">${__("PEDIDO")} #${frappe.utils.escape_html(pedido_label || "")}</span></div>
+					<div class="fg-active-route-label">${__("Dirección")}</div>
+					<div class="fg-active-route-address">${
+						address_html(stop.address_display)
+					}</div>
+				</div>
+
+				<section class="fg-active-route-stop fg-delivery-section">
+					<div class="fg-delivery-section-title">${icon("camera", "fg-icon-sm")} ${__("FOTO DE ENTREGA")}</div>
+					<div class="fg-delivery-photo-preview"></div>
+					<div class="fg-delivery-photo-actions">
+						<label class="fg-btn fg-delivery-photo-btn fg-delivery-photo-btn--camera">
+							<input type="file" class="fg-delivery-photo-input" accept="image/*" capture="environment" hidden>
+							${icon("camera", "fg-icon-sm")} ${__("TOMAR FOTO")}
+						</label>
+						<label class="fg-btn fg-delivery-photo-btn fg-delivery-photo-btn--gallery">
+							<input type="file" class="fg-delivery-photo-input" accept="image/*" hidden>
+							${icon("image", "fg-icon-sm")} ${__("SUBIR FOTO")}
+						</label>
+					</div>
+				</section>
+
+				<section class="fg-active-route-stop fg-delivery-section">
+					<div class="fg-delivery-section-title">${icon("pen-line", "fg-icon-sm")} ${__("FIRMA DEL CLIENTE")}</div>
+					<div class="fg-delivery-signature"></div>
+				</section>
+
+				<section class="fg-active-route-stop fg-delivery-section fg-delivery-issues"></section>
+
+				<section class="fg-active-route-stop fg-delivery-section fg-delivery-payment"></section>
+
+				<section class="fg-active-route-stop fg-delivery-section">
+					<label class="fg-delivery-section-title" for="fg-delivery-notes">${__("OBSERVACIONES DE ENTREGA")} <span class="fg-delivery-optional">${__("(opcional)")}</span></label>
+					<textarea id="fg-delivery-notes" class="fg-delivery-notes" maxlength="${DELIVERY_NOTES_MAX_LENGTH}" rows="3" placeholder="${__(
+			"Ej: recibió el administrador, portería, etc."
+		)}"></textarea>
+				</section>
+
+				<div class="fg-delivery-confirm-bar">
+					<button type="button" class="fg-btn fg-delivery-confirm-btn" disabled>${icon("circle-check")} ${__("CONFIRMAR ENTREGA")}</button>
+				</div>
+			</div>
+		`);
+
+		this.$body.find(".fg-delivery-notes").val(state.notes || "").on("input", (e) => {
+			state.notes = e.currentTarget.value;
+		});
+		this.$body.find(".fg-delivery-back").on("click", () => this.close_delivery_panel());
+		this.$body.find(".fg-delivery-photo-input").on("change", (e) => this.on_delivery_photo_selected(e.currentTarget));
+		this.$body.find(".fg-delivery-confirm-btn").on("click", () => this.submit_delivery());
+
+		this.render_delivery_photo_preview();
+		this.render_signature_area();
+		this.render_issues_section();
+		this.render_payment_section();
+		this.update_delivery_confirm_state();
+	}
+
+	// -- Faltantes / cambios (Fase 26.3 extensión) ----------------------------
+	render_issues_section() {
+		const state = this._delivery;
+		const $section = this.$body.find(".fg-delivery-issues");
+		$section.html(`
+			<div class="fg-delivery-section-title">${icon("triangle-alert", "fg-icon-sm")} ${__("FALTANTES / CAMBIOS")}</div>
+			<div class="fg-delivery-question">${__("¿Quedó algún faltante, cambio o pendiente del pedido?")}</div>
+			<div class="fg-choice-group fg-choice-group--2" role="radiogroup" aria-label="${__("Faltantes / cambios")}">
+				<button type="button" class="fg-choice ${state.has_issues ? "" : "is-selected"}" data-issues="0" role="radio" aria-checked="${!state.has_issues}">${__("NO")}</button>
+				<button type="button" class="fg-choice ${state.has_issues ? "is-selected" : ""}" data-issues="1" role="radio" aria-checked="${!!state.has_issues}">${__("SÍ")}</button>
+			</div>
+			${
+				state.has_issues
+					? `
+				<label class="fg-delivery-subtitle" for="fg-delivery-issues-text">${__("DETALLE DE FALTANTES / CAMBIOS")}</label>
+				<textarea id="fg-delivery-issues-text" class="fg-delivery-notes fg-delivery-issues-text" maxlength="${DELIVERY_NOTES_MAX_LENGTH}" rows="3" placeholder="${__("Ej: faltó 1 galón, cliente solicita cambio de producto...")}"></textarea>
+			`
+					: ""
+			}
+		`);
+		$section.find(".fg-delivery-issues-text").val(state.issues_text || "").on("input", (e) => {
+			state.issues_text = e.currentTarget.value;
+			this.update_delivery_confirm_state();
+		});
+		$section.find(".fg-choice").on("click", (e) => {
+			const has_issues = $(e.currentTarget).data("issues") === 1;
+			if (has_issues === state.has_issues) return;
+			state.has_issues = has_issues;
+			// NO -> the detail is discarded, never sent.
+			if (!has_issues) state.issues_text = "";
+			this.render_issues_section();
+			this.update_delivery_confirm_state();
+			if (has_issues) this.$body.find(".fg-delivery-issues-text").trigger("focus");
+		});
+	}
+
+	// -- Estado del pago + comprobante + observación (Fase 26.3 extensión) --
+	render_payment_section() {
+		const state = this._delivery;
+		const $section = this.$body.find(".fg-delivery-payment");
+		const selected = PAYMENT_STATUS_OPTIONS.find((o) => o.value === state.payment_status);
+		const is_paid = state.payment_status === PAYMENT_STATUS_PAID;
+
+		$section.html(`
+			<div class="fg-delivery-section-title">${icon("wallet", "fg-icon-sm")} ${__("ESTADO DEL PAGO")}</div>
+			<div class="fg-choice-group fg-choice-group--payment" role="radiogroup" aria-label="${__("Estado del pago")}">
+				${PAYMENT_STATUS_OPTIONS.map(
+					(o) => `
+					<button type="button" class="fg-choice ${o.value === state.payment_status ? "is-selected" : ""}" data-payment="${escape_text(
+						o.value
+					)}" role="radio" aria-checked="${o.value === state.payment_status}">${__(o.label)}</button>`
+				).join("")}
+			</div>
+			${
+				is_paid
+					? `
+				<div class="fg-delivery-subtitle">${icon("receipt", "fg-icon-sm")} ${__("COMPROBANTE DE PAGO")} <span class="fg-delivery-optional">${__("(opcional)")}</span></div>
+				<div class="fg-delivery-photo-preview fg-delivery-proof-preview"></div>
+				<div class="fg-delivery-photo-actions">
+					<label class="fg-btn fg-delivery-photo-btn fg-delivery-photo-btn--camera">
+						<input type="file" class="fg-delivery-proof-input" accept="image/*" capture="environment" hidden>
+						${icon("camera", "fg-icon-sm")} ${__("TOMAR FOTO")}
+					</label>
+					<label class="fg-btn fg-delivery-photo-btn fg-delivery-photo-btn--gallery">
+						<input type="file" class="fg-delivery-proof-input" accept="image/*" hidden>
+						${icon("image", "fg-icon-sm")} ${__("SUBIR FOTO")}
+					</label>
+				</div>
+			`
+					: ""
+			}
+			${
+				selected
+					? `
+				<label class="fg-delivery-subtitle" for="fg-delivery-payment-note">${__("OBSERVACIÓN DEL PAGO")} <span class="fg-delivery-optional">${__("(opcional)")}</span></label>
+				<textarea id="fg-delivery-payment-note" class="fg-delivery-notes fg-delivery-payment-note" maxlength="${DELIVERY_NOTES_MAX_LENGTH}" rows="2" placeholder="${escape_text(
+							__(selected.placeholder)
+					  )}"></textarea>
+			`
+					: ""
+			}
+		`);
+
+		$section.find(".fg-choice").on("click", (e) => this.select_payment_status($(e.currentTarget).data("payment")));
+		$section.find(".fg-delivery-proof-input").on("change", (e) => this.on_payment_proof_selected(e.currentTarget));
+		$section.find(".fg-delivery-payment-note").val(state.payment_note || "").on("input", (e) => {
+			state.payment_note = e.currentTarget.value;
+		});
+		if (is_paid) this.render_payment_proof_preview();
+	}
+
+	select_payment_status(value) {
+		const state = this._delivery;
+		if (!state || !PAYMENT_STATUS_OPTIONS.some((o) => o.value === value) || value === state.payment_status) return;
+		state.payment_status = value;
+		// Only "Pagado" may carry a proof: switching away discards it.
+		if (value !== PAYMENT_STATUS_PAID) this.clear_payment_proof();
+		this.render_payment_section();
+		this.update_delivery_confirm_state();
+	}
+
+	clear_payment_proof() {
+		const state = this._delivery;
+		if (!state) return;
+		if (state.proof_url) URL.revokeObjectURL(state.proof_url);
+		state.proof_url = null;
+		state.proof_blob = null;
+	}
+
+	on_payment_proof_selected(input) {
+		const state = this._delivery;
+		const file = input.files && input.files[0];
+		input.value = "";
+		if (!state || !file || state.payment_status !== PAYMENT_STATUS_PAID) return;
+		if (file.type && !file.type.startsWith("image/")) {
+			frappe.msgprint(__("El archivo seleccionado no es una imagen."));
+			return;
+		}
+		state.processing_proof = true;
+		this.render_payment_proof_preview();
+		this.update_delivery_confirm_state();
+
+		prepare_delivery_photo(file)
+			.then((blob) => {
+				if (this._delivery !== state || state.payment_status !== PAYMENT_STATUS_PAID) return;
+				if (state.proof_url) URL.revokeObjectURL(state.proof_url);
+				state.proof_blob = blob;
+				state.proof_url = URL.createObjectURL(blob);
+			})
+			.catch(() => {
+				frappe.msgprint(__("No se pudo procesar el comprobante. Tómalo de nuevo o sube otra imagen."));
+			})
+			.finally(() => {
+				state.processing_proof = false;
+				if (this._delivery === state && this.active_panel === "delivery") {
+					this.render_payment_proof_preview();
+					this.update_delivery_confirm_state();
+				}
+			});
+	}
+
+	render_payment_proof_preview() {
+		const state = this._delivery;
+		const $preview = this.$body.find(".fg-delivery-proof-preview");
+		if (state.processing_proof) {
+			$preview.html(`<div class="fg-delivery-placeholder"><span class="fg-route-btn-spinner"></span> ${__("Procesando comprobante...")}</div>`);
+		} else if (state.proof_url) {
+			$preview.html(`
+				<img class="fg-delivery-photo-img" src="${state.proof_url}" alt="${__("Comprobante de pago")}">
+				<button type="button" class="fg-btn fg-delivery-proof-remove">${icon("x", "fg-icon-sm")} ${__("QUITAR COMPROBANTE")}</button>
+			`);
+			$preview.find(".fg-delivery-proof-remove").on("click", () => {
+				this.clear_payment_proof();
+				this.render_payment_proof_preview();
+			});
+		} else {
+			$preview.html(`<div class="fg-delivery-placeholder">${icon("receipt")} ${__("Sin comprobante (opcional)")}</div>`);
+		}
+	}
+
+	// -- Foto ---------------------------------------------------------------
+	on_delivery_photo_selected(input) {
+		const state = this._delivery;
+		const file = input.files && input.files[0];
+		input.value = "";
+		if (!state || !file) return;
+		if (file.type && !file.type.startsWith("image/")) {
+			frappe.msgprint(__("El archivo seleccionado no es una imagen."));
+			return;
+		}
+		state.processing_photo = true;
+		this.render_delivery_photo_preview();
+		this.update_delivery_confirm_state();
+
+		prepare_delivery_photo(file)
+			.then((blob) => {
+				if (this._delivery !== state) return;
+				if (state.photo_url) URL.revokeObjectURL(state.photo_url);
+				state.photo_blob = blob;
+				state.photo_url = URL.createObjectURL(blob);
+			})
+			.catch(() => {
+				frappe.msgprint(__("No se pudo procesar la foto. Tómala de nuevo o sube otra imagen."));
+			})
+			.finally(() => {
+				state.processing_photo = false;
+				if (this._delivery === state && this.active_panel === "delivery") {
+					this.render_delivery_photo_preview();
+					this.update_delivery_confirm_state();
+				}
+			});
+	}
+
+	render_delivery_photo_preview() {
+		const state = this._delivery;
+		const $preview = this.$body.find(".fg-delivery-photo-preview");
+		if (state.processing_photo) {
+			$preview.html(`<div class="fg-delivery-placeholder"><span class="fg-route-btn-spinner"></span> ${__("Procesando foto...")}</div>`);
+		} else if (state.photo_url) {
+			$preview.html(`<img class="fg-delivery-photo-img" src="${state.photo_url}" alt="${__("Foto de entrega")}">`);
+		} else {
+			$preview.html(`<div class="fg-delivery-placeholder">${icon("camera")} ${__("Sin foto todavía")}</div>`);
+		}
+	}
+
+	// -- Firma --------------------------------------------------------------
+	render_signature_area() {
+		const state = this._delivery;
+		const $area = this.$body.find(".fg-delivery-signature");
+		this.teardown_signature_pad();
+
+		if (state.signature_url) {
+			$area.html(`
+				<img class="fg-signature-preview" src="${state.signature_url}" alt="${__("Firma del cliente")}">
+				<div class="fg-signature-actions">
+					<button type="button" class="fg-btn fg-signature-redo-btn">${icon("rotate-ccw", "fg-icon-sm")} ${__("FIRMAR DE NUEVO")}</button>
+				</div>
+			`);
+			$area.find(".fg-signature-redo-btn").on("click", () => {
+				if (state.signature_url) URL.revokeObjectURL(state.signature_url);
+				state.signature_url = null;
+				state.signature_blob = null;
+				this.render_signature_area();
+				this.update_delivery_confirm_state();
+			});
+			return;
+		}
+
+		$area.html(`
+			<div class="fg-signature-box">
+				<canvas class="fg-signature-canvas" aria-label="${__("Área de firma del cliente")}"></canvas>
+				<div class="fg-signature-hint">${__("Firme aquí con el dedo")}</div>
+			</div>
+			<div class="fg-signature-actions">
+				<button type="button" class="fg-btn fg-signature-clear-btn">${icon("eraser", "fg-icon-sm")} ${__("LIMPIAR")}</button>
+				<button type="button" class="fg-btn fg-signature-accept-btn" disabled>${icon("check", "fg-icon-sm")} ${__("ACEPTAR FIRMA")}</button>
+			</div>
+		`);
+
+		const $accept = $area.find(".fg-signature-accept-btn");
+		const $box = $area.find(".fg-signature-box");
+		this._signature_pad = create_signature_pad($area.find(".fg-signature-canvas")[0], () => {
+			const empty = this._signature_pad.is_empty();
+			$accept.prop("disabled", empty);
+			$box.toggleClass("has-ink", !empty);
+		});
+		$area.find(".fg-signature-clear-btn").on("click", () => this._signature_pad && this._signature_pad.clear());
+		$accept.on("click", () => this.accept_signature());
+	}
+
+	accept_signature() {
+		const state = this._delivery;
+		const pad = this._signature_pad;
+		if (!state || !pad) return;
+		if (pad.is_empty()) {
+			frappe.msgprint(__("La firma está vacía. Pide al cliente que firme."));
+			return;
+		}
+		pad.to_blob()
+			.then((blob) => {
+				if (this._delivery !== state) return;
+				state.signature_blob = blob;
+				state.signature_url = URL.createObjectURL(blob);
+				this.render_signature_area();
+				this.update_delivery_confirm_state();
+			})
+			.catch(() => frappe.msgprint(__("No se pudo guardar la firma. Intenta de nuevo.")));
+	}
+
+	teardown_signature_pad() {
+		if (this._signature_pad) this._signature_pad.destroy();
+		this._signature_pad = null;
+	}
+
+	// -- Confirmar ----------------------------------------------------------
+	update_delivery_confirm_state() {
+		const state = this._delivery;
+		const ready = delivery_evidence_ready(state);
+		const $btn = this.$body.find(".fg-delivery-confirm-btn");
+		$btn.prop("disabled", !ready);
+		if (state && state.submitting) {
+			$btn.html(`<span class="fg-route-btn-spinner"></span> ${__("Confirmando entrega...")}`);
+		} else {
+			$btn.html(`${icon("circle-check")} ${__("CONFIRMAR ENTREGA")}`);
+		}
+	}
+
+	submit_delivery() {
+		const state = this._delivery;
+		if (!delivery_evidence_ready(state)) return;
+		const route_name = this.active_route.name;
+		state.submitting = true;
+		this.update_delivery_confirm_state();
+
+		const form = new FormData();
+		form.append("route_name", route_name);
+		form.append("stop_name", state.stop_name);
+		form.append("notes", state.notes || "");
+		form.append("photo", state.photo_blob, "foto.jpg");
+		form.append("signature", state.signature_blob, "firma.png");
+		form.append("has_delivery_issues", state.has_issues ? "1" : "0");
+		if (state.has_issues) form.append("delivery_issues", state.issues_text || "");
+		form.append("payment_status", state.payment_status);
+		form.append("payment_note", state.payment_note || "");
+		if (state.payment_status === PAYMENT_STATUS_PAID && state.proof_blob) {
+			form.append("payment_proof", state.proof_blob, "comprobante.jpg");
+		}
+
+		post_multipart("fabergray_erp.api.recorridos.deliver_stop", form)
+			.then(() => this.call("get_route_detail", { route_name: route_name }))
+			.then((detail) => {
+				frappe.show_alert({ message: "✓ " + __("Entrega confirmada."), indicator: "green" }, 5);
+				this.reset_delivery_state();
+				this.active_route = detail;
+				this.active_panel = "stop";
+				this.render_active_route();
+				window.scrollTo(0, 0);
+			})
+			.catch(() => {
+				// The server's (or a network) error was already shown; the
+				// photo/signature stay in memory for a retry.
+			})
+			.finally(() => {
+				if (this._delivery === state) {
+					state.submitting = false;
+					if (this.active_panel === "delivery") this.update_delivery_confirm_state();
+				}
+			});
 	}
 
 	// -- Sub-modal: AGREGAR PEDIDOS (brief section 14) -- reuses
@@ -2036,6 +2520,271 @@ function current_stop_of(stops) {
 			.sort((a, b) => cint(a.sequence) - cint(b.sequence))
 			.find((s) => s.status === "Pendiente") || null
 	);
+}
+
+// Fase 26.3 -- Address.address_display arrives as HTML from Frappe's address
+// template ("Calle 1<br>Bucaramanga<br>Colombia<br>"). Escaping it as-is showed
+// literal "<br>" on screen; injecting it as HTML would trust Address content.
+// Instead: <br> variants -> line breaks, every other tag stripped, the few
+// entities Frappe emits decoded, then EACH line escaped again -- the only
+// markup in the result is the <br> this helper adds itself.
+const HTML_ENTITIES = { "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": '"', "&#39;": "'", "&#x27;": "'", "&nbsp;": " " };
+
+function escape_text(value) {
+	return String(value).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+function address_lines(value) {
+	if (value === null || value === undefined) return [];
+	return String(value)
+		.replace(/<br\s*\/?>/gi, "\n")
+		.replace(/<[^>]*>/g, "")
+		.replace(/&(amp|lt|gt|quot|#39|#x27|nbsp);/g, (entity) => HTML_ENTITIES[entity])
+		.split(/\n/)
+		.map((line) => line.replace(/\s+/g, " ").trim())
+		.filter(Boolean);
+}
+
+// Safe HTML for display: escaped lines joined by <br>.
+function address_html(value) {
+	const lines = address_lines(value);
+	return lines.length ? lines.map(escape_text).join("<br>") : escape_text(__("Sin dirección registrada"));
+}
+
+// Plain text (e.g. a Frappe field value, which the control escapes itself).
+function address_text(value, separator) {
+	return address_lines(value).join(separator === undefined ? ", " : separator);
+}
+
+// Fase 26.3 -- ENTREGAR PEDIDO helpers. Pure / DOM-local, no Frappe state.
+
+const DELIVERY_PHOTO_MAX_SIDE = 1600;
+const DELIVERY_PHOTO_QUALITY = 0.8;
+const DELIVERY_NOTES_MAX_LENGTH = 1000;
+// A signature needs at least this many drawn points (not a single tap).
+const SIGNATURE_MIN_POINTS = 5;
+
+// Payment status REPORTED by the driver -- never an accounting confirmation.
+// Same three values as recorrido_parada.PAYMENT_STATUSES on the server.
+const PAYMENT_STATUS_PAID = "Pagado";
+const PAYMENT_STATUS_OPTIONS = [
+	{ value: PAYMENT_STATUS_PAID, label: "PAGADO", placeholder: "Ej: pago recibido en efectivo / transferencia Bancolombia." },
+	{ value: "Pendiente por Pago", label: "PENDIENTE POR PAGO", placeholder: "Ej: cliente indica que realizará la transferencia mañana." },
+	{ value: "Crédito", label: "CRÉDITO", placeholder: "Ej: factura a crédito 30 días." },
+];
+
+// CONFIRMAR ENTREGA is enabled only with a processed photo, an accepted
+// signature and an explicitly chosen payment status -- plus a detail when
+// "faltantes / cambios" is SÍ -- and never while an image is still being
+// processed or a request is already in flight. The payment proof and every
+// note stay optional.
+function delivery_evidence_ready(state) {
+	if (!state || !state.photo_blob || !state.signature_blob) return false;
+	if (state.processing_photo || state.processing_proof || state.submitting) return false;
+	if (!PAYMENT_STATUS_OPTIONS.some((o) => o.value === state.payment_status)) return false;
+	if (state.has_issues && !(state.issues_text || "").trim()) return false;
+	return true;
+}
+
+function canvas_to_blob(canvas, type, quality) {
+	return new Promise((resolve, reject) => {
+		canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("toBlob failed"))), type, quality);
+	});
+}
+
+function load_image_element(file) {
+	return new Promise((resolve, reject) => {
+		const url = URL.createObjectURL(file);
+		const img = new Image();
+		img.onload = () => {
+			URL.revokeObjectURL(url);
+			resolve(img);
+		};
+		img.onerror = () => {
+			URL.revokeObjectURL(url);
+			reject(new Error("image decode failed"));
+		};
+		img.src = url;
+	});
+}
+
+// Photo -> oriented, resized (max DELIVERY_PHOTO_MAX_SIDE on the long side)
+// JPEG blob. createImageBitmap with imageOrientation "from-image" applies the
+// EXIF orientation; the <img> fallback relies on the browser's default
+// image-orientation. Redrawing on a canvas also drops all EXIF (GPS...).
+// The server re-validates and re-encodes anyway.
+async function prepare_delivery_photo(file) {
+	let source;
+	try {
+		source = await createImageBitmap(file, { imageOrientation: "from-image" });
+	} catch (e) {
+		source = await load_image_element(file);
+	}
+	const width = source.width || source.naturalWidth;
+	const height = source.height || source.naturalHeight;
+	if (!width || !height) throw new Error("empty image");
+	const scale = Math.min(1, DELIVERY_PHOTO_MAX_SIDE / Math.max(width, height));
+	const canvas = document.createElement("canvas");
+	canvas.width = Math.round(width * scale);
+	canvas.height = Math.round(height * scale);
+	const ctx = canvas.getContext("2d");
+	ctx.fillStyle = "#ffffff";
+	ctx.fillRect(0, 0, canvas.width, canvas.height);
+	ctx.drawImage(source, 0, 0, canvas.width, canvas.height);
+	if (source.close) source.close();
+	return canvas_to_blob(canvas, "image/jpeg", DELIVERY_PHOTO_QUALITY);
+}
+
+// Own signature pad: Pointer Events (finger, mouse, stylus), sized to the
+// CSS box times devicePixelRatio, white background, touch-action:none in
+// CSS so the page does not scroll while signing. `on_change` fires after
+// every stroke and on clear().
+function create_signature_pad(canvas, on_change) {
+	const ctx = canvas.getContext("2d");
+	let drawing = false;
+	let last = null;
+	let points = 0;
+
+	function paint_background() {
+		ctx.save();
+		ctx.setTransform(1, 0, 0, 1, 0, 0);
+		ctx.fillStyle = "#ffffff";
+		ctx.fillRect(0, 0, canvas.width, canvas.height);
+		ctx.restore();
+	}
+
+	function setup() {
+		const rect = canvas.getBoundingClientRect();
+		const ratio = Math.max(window.devicePixelRatio || 1, 1);
+		canvas.width = Math.max(Math.round(rect.width * ratio), 1);
+		canvas.height = Math.max(Math.round(rect.height * ratio), 1);
+		ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+		ctx.lineWidth = 2.6;
+		ctx.lineCap = "round";
+		ctx.lineJoin = "round";
+		ctx.strokeStyle = "#101828";
+		paint_background();
+		points = 0;
+	}
+
+	function position(e) {
+		const rect = canvas.getBoundingClientRect();
+		return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+	}
+
+	function on_down(e) {
+		e.preventDefault();
+		if (canvas.setPointerCapture) canvas.setPointerCapture(e.pointerId);
+		drawing = true;
+		last = position(e);
+		ctx.beginPath();
+		ctx.arc(last.x, last.y, ctx.lineWidth / 2, 0, Math.PI * 2);
+		ctx.fillStyle = ctx.strokeStyle;
+		ctx.fill();
+		points += 1;
+	}
+
+	function on_move(e) {
+		if (!drawing) return;
+		e.preventDefault();
+		const p = position(e);
+		ctx.beginPath();
+		ctx.moveTo(last.x, last.y);
+		ctx.lineTo(p.x, p.y);
+		ctx.stroke();
+		last = p;
+		points += 1;
+	}
+
+	function on_up() {
+		if (!drawing) return;
+		drawing = false;
+		last = null;
+		on_change && on_change();
+	}
+
+	function on_resize() {
+		// Resizing a canvas wipes it: only re-fit while still empty.
+		if (points === 0) setup();
+	}
+
+	setup();
+	canvas.addEventListener("pointerdown", on_down);
+	canvas.addEventListener("pointermove", on_move);
+	canvas.addEventListener("pointerup", on_up);
+	canvas.addEventListener("pointercancel", on_up);
+	canvas.addEventListener("pointerleave", on_up);
+	window.addEventListener("resize", on_resize);
+
+	return {
+		is_empty: () => points < SIGNATURE_MIN_POINTS,
+		clear() {
+			setup();
+			on_change && on_change();
+		},
+		to_blob: () => canvas_to_blob(canvas, "image/png"),
+		destroy() {
+			canvas.removeEventListener("pointerdown", on_down);
+			canvas.removeEventListener("pointermove", on_move);
+			canvas.removeEventListener("pointerup", on_up);
+			canvas.removeEventListener("pointercancel", on_up);
+			canvas.removeEventListener("pointerleave", on_up);
+			window.removeEventListener("resize", on_resize);
+		},
+	};
+}
+
+// Multipart POST to a whitelisted method -- frappe.call() cannot send files.
+// Same transport Frappe's own FileUploader uses: same-origin cookies plus the
+// X-Frappe-CSRF-Token header. Resolves with `message`; on any failure shows
+// the server's own message (or a connectivity message) and rejects.
+function post_multipart(method, form_data) {
+	return fetch(`/api/method/${method}`, {
+		method: "POST",
+		body: form_data,
+		credentials: "same-origin",
+		headers: { Accept: "application/json", "X-Frappe-CSRF-Token": frappe.csrf_token },
+	})
+		.catch((error) => {
+			frappe.msgprint({
+				title: __("Sin conexión"),
+				message: __("No se pudo enviar la entrega. Revisa la conexión e intenta de nuevo; la foto y la firma se conservan."),
+				indicator: "orange",
+			});
+			throw error;
+		})
+		.then((response) =>
+			response
+				.json()
+				.catch(() => ({}))
+				.then((data) => {
+					if (!response.ok || data.exc || data.exc_type) {
+						show_server_error(data);
+						throw data;
+					}
+					return data.message;
+				})
+		);
+}
+
+function show_server_error(data) {
+	let messages = [];
+	try {
+		messages = JSON.parse(data._server_messages || "[]").map((m) => {
+			try {
+				return JSON.parse(m).message;
+			} catch (e) {
+				return m;
+			}
+		});
+	} catch (e) {
+		messages = [];
+	}
+	frappe.msgprint({
+		title: __("No se pudo confirmar la entrega"),
+		message: messages.filter(Boolean).join("<br>") || __("Ocurrió un error inesperado. Intenta de nuevo."),
+		indicator: "red",
+	});
 }
 
 // Recorrido Parada.status ("Pendiente"/"Entregado"/"No Entregado") is a

@@ -2192,3 +2192,289 @@
 		font-size: 1.3rem;
 	}
 }
+
+/* ====================================================================
+ * Fase 26.3 -- ENTREGAR PEDIDO (panel inside Modo Recorrido). Purely
+ * additive, mobile first; reuses the .fg-active-route card/label styles.
+ * ==================================================================== */
+.fg-recorridos .fg-active-route-deliver-btn {
+	width: 100%;
+	min-height: 56px;
+	margin-top: 12px;
+	font-size: 1rem;
+	background: var(--fg-success-dark);
+	border-color: var(--fg-success-dark);
+	color: #fff;
+	white-space: normal;
+}
+
+.fg-recorridos .fg-active-route-deliver-btn:hover {
+	filter: brightness(0.95);
+	color: #fff;
+}
+
+.fg-recorridos .fg-delivery {
+	/* room so the sticky confirm bar never covers the last section */
+	padding-bottom: 12px;
+}
+
+.fg-recorridos .fg-delivery-title {
+	font-size: 1.15rem;
+	font-weight: 800;
+	letter-spacing: 0.04em;
+	color: var(--fg-text);
+	margin-bottom: 4px;
+}
+
+.fg-recorridos .fg-delivery-section-title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 0.85rem;
+	font-weight: 800;
+	letter-spacing: 0.05em;
+	color: var(--fg-text);
+	margin-bottom: 12px;
+}
+
+.fg-recorridos .fg-delivery-optional {
+	font-weight: 500;
+	letter-spacing: 0;
+	color: var(--fg-text-faint);
+}
+
+.fg-recorridos .fg-delivery-photo-preview {
+	border-radius: var(--fg-radius-md);
+	overflow: hidden;
+	background: var(--fg-bg);
+	border: 1px dashed var(--fg-border);
+	min-height: 160px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+}
+
+.fg-recorridos .fg-delivery-photo-img {
+	display: block;
+	width: 100%;
+	max-height: 360px;
+	object-fit: contain;
+	background: #000;
+}
+
+.fg-recorridos .fg-delivery-placeholder {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: var(--fg-text-muted);
+	font-weight: 600;
+	padding: 24px 12px;
+}
+
+.fg-recorridos .fg-delivery-placeholder .fg-route-btn-spinner {
+	border-color: rgba(43, 123, 228, 0.25);
+	border-top-color: var(--fg-primary);
+}
+
+.fg-recorridos .fg-delivery-photo-actions,
+.fg-recorridos .fg-signature-actions {
+	display: grid;
+	grid-template-columns: 1fr 1fr;
+	gap: 10px;
+	margin-top: 12px;
+}
+
+.fg-recorridos .fg-delivery-photo-btn,
+.fg-recorridos .fg-signature-actions .fg-btn {
+	min-height: 48px;
+	width: 100%;
+	white-space: normal;
+	text-align: center;
+	cursor: pointer;
+	margin: 0;
+}
+
+.fg-recorridos .fg-delivery-photo-btn--camera,
+.fg-recorridos .fg-signature-accept-btn {
+	background: var(--fg-primary);
+	border-color: var(--fg-primary);
+	color: #fff;
+}
+
+.fg-recorridos .fg-delivery-photo-btn--gallery,
+.fg-recorridos .fg-signature-clear-btn,
+.fg-recorridos .fg-signature-redo-btn {
+	background: var(--fg-card);
+	border-color: var(--fg-primary);
+	color: var(--fg-primary);
+}
+
+.fg-recorridos .fg-signature-actions:has(.fg-signature-redo-btn) {
+	grid-template-columns: 1fr;
+}
+
+/* Signature pad: white, large, never scrolls the page while signing. */
+.fg-recorridos .fg-signature-box {
+	position: relative;
+	border: 2px dashed var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	background: #ffffff;
+	overflow: hidden;
+}
+
+.fg-recorridos .fg-signature-canvas {
+	display: block;
+	width: 100%;
+	height: 220px;
+	background: #ffffff;
+	touch-action: none;
+	user-select: none;
+	-webkit-user-select: none;
+	cursor: crosshair;
+}
+
+.fg-recorridos .fg-signature-hint {
+	position: absolute;
+	left: 16px;
+	right: 16px;
+	bottom: 18px;
+	border-top: 1px solid var(--fg-border);
+	padding-top: 6px;
+	font-size: 0.8rem;
+	color: var(--fg-text-faint);
+	pointer-events: none;
+}
+
+.fg-recorridos .fg-signature-box.has-ink .fg-signature-hint {
+	color: transparent;
+}
+
+.fg-recorridos .fg-signature-preview {
+	display: block;
+	width: 100%;
+	max-height: 220px;
+	object-fit: contain;
+	background: #ffffff;
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+}
+
+.fg-recorridos .fg-delivery-notes {
+	width: 100%;
+	min-height: 88px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	padding: 10px 12px;
+	font-size: 1rem;
+	resize: vertical;
+	background: var(--fg-card);
+	color: var(--fg-text);
+}
+
+/* CONFIRMAR ENTREGA stays reachable with the thumb at the bottom. */
+.fg-recorridos .fg-delivery-confirm-bar {
+	position: sticky;
+	bottom: 0;
+	z-index: 5;
+	padding: 12px 0 calc(12px + env(safe-area-inset-bottom, 0px));
+	background: linear-gradient(to top, var(--fg-bg) 75%, rgba(248, 250, 252, 0));
+}
+
+.fg-recorridos .fg-delivery-confirm-btn {
+	width: 100%;
+	min-height: 58px;
+	font-size: 1.02rem;
+	background: var(--fg-success-dark);
+	border-color: var(--fg-success-dark);
+	color: #fff;
+}
+
+.fg-recorridos .fg-delivery-confirm-btn:disabled {
+	background: var(--fg-border);
+	border-color: var(--fg-border);
+	color: var(--fg-text-muted);
+	opacity: 1;
+}
+
+@media (max-width: 640px) {
+	.fg-recorridos .fg-signature-canvas {
+		height: 200px;
+	}
+}
+
+/* ====================================================================
+ * Fase 26.3 (extensión) -- FALTANTES / CAMBIOS + ESTADO DEL PAGO.
+ * Large tap targets instead of small selects; purely additive.
+ * ==================================================================== */
+.fg-recorridos .fg-delivery-question {
+	color: var(--fg-text);
+	font-size: 0.95rem;
+	margin-bottom: 12px;
+}
+
+.fg-recorridos .fg-delivery-subtitle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 0.78rem;
+	font-weight: 800;
+	letter-spacing: 0.05em;
+	color: var(--fg-text);
+	margin: 16px 0 8px;
+}
+
+.fg-recorridos .fg-choice-group {
+	display: grid;
+	gap: 10px;
+	min-width: 0;
+}
+
+.fg-recorridos .fg-choice-group--2 {
+	grid-template-columns: 1fr 1fr;
+}
+
+.fg-recorridos .fg-choice-group--payment {
+	grid-template-columns: 1fr;
+}
+
+.fg-recorridos .fg-choice {
+	appearance: none;
+	min-height: 52px;
+	width: 100%;
+	padding: 10px 14px;
+	border-radius: var(--fg-radius-md);
+	border: 2px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	font-weight: 800;
+	font-size: 0.95rem;
+	letter-spacing: 0.03em;
+	white-space: normal;
+	cursor: pointer;
+	transition: border-color var(--fg-transition), background var(--fg-transition);
+}
+
+.fg-recorridos .fg-choice.is-selected {
+	border-color: var(--fg-primary);
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-recorridos .fg-delivery-proof-remove {
+	width: 100%;
+	min-height: 44px;
+	border-radius: 0;
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+	border: none;
+}
+
+.fg-recorridos .fg-delivery-proof-preview {
+	flex-direction: column;
+}
+
+@media (min-width: 641px) {
+	.fg-recorridos .fg-choice-group--payment {
+		grid-template-columns: repeat(3, 1fr);
+	}
+}
