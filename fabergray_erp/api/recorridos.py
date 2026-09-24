@@ -715,7 +715,6 @@ def _parse_status_filter(status):
 	return status or None
 
 
-@frappe.whitelist()
 def _routes_matching_search(txt, company):
 	"""Commit 25.20 -- resolves `txt` to the SET of Recorrido names that
 	should match get_routes()'s own search bar, section 16's own explicit
@@ -754,6 +753,7 @@ def _routes_matching_search(txt, company):
 	return list(matches)
 
 
+@frappe.whitelist()
 def get_routes(status=None, start=0, page_length=20, txt=None):
 	"""Paginated Recorrido listing for the "Recorridos" (Borrador/
 	Planificado/En Ruta) and "Historial" (Completado/Cancelado) tabs
