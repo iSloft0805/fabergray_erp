@@ -1875,3 +1875,320 @@
 		margin: 6px auto;
 	}
 }
+
+/* ====================================================================
+ * Fase 26.2 -- INICIAR RECORRIDO + MODO RECORRIDO. Purely additive: every
+ * selector below is new, except the detail dialog's primary button, which
+ * only gains the new .fg-route-btn-start modifier.
+ * ==================================================================== */
+
+/* INICIAR / CONTINUAR RECORRIDO -- solid, taller CTA so it clearly
+ * outweighs "Cancelar recorrido" (custom action, danger tint). Same
+ * 3-class specificity trick as .fg-route-btn-cancel above. */
+.fg-recorridos-detail-dialog .standard-actions .fg-route-btn-start {
+	background: var(--fg-primary);
+	color: #fff;
+	border: none;
+	min-height: 48px;
+	padding: 12px 26px;
+	font-size: 0.95rem;
+	letter-spacing: 0.02em;
+}
+
+.fg-recorridos-detail-dialog .standard-actions .fg-route-btn-start:hover:not(.disabled) {
+	background: var(--fg-primary-dark);
+}
+
+.fg-route-start-confirm .fg-route-start-confirm-text {
+	margin: 0;
+	font-size: 0.95rem;
+	line-height: 1.5;
+}
+
+.fg-route-start-confirm .btn-modal-primary,
+.fg-route-start-confirm .btn-modal-secondary {
+	min-height: 44px;
+	font-weight: 700;
+}
+
+/* -- Modo Recorrido: mobile first, one centered column on desktop. ---- */
+.fg-recorridos .fg-active-route {
+	max-width: 560px;
+	margin: 0 auto;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	min-width: 0;
+}
+
+.fg-recorridos .fg-active-route-bar {
+	position: sticky;
+	top: 0;
+	z-index: 5;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 10px;
+	padding: 10px 0;
+	background: var(--fg-bg);
+}
+
+.fg-recorridos .fg-active-route-back {
+	color: var(--fg-text);
+	border-color: var(--fg-border);
+	background: var(--fg-card);
+}
+
+.fg-recorridos .fg-active-route-bar-status {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+}
+
+.fg-recorridos .fg-active-route-bar-status .fg-badge {
+	font-size: 0.8rem;
+	padding: 6px 12px;
+}
+
+.fg-recorridos .fg-active-route-bar-id {
+	font-weight: 700;
+	color: var(--fg-text-muted);
+	font-size: 0.85rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.fg-recorridos .fg-active-route-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 14px;
+	color: var(--fg-text-muted);
+	font-size: 0.85rem;
+}
+
+.fg-recorridos .fg-active-route-meta span {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+}
+
+.fg-recorridos .fg-active-route-stop,
+.fg-recorridos .fg-active-route-next,
+.fg-recorridos .fg-active-route-done,
+.fg-recorridos .fg-active-route-all {
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow);
+	padding: 18px;
+	min-width: 0;
+}
+
+.fg-recorridos .fg-active-route-position {
+	display: inline-block;
+	font-weight: 800;
+	font-size: 0.85rem;
+	letter-spacing: 0.04em;
+	color: var(--fg-primary);
+	background: var(--fg-primary-tint);
+	border-radius: var(--fg-radius-pill);
+	padding: 6px 12px;
+	margin-bottom: 14px;
+}
+
+.fg-recorridos .fg-active-route-label {
+	font-size: 0.72rem;
+	font-weight: 700;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--fg-text-faint);
+	margin-top: 10px;
+}
+
+.fg-recorridos .fg-active-route-customer {
+	font-size: 1.4rem;
+	font-weight: 800;
+	line-height: 1.25;
+	color: var(--fg-text);
+	overflow-wrap: anywhere;
+}
+
+.fg-recorridos .fg-active-route-address {
+	font-size: 1.05rem;
+	line-height: 1.45;
+	color: var(--fg-text);
+	overflow-wrap: anywhere;
+}
+
+.fg-recorridos .fg-active-route-order {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px 12px;
+	margin-top: 14px;
+}
+
+.fg-recorridos .fg-active-route-qty {
+	color: var(--fg-text-muted);
+	font-weight: 600;
+	font-size: 0.9rem;
+}
+
+/* Waze = primary action, Maps = secondary. Stacked full width at every
+ * size (one-hand reach on a phone, a clean column on desktop). */
+.fg-recorridos .fg-active-route-nav {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	margin-top: 18px;
+}
+
+.fg-recorridos .fg-active-route-nav-btn {
+	width: 100%;
+	text-decoration: none;
+	white-space: normal;
+	text-align: center;
+}
+
+.fg-recorridos .fg-active-route-nav-btn--waze {
+	min-height: 56px;
+	font-size: 1rem;
+	background: var(--fg-primary);
+	border-color: var(--fg-primary);
+	color: #fff;
+}
+
+.fg-recorridos .fg-active-route-nav-btn--waze:hover,
+.fg-recorridos .fg-active-route-nav-btn--waze:focus {
+	background: var(--fg-primary-dark);
+	color: #fff;
+	text-decoration: none;
+}
+
+.fg-recorridos .fg-active-route-nav-btn--maps {
+	min-height: 48px;
+	background: var(--fg-card);
+	border-color: var(--fg-primary);
+	color: var(--fg-primary);
+}
+
+.fg-recorridos .fg-active-route-nav-btn--maps:hover,
+.fg-recorridos .fg-active-route-nav-btn--maps:focus {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+	text-decoration: none;
+}
+
+.fg-recorridos .fg-active-route-nav--unavailable {
+	flex-direction: row;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	min-height: 56px;
+	border-radius: var(--fg-radius-md);
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+	font-weight: 800;
+	letter-spacing: 0.03em;
+}
+
+.fg-recorridos .fg-active-route-next-name {
+	font-weight: 700;
+	font-size: 1.05rem;
+	color: var(--fg-text);
+	overflow-wrap: anywhere;
+}
+
+.fg-recorridos .fg-active-route-next-address {
+	color: var(--fg-text-muted);
+	font-size: 0.9rem;
+	overflow-wrap: anywhere;
+}
+
+.fg-recorridos .fg-active-route-done {
+	text-align: center;
+	color: var(--fg-success-dark);
+}
+
+.fg-recorridos .fg-active-route-done-title {
+	font-weight: 800;
+	font-size: 1.1rem;
+	margin-top: 6px;
+}
+
+.fg-recorridos .fg-active-route-done-sub {
+	color: var(--fg-text-muted);
+}
+
+.fg-recorridos .fg-active-route-all summary {
+	min-height: var(--fg-touch);
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	cursor: pointer;
+	font-weight: 700;
+	color: var(--fg-text);
+}
+
+.fg-recorridos .fg-active-route-stop-list {
+	list-style: none;
+	margin: 8px 0 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.fg-recorridos .fg-active-route-stop-row {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: var(--fg-touch);
+	padding: 6px 8px;
+	border-radius: var(--fg-radius-sm);
+	min-width: 0;
+}
+
+.fg-recorridos .fg-active-route-stop-row.is-current {
+	background: var(--fg-primary-tint);
+}
+
+.fg-recorridos .fg-active-route-stop-num {
+	flex: 0 0 28px;
+	height: 28px;
+	border-radius: 50%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	font-weight: 800;
+	font-size: 0.8rem;
+	background: var(--fg-bg);
+	border: 1px solid var(--fg-border);
+}
+
+.fg-recorridos .fg-active-route-stop-name {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+	.fg-recorridos-detail-dialog .standard-actions .fg-route-btn-start {
+		min-height: 52px;
+	}
+
+	.fg-recorridos .fg-active-route-stop,
+	.fg-recorridos .fg-active-route-next,
+	.fg-recorridos .fg-active-route-done,
+	.fg-recorridos .fg-active-route-all {
+		padding: 16px;
+	}
+
+	.fg-recorridos .fg-active-route-customer {
+		font-size: 1.3rem;
+	}
+}

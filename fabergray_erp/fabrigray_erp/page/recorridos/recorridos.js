@@ -41,6 +41,11 @@ fabergray_erp.Recorridos = class Recorridos {
 		this.summary = null;
 		this.active_tab = "disponibles"; // "disponibles" | "recorridos" | "historial"
 
+		// Fase 26.2 -- "list" (KPIs + tabs) | "active-route" (Modo Recorrido,
+		// rendered in this same Page body, never inside a frappe.ui.Dialog).
+		this.view = "list";
+		this.active_route = null;
+
 		// -- Pedidos disponibles ------------------------------------------
 		this.avail_rows = [];
 		this.avail_total = 0;
@@ -149,7 +154,10 @@ fabergray_erp.Recorridos = class Recorridos {
 			<div class="fg-body"></div>
 		`);
 		this.$body = this.$app.find(".fg-body");
-		this.$app.find(".fg-refresh-btn").on("click", () => this.load_all());
+		this.$app.find(".fg-refresh-btn").on("click", () => {
+			if (this.view === "active-route" && this.active_route) this.open_active_route(this.active_route.name);
+			else this.load_all();
+		});
 	}
 
 	set_busy(is_busy) {
@@ -837,6 +845,12 @@ fabergray_erp.Recorridos = class Recorridos {
 				"fg-icon-sm"
 			)} ${__("PLANIFICAR")}</button>`;
 		}
+		if (!is_history && r.status === "En Ruta") {
+			actions += `<button type="button" class="fg-btn fg-btn--solid-primary fg-recorridos-continue-btn">${icon(
+				"navigation",
+				"fg-icon-sm"
+			)} ${__("CONTINUAR")}</button>`;
+		}
 		return `
 			<div class="fg-recorridos-route-card" data-name="${frappe.utils.escape_html(r.name)}" data-creation="${frappe.utils.escape_html(
 			r.creation || ""
@@ -892,6 +906,10 @@ fabergray_erp.Recorridos = class Recorridos {
 		$t.find(".fg-recorridos-route-cards").on("click", ".fg-recorridos-plan-btn", (e) => {
 			e.stopPropagation();
 			this.confirm_plan_route($(e.currentTarget).closest(".fg-recorridos-route-card").data("name"));
+		});
+		$t.find(".fg-recorridos-route-cards").on("click", ".fg-recorridos-continue-btn", (e) => {
+			e.stopPropagation();
+			this.open_active_route($(e.currentTarget).closest(".fg-recorridos-route-card").data("name"));
 		});
 		$t.find('.fg-recorridos-pagination[data-scope="routes"]').on("click", ".fg-recorridos-pagination-btn", (e) => {
 			this.routes_page += $(e.currentTarget).data("dir") === "prev" ? -1 : 1;
@@ -1184,8 +1202,12 @@ fabergray_erp.Recorridos = class Recorridos {
 						// as the manual button -- Recorrido only ever sees the
 						// plain "Ubicación pendiente" text, brief section 16's
 						// own "Rol Recorrido: solo visualiza estado".
+						// Fase 26.2 -- also offered while Planificado:
+						// refresh_route_geolocation() now accepts Planificado so
+						// a missing location can be fixed before INICIAR
+						// RECORRIDO (start_route() requires one on every stop).
 						const geo_configure_btn =
-							is_borrador && !is_geo_ready && s.customer_address
+							(is_borrador || is_planificado) && !is_geo_ready && s.customer_address
 								? can_administer_geolocation
 									? `
 									<button type="button" class="fg-route-geo-auto-btn" data-action="auto-geocode" data-name="${s.name}">${icon(
@@ -1311,12 +1333,30 @@ fabergray_erp.Recorridos = class Recorridos {
 				"fg-route-btn-cancel"
 			);
 		}
+		// Fase 26.2 -- the primary action per status. INICIAR/CONTINUAR get
+		// .fg-route-btn-start (a solid, taller CTA) so they read as far more
+		// important than "Cancelar recorrido"; removed again for any other
+		// status since this same footer button is reused across re-renders.
+		const $primary = dialog.get_primary_btn();
+		$primary.removeClass("hide fg-route-btn-start");
 		if (is_borrador) {
 			dialog.set_primary_action(`${icon("calendar-check", "fg-icon-sm")} ${__("Planificar recorrido")}`, () =>
 				this.confirm_plan_route_from_detail()
 			);
+		} else if (is_planificado) {
+			dialog.set_primary_action(`${icon("play", "fg-icon-sm")} ${__("INICIAR RECORRIDO")}`, () =>
+				this.confirm_start_route_from_detail()
+			);
+			$primary.addClass("fg-route-btn-start");
+		} else if (d.status === "En Ruta") {
+			dialog.set_primary_action(`${icon("navigation", "fg-icon-sm")} ${__("CONTINUAR RECORRIDO")}`, () => {
+				const detail = this.detail;
+				dialog.hide();
+				this.enter_active_route(detail);
+			});
+			$primary.addClass("fg-route-btn-start");
 		} else {
-			dialog.get_primary_btn().addClass("hide");
+			$primary.addClass("hide");
 		}
 
 		this.bind_detail_events($html);
@@ -1540,6 +1580,217 @@ fabergray_erp.Recorridos = class Recorridos {
 		});
 	}
 
+	// =====================================================================
+	// Fase 26.2 -- INICIAR RECORRIDO (Planificado -> En Ruta).
+	// A small dedicated Dialog (not frappe.confirm(), whose buttons are a
+	// fixed Sí/No) so the actions read CANCELAR / INICIAR. INICIAR is
+	// disabled while start_route() runs; start_route() is idempotent
+	// server-side anyway, so a retried request still lands in Modo Recorrido.
+	// =====================================================================
+	confirm_start_route_from_detail() {
+		const route_name = this.detail && this.detail.name;
+		if (!route_name) return;
+		const confirm = new frappe.ui.Dialog({
+			title: __("¿Iniciar recorrido?"),
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "message",
+					options: `<p class="fg-route-start-confirm-text">${__(
+						"Una vez iniciado comenzarás la ruta de entrega. Las paradas conservarán el orden planificado."
+					)}</p>`,
+				},
+			],
+			primary_action_label: __("INICIAR"),
+			primary_action: () => this.submit_start_route(confirm, route_name),
+			secondary_action_label: __("CANCELAR"),
+			secondary_action: () => confirm.hide(),
+		});
+		confirm.$wrapper.addClass("fg-route-start-confirm");
+		confirm.show();
+	}
+
+	submit_start_route(confirm, route_name) {
+		if (confirm.$wrapper.hasClass("fg-route-dialog-busy")) return;
+		confirm.$wrapper.addClass("fg-route-dialog-busy");
+		confirm.disable_primary_action();
+		confirm.get_primary_btn().html(`<span class="fg-route-btn-spinner"></span> ${__("Iniciando...")}`);
+		this.set_busy(true);
+
+		this.call("start_route", { route_name: route_name })
+			.then((detail) => {
+				frappe.show_alert({ message: "✓ " + __("Recorrido iniciado."), indicator: "green" }, 5);
+				confirm.hide();
+				if (this._detail_dialog) this._detail_dialog.hide();
+				this.enter_active_route(detail);
+			})
+			.catch(() => {
+				// frappe.call's own error dialog already showed the real reason
+				// (sin conductor, ubicaciones faltantes, estado inválido...).
+			})
+			.finally(() => {
+				confirm.$wrapper.removeClass("fg-route-dialog-busy");
+				confirm.enable_primary_action();
+				confirm.get_primary_btn().html(__("INICIAR"));
+				this.set_busy(false);
+			});
+	}
+
+	// =====================================================================
+	// Fase 26.2 -- MODO RECORRIDO (this.view === "active-route").
+	// Rendered straight into this Page's own body (never a Dialog), mobile
+	// first. Reuses get_route_detail() -- no extra endpoint. The current
+	// stop is DERIVED (current_stop_of()), never persisted.
+	// =====================================================================
+	open_active_route(route_name) {
+		if (!route_name) return;
+		this.set_busy(true);
+		return this.call("get_route_detail", { route_name: route_name })
+			.then((detail) => {
+				if (detail.status !== "En Ruta") {
+					frappe.show_alert({ message: __("El recorrido {0} no está en ruta.", [detail.name]), indicator: "orange" }, 5);
+					if (this.view === "active-route") this.exit_active_route();
+					return;
+				}
+				this.enter_active_route(detail);
+			})
+			.catch(() => {})
+			.finally(() => this.set_busy(false));
+	}
+
+	enter_active_route(detail) {
+		this.view = "active-route";
+		this.active_route = detail;
+		this.render_active_route();
+		window.scrollTo(0, 0);
+	}
+
+	exit_active_route() {
+		this.view = "list";
+		this.active_route = null;
+		this.active_tab = "recorridos";
+		this._routes_loaded = false;
+		return this.load_all();
+	}
+
+	render_active_route() {
+		const d = this.active_route;
+		const stops = d.stops || [];
+		const current = current_stop_of(stops);
+		const total = stops.length;
+		const current_idx = current ? stops.indexOf(current) : -1;
+		const next = current_idx >= 0 ? current_stop_of(stops.slice(current_idx + 1)) : null;
+
+		const meta = [
+			d.driver_name ? `${icon("user", "fg-icon-sm")} ${frappe.utils.escape_html(d.driver_name)}` : "",
+			d.vehicle ? `${icon("truck", "fg-icon-sm")} ${frappe.utils.escape_html(d.vehicle)}` : "",
+			d.started_on ? `${icon("clock", "fg-icon-sm")} ${__("Salida")} ${frappe.datetime.str_to_user(d.started_on)}` : "",
+		]
+			.filter(Boolean)
+			.map((m) => `<span>${m}</span>`)
+			.join("");
+
+		const current_html = current
+			? this.render_active_stop_html(current, current_idx + 1, total)
+			: `
+				<div class="fg-active-route-done">
+					${icon("circle-check")}
+					<div class="fg-active-route-done-title">${__("Sin paradas pendientes")}</div>
+					<div class="fg-active-route-done-sub">${__("Todas las paradas de este recorrido ya fueron atendidas.")}</div>
+				</div>
+			`;
+
+		const next_html = next
+			? `
+				<div class="fg-active-route-next">
+					<div class="fg-active-route-label">${__("Próxima parada")}</div>
+					<div class="fg-active-route-next-name">${frappe.utils.escape_html(next.customer_name || next.customer || __("Sin cliente"))}</div>
+					<div class="fg-active-route-next-address">${
+						next.address_display ? frappe.utils.escape_html(next.address_display) : __("Sin dirección registrada")
+					}</div>
+				</div>
+			`
+			: "";
+
+		const all_stops_html = stops
+			.map(
+				(s) => `
+				<li class="fg-active-route-stop-row ${s === current ? "is-current" : ""}">
+					<span class="fg-active-route-stop-num">${cint(s.sequence)}</span>
+					<span class="fg-active-route-stop-name">${frappe.utils.escape_html(s.customer_name || s.customer || __("Sin cliente"))}</span>
+					${parada_status_badge_html(s.status)}
+				</li>
+			`
+			)
+			.join("");
+
+		this.$body.html(`
+			<div class="fg-active-route">
+				<div class="fg-active-route-bar">
+					<button type="button" class="fg-btn fg-btn--ghost fg-active-route-back">${icon("arrow-left", "fg-icon-sm")} ${__(
+			"Recorridos"
+		)}</button>
+					<div class="fg-active-route-bar-status">
+						${status_badge_html(d.status)}
+						<span class="fg-active-route-bar-id">${frappe.utils.escape_html(d.name)}</span>
+					</div>
+				</div>
+				${meta ? `<div class="fg-active-route-meta">${meta}</div>` : ""}
+				${current_html}
+				${next_html}
+				<details class="fg-active-route-all">
+					<summary>${icon("list", "fg-icon-sm")} ${__("Ver todas las paradas ({0})", [total])}</summary>
+					<ol class="fg-active-route-stop-list">${all_stops_html}</ol>
+				</details>
+			</div>
+		`);
+
+		this.$body.find(".fg-active-route-back").on("click", () => this.exit_active_route());
+	}
+
+	render_active_stop_html(stop, position, total) {
+		const pedido_label = stop.commercial_name || stop.sales_order || stop.pick_list;
+		const links = navigation_links(stop);
+		// Real <a href> rendered up front -- never window.open() after an
+		// await (mobile browsers block that as a popup). No href at all
+		// when the coordinates are not valid.
+		const nav_html = links
+			? `
+				<div class="fg-active-route-nav">
+					<a class="fg-btn fg-active-route-nav-btn fg-active-route-nav-btn--waze" href="${links.waze}" target="_blank" rel="noopener noreferrer">${icon(
+					"navigation"
+			  )} ${__("ABRIR EN WAZE")}</a>
+					<a class="fg-btn fg-active-route-nav-btn fg-active-route-nav-btn--maps" href="${links.maps}" target="_blank" rel="noopener noreferrer">${icon(
+					"map"
+			  )} ${__("GOOGLE MAPS")}</a>
+				</div>
+			`
+			: `
+				<div class="fg-active-route-nav fg-active-route-nav--unavailable">
+					${icon("map-pin-off")} ${__("UBICACIÓN NO DISPONIBLE")}
+				</div>
+			`;
+
+		return `
+			<div class="fg-active-route-stop" data-name="${frappe.utils.escape_html(stop.name)}">
+				<div class="fg-active-route-position">${__("PARADA {0} DE {1}", [position, total])}</div>
+				<div class="fg-active-route-label">${__("Cliente")}</div>
+				<div class="fg-active-route-customer">${frappe.utils.escape_html(stop.customer_name || stop.customer || __("Sin cliente"))}</div>
+				<div class="fg-active-route-label">${__("Dirección")}</div>
+				<div class="fg-active-route-address">${
+					stop.address_display ? frappe.utils.escape_html(stop.address_display) : __("Sin dirección registrada")
+				}</div>
+				<div class="fg-active-route-order">
+					<span class="fg-badge fg-badge--route-pedido">${__("PEDIDO")} #${frappe.utils.escape_html(pedido_label || "")}</span>
+					<span class="fg-active-route-qty">${cint(stop.item_count)} ${cint(stop.item_count) === 1 ? __("referencia") : __(
+			"referencias"
+		)} · ${format_qty(stop.total_qty)} ${__("uds")}</span>
+				</div>
+				${nav_html}
+			</div>
+		`;
+	}
+
 	// -- Sub-modal: AGREGAR PEDIDOS (brief section 14) -- reuses
 	// get_available_orders() (already excludes this same route's own
 	// current stops, since those Pick Lists are already claimed by it)
@@ -1744,6 +1995,47 @@ function status_badge_html(status) {
 	};
 	const m = map[status] || { cls: "borrador", label: status || "" };
 	return `<span class="fg-badge fg-badge--route-${m.cls}">${m.label}</span>`;
+}
+
+// Fase 26.2 -- Modo Recorrido helpers. Pure: no server calls, no state.
+
+// Mirror of geocoding.is_valid_coordinate_pair() (the server's one central
+// rule): finite numbers, -90..90 / -180..180, never the 0,0 sentinel.
+// Returns the parsed pair, or null.
+function valid_coordinate_pair(latitude, longitude) {
+	if (latitude === null || latitude === undefined || latitude === "") return null;
+	if (longitude === null || longitude === undefined || longitude === "") return null;
+	const lat = Number(latitude);
+	const lng = Number(longitude);
+	if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+	if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+	if (lat === 0 && lng === 0) return null;
+	return { lat, lng };
+}
+
+// External navigation links for ONE stop, built from its own coordinate
+// snapshot -- no SDK, no API request. toFixed(6) (~0.1 m) keeps the URL to
+// digits, "." and "-" only. null when the coordinates are not valid, so the
+// caller never renders an href.
+function navigation_links(stop) {
+	const pair = stop ? valid_coordinate_pair(stop.latitude, stop.longitude) : null;
+	if (!pair) return null;
+	const ll = `${pair.lat.toFixed(6)},${pair.lng.toFixed(6)}`;
+	return {
+		waze: `https://waze.com/ul?ll=${ll}&navigate=yes`,
+		maps: `https://www.google.com/maps/dir/?api=1&destination=${ll}&travelmode=driving`,
+	};
+}
+
+// The current stop is derived, never persisted: the first stop still
+// "Pendiente", by sequence ASC.
+function current_stop_of(stops) {
+	return (
+		(stops || [])
+			.slice()
+			.sort((a, b) => cint(a.sequence) - cint(b.sequence))
+			.find((s) => s.status === "Pendiente") || null
+	);
 }
 
 // Recorrido Parada.status ("Pendiente"/"Entregado"/"No Entregado") is a

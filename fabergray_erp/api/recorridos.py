@@ -128,6 +128,12 @@ ACTIVE_ROUTE_STATUSES = ("Borrador", "Planificado", "En Ruta")
 #: eligibility).
 LISTABLE_ROUTE_STATUSES = ("Borrador", "Planificado", "En Ruta", "Completado", "Cancelado")
 
+#: Fase 26.2 -- statuses in which refresh_route_geolocation() may re-read a
+#: route's stop coordinates from their Address. Planificado is included so a
+#: location can be fixed before start_route(); once En Ruta the snapshot is
+#: frozen.
+GEO_REFRESHABLE_ROUTE_STATUSES = ("Borrador", "Planificado")
+
 
 class PickListNotEligibleError(frappe.ValidationError):
 	pass
@@ -683,6 +689,7 @@ def get_route_detail(route_name):
 		"start_address": route.start_address,
 		"notes": route.notes,
 		"created_by_user": route.created_by_user,
+		"started_on": route.started_on,
 		"total_stops": len(stops),
 		"stops": stops,
 	}
@@ -1082,6 +1089,21 @@ def plan_route(route_name):
 	if route.status != "Borrador":
 		frappe.throw(_("Solo se puede planificar un recorrido en Borrador."), RouteNotEditableError)
 
+	_validate_route_stops_integrity(route)
+
+	route.status = "Planificado"
+	route.save()
+
+	return get_route_detail(route.name)
+
+
+def _validate_route_stops_integrity(route):
+	"""Shared by plan_route() and start_route() (Fase 26.2) -- extracted
+	unchanged from plan_route() so both transitions re-validate the stops
+	the exact same way: at least one stop, unique positive sequences, and
+	every Pick List still eligible and not claimed by ANOTHER active route
+	(under the real row locks of _lock_and_get_assigned()). Returns the
+	stops, ordered by sequence."""
 	stops = frappe.get_list(
 		"Recorrido Parada",
 		filters={"recorrido": route.name},
@@ -1105,10 +1127,110 @@ def plan_route(route_name):
 		pl.check_permission("read")
 		_validate_pick_list_eligible(pl, route.company, assigned)
 
-	route.status = "Planificado"
+	return stops
+
+
+def _assert_route_ready_to_start(route):
+	"""Fase 26.2 -- the preconditions for entering "En Ruta", shared by
+	start_route() and Recorrido.validate() (the controller calls this too,
+	so a generic doc.save()/frappe.client.set_value() into "En Ruta" hits
+	the exact same rules instead of bypassing them): a driver, at least one
+	stop, and a valid coordinate snapshot on EVERY stop -- the coordinate
+	the driver will actually navigate to, judged by the one central rule
+	geocoding.is_valid_coordinate_pair() (rejects null/empty/out of range/
+	0,0). Never geocodes and never calls any provider: an operator fixes a
+	missing location beforehand (set_address_geolocation()/
+	geocode_customer_address() + refresh_route_geolocation(), which Fase
+	26.2 also allows while Planificado)."""
+	if not route.driver:
+		frappe.throw(_("Asigna un conductor antes de iniciar el recorrido."), RouteValidationError)
+
+	stops = frappe.get_list(
+		"Recorrido Parada",
+		filters={"recorrido": route.name},
+		fields=["sequence", "customer", "customer_name", "latitude", "longitude"],
+		order_by="sequence asc",
+	)
+	if not stops:
+		frappe.throw(_("El recorrido no tiene paradas."), RouteValidationError)
+
+	missing = [s for s in stops if not geocoding.is_valid_coordinate_pair(s.latitude, s.longitude)]
+	if missing:
+		labels = ", ".join(
+			_("Parada {0} – {1}").format(
+				cint(s.sequence), frappe.utils.escape_html(s.customer_name or s.customer or _("Sin cliente"))
+			)
+			for s in missing
+		)
+		frappe.throw(
+			_("No se puede iniciar el recorrido: faltan ubicaciones válidas en {0}.").format(labels),
+			RouteValidationError,
+		)
+
+
+@frappe.whitelist()
+@_retrying_on_deadlock
+def start_route(route_name):
+	"""Fase 26.2 -- Planificado -> En Ruta, writing started_on exactly once.
+
+	Idempotent on purpose: a second call while the route is ALREADY "En
+	Ruta" (a double tap, or a mobile retry after the first response was
+	lost) returns the same detail with already_started=True and never
+	touches started_on again. Any other status is rejected.
+
+	Concurrency: the status is re-read under a real row lock (`for_update=
+	True`, the same primitive refresh_route_geolocation() uses) and every
+	decision is made from THAT fresh value, never from the doc loaded
+	earlier -- under REPEATABLE READ a plain read in this transaction can
+	still return the pre-lock snapshot (see _locked_assigned_pick_lists()).
+	Two simultaneous calls therefore serialize: one transitions, the other
+	wakes up, sees "En Ruta" and takes the idempotent branch. route.save()
+	goes through the ORM, so Recorrido.validate() re-checks the transition
+	and _assert_route_ready_to_start() again as the last line of defense.
+
+	KNOWN DEBT (explicit, Fase 26.2): Driver is not linked to User yet --
+	any authorized Recorrido user (write on Recorrido) of the same Company
+	can start any route, not only the assigned driver. See
+	test_debt_any_recorrido_user_of_same_company_can_start.
+
+	Never geocodes and never calls Google. Never touches Pick List, Sales
+	Order, stock or accounting -- only Recorrido.status/started_on."""
+	_require_login()
+	frappe.has_permission("Recorrido", "write", throw=True)
+
+	route = frappe.get_doc("Recorrido", route_name)
+	route.check_permission("write")
+
+	if route.company != get_default_company():
+		frappe.throw(_("Este recorrido pertenece a otra empresa."), frappe.PermissionError)
+
+	locked = frappe.db.get_value("Recorrido", route.name, ["status", "started_on"], as_dict=True, for_update=True)
+	if not locked:
+		frappe.throw(_("El recorrido {0} no existe.").format(route_name), frappe.DoesNotExistError)
+
+	if locked.status == "En Ruta":
+		detail = get_route_detail(route.name)
+		detail["status"] = locked.status
+		detail["started_on"] = locked.started_on
+		detail["already_started"] = True
+		return detail
+
+	if locked.status != "Planificado":
+		frappe.throw(
+			_("Solo se puede iniciar un recorrido Planificado (estado actual: {0}).").format(_(locked.status)),
+			RouteNotEditableError,
+		)
+
+	_assert_route_ready_to_start(route)
+	_validate_route_stops_integrity(route)
+
+	route.status = "En Ruta"
+	route.started_on = now_datetime()
 	route.save()
 
-	return get_route_detail(route.name)
+	detail = get_route_detail(route.name)
+	detail["already_started"] = False
+	return detail
 
 
 @frappe.whitelist()
@@ -1512,9 +1634,11 @@ def _refresh_route_stops_snapshot(route):
 	can reuse the exact same snapshot-refresh logic instead of a second
 	copy (brief section 1's own "NO duplicar lógica existente"). `route`
 	must already be a loaded, write-permission-checked Recorrido whose
-	CURRENT status the caller has already confirmed is "Borrador" (this
-	function itself never re-checks status -- both callers already did,
-	each under their own concurrency-appropriate lock)."""
+	CURRENT status the caller has already confirmed is refreshable
+	("Borrador" for geocode_route_pending_addresses(); "Borrador" or
+	"Planificado" for refresh_route_geolocation(), Fase 26.2) -- this
+	function itself never re-checks status, both callers already did, each
+	under their own concurrency-appropriate lock."""
 	stops = frappe.get_list(
 		"Recorrido Parada",
 		filters={"recorrido": route.name},
@@ -1690,11 +1814,17 @@ def refresh_route_geolocation(route_name):
 	on stale, pre-lock status, the same reasoning already documented for
 	_locked_assigned_pick_lists()'s own FOR UPDATE read above.
 
-	Planificado/En Ruta/Completado/Cancelado (brief section 22): rejected
-	outright, never silently updated -- a Planificado route's own geo
-	snapshot is frozen history from the moment it left Borrador, exactly
-	like update_route_stops() already refuses to edit its stops at all
-	past that point."""
+	Fase 26.2 -- also allowed while Planificado, so a missing/corrected
+	location can be fixed before start_route() (which requires a valid
+	coordinate snapshot on every stop) without cancelling and rebuilding
+	the whole route. Safe: only the 4 geo fields change -- sequence/order
+	and every other stop field stay exactly as planned. The same locked
+	status read also serializes this against start_route(), which locks
+	the same row.
+
+	En Ruta/Completado/Cancelado (brief section 22): rejected outright,
+	never silently updated -- once the route has left, its geo snapshot is
+	the history of where the driver was actually sent."""
 	_require_login()
 	frappe.has_permission("Recorrido", "write", throw=True)
 
@@ -1704,9 +1834,9 @@ def refresh_route_geolocation(route_name):
 	locked_status = frappe.db.get_value("Recorrido", route_name, "status", for_update=True)
 	if locked_status is None:
 		frappe.throw(_("El recorrido {0} no existe.").format(route_name), frappe.DoesNotExistError)
-	if locked_status != "Borrador":
+	if locked_status not in GEO_REFRESHABLE_ROUTE_STATUSES:
 		frappe.throw(
-			_("Solo se puede actualizar la geolocalización de un recorrido en Borrador."),
+			_("Solo se puede actualizar la geolocalización de un recorrido en Borrador o Planificado."),
 			RouteNotEditableError,
 		)
 

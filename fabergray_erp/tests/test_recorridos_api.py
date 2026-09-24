@@ -1707,15 +1707,21 @@ class TestRecorridosApi(IntegrationTestCase):
 		self.assertEqual(stop_after["sequence"], stop_before["sequence"])
 		self.assertEqual(stop_after["pick_list"], stop_before["pick_list"])
 
-	def test_refresh_route_geolocation_rejects_planificado(self):
+	def test_refresh_route_geolocation_allows_planificado(self):
+		"""Fase 26.2 (approved decision) -- previously
+		test_refresh_route_geolocation_rejects_planificado: refresh is now
+		allowed while Planificado so a location can be fixed before
+		start_route(). En Ruta/Cancelado/Completado stay rejected, see
+		test_recorridos_start_route.py."""
 		customer = self.world.customer("FG243 Refresh Planificado Customer")
 		self._set_customer_primary_address(customer)
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
 			route = self._create_route(pick_lists=[pl.name])
 			self._plan_route(route["name"])
-			with self.assertRaises(recorridos.RouteNotEditableError):
-				recorridos.refresh_route_geolocation(route["name"])
+			refreshed = recorridos.refresh_route_geolocation(route["name"])
+		self.assertEqual(refreshed["status"], "Planificado")
+		self.assertEqual(refreshed["stops"][0]["sequence"], route["stops"][0]["sequence"])
 
 	def test_refresh_route_geolocation_requires_permission(self):
 		customer = self.world.customer("FG243 Refresh No Perm Customer")
