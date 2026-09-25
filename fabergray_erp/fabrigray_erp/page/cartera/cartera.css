@@ -649,6 +649,175 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* 27.3 -- REGISTRAR COBRO / confirmar / rechazar (panels in the detail) */
+/* Inputs are 16px (no iOS zoom) and >= 44px; actions stack on phones.  */
+/* ------------------------------------------------------------------ */
+.fg-cartera .fg-cartera-main-action {
+	width: 100%;
+	margin-bottom: 14px;
+}
+
+.fg-cartera .fg-cartera-pay-panel {
+	border-color: var(--fg-primary);
+}
+
+.fg-cartera .fg-cartera-field {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	min-width: 0;
+	margin: 0;
+}
+
+.fg-cartera .fg-cartera-input {
+	width: 100%;
+	min-width: 0;
+	min-height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	padding: 0 12px;
+	font-size: 16px;
+}
+
+.fg-cartera .fg-cartera-input:focus {
+	outline: none;
+	border-color: var(--fg-primary);
+	box-shadow: 0 0 0 3px var(--fg-primary-tint);
+}
+
+.fg-cartera .fg-cartera-textarea {
+	padding: 10px 12px;
+	resize: vertical;
+	overflow-wrap: anywhere;
+}
+
+.fg-cartera .fg-cartera-amount-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+}
+
+.fg-cartera .fg-cartera-amount-prefix {
+	font-weight: 800;
+	font-size: 1.1rem;
+}
+
+.fg-cartera .fg-cartera-pay-amount {
+	flex: 1 1 auto;
+	font-size: 1.25rem;
+	font-weight: 800;
+}
+
+.fg-cartera .fg-cartera-pay-full {
+	flex: 0 0 auto;
+	border: 1.5px solid var(--fg-border);
+}
+
+.fg-cartera .fg-cartera-pay-summary {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 12px;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-md);
+}
+
+.fg-cartera .fg-cartera-pay-summary-grid {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 8px;
+}
+
+.fg-cartera .fg-cartera-methods {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 8px;
+}
+
+.fg-cartera .fg-cartera-method {
+	min-height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	font-size: 0.78rem;
+	font-weight: 800;
+	color: var(--fg-text-muted);
+	cursor: pointer;
+	overflow-wrap: anywhere;
+}
+
+.fg-cartera .fg-cartera-method.is-active {
+	border-color: var(--fg-primary);
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-cartera .fg-cartera-pay-proof-inputs,
+.fg-cartera .fg-cartera-action-row,
+.fg-cartera .fg-cartera-panel-actions {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.fg-cartera .fg-cartera-upload-btn {
+	border: 1.5px dashed var(--fg-border);
+	width: 100%;
+}
+
+.fg-cartera .fg-cartera-pay-proof-preview {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 8px;
+}
+
+.fg-cartera .fg-cartera-pay-proof-img {
+	max-width: 100%;
+	max-height: 240px;
+	border-radius: var(--fg-radius-sm);
+	border: 1px solid var(--fg-border);
+}
+
+.fg-cartera .fg-cartera-panel-actions .fg-btn,
+.fg-cartera .fg-cartera-action-row .fg-btn {
+	width: 100%;
+}
+
+.fg-cartera .fg-cartera-reject-panel {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding-top: 10px;
+	border-top: 1px dashed var(--fg-cartera-attention);
+}
+
+.fg-cartera .fg-cartera-verified {
+	gap: 6px;
+}
+
+.fg-cartera .fg-cartera-verified--ok {
+	border-color: var(--fg-success);
+	background: var(--fg-success-tint);
+}
+
+.fg-cartera .fg-cartera-verified--rejected {
+	border-color: var(--fg-danger);
+	background: var(--fg-danger-tint);
+}
+
+.fg-cartera .fg-cartera-cancel-info {
+	padding: 8px 10px;
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+	font-size: 0.82rem;
+}
+
+/* ------------------------------------------------------------------ */
 /* Wider screens                                                        */
 /* ------------------------------------------------------------------ */
 @media (min-width: 700px) {
@@ -668,6 +837,36 @@
 	.fg-cartera .fg-cartera-card-detail {
 		width: auto;
 		align-self: flex-end;
+	}
+
+	.fg-cartera .fg-cartera-methods {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
+
+	.fg-cartera .fg-cartera-pay-summary-grid {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.fg-cartera .fg-cartera-pay-proof-inputs,
+	.fg-cartera .fg-cartera-action-row,
+	.fg-cartera .fg-cartera-panel-actions {
+		flex-direction: row;
+		justify-content: flex-end;
+	}
+
+	.fg-cartera .fg-cartera-pay-proof-inputs {
+		justify-content: flex-start;
+	}
+
+	.fg-cartera .fg-cartera-panel-actions .fg-btn,
+	.fg-cartera .fg-cartera-action-row .fg-btn,
+	.fg-cartera .fg-cartera-upload-btn,
+	.fg-cartera .fg-cartera-main-action {
+		width: auto;
+	}
+
+	.fg-cartera .fg-cartera-main-action {
+		align-self: flex-start;
 	}
 }
 

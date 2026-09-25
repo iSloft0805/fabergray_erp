@@ -8,7 +8,10 @@ from frappe.utils import flt, getdate, now_datetime, nowdate
 
 from fabergray_erp import cartera_service
 
-PAYMENT_METHODS = ("Transferencia", "Efectivo", "Consignación", "Otro")
+PAYMENT_METHODS = cartera_service.PAYMENT_METHODS
+
+_WRITE_ACTIONS = (cartera_service.ACTION_CARTERA_PAYMENT, cartera_service.ACTION_DRIVER_PAYMENT)
+_CANCEL_ACTIONS = (cartera_service.ACTION_DRIVER_REJECTION, cartera_service.ACTION_TEARDOWN)
 
 
 class CarteraPago(Document):
@@ -33,9 +36,23 @@ class CarteraPago(Document):
 	full value, and only when that report really exists.
 
 	Payment is only RECORDED in Cartera: no Payment Entry/GL is created
-	(accounting_status stays "Sin contabilizar" -- future reconciliation)."""
+	(accounting_status stays "Sin contabilizar" -- future reconciliation).
+
+	27.3 -- closed to direct writes. Insert, save, submit and cancel require
+	the private service token (cartera_service._authorize()): Desk,
+	frappe.client, REST and a bare doc.insert()/submit()/cancel() are
+	refused for EVERY user, Administrator included. The only writers are
+	cartera_service.register_cartera_payment() (source Cartera),
+	create_driver_reported_payment() (source Conductor) and
+	reject_driver_payment() (cancel of the driver payment, with reason).
+	Anulación de cobros manuales: out of 27.3 (no cancel path exists)."""
 
 	def validate(self):
+		action = cartera_service.authorized_action(self)
+		if action not in _WRITE_ACTIONS:
+			frappe.throw(
+				_("Los cobros de cartera solo se registran desde la Page Cartera."), frappe.PermissionError
+			)
 		if self.amended_from:
 			frappe.throw(_("Un pago de cartera no se puede enmendar; registra un pago nuevo."), frappe.ValidationError)
 
@@ -61,6 +78,9 @@ class CarteraPago(Document):
 				frappe.throw(_("El registro del pago no se puede modificar."), frappe.ValidationError)
 
 		precision = self.precision("amount")
+		if abs(flt(self.amount) - flt(self.amount, precision)) > 1e-9:
+			# Never rounded silently (27.3 decision 6).
+			frappe.throw(_("El valor recibido admite como máximo 2 decimales."), frappe.ValidationError)
 		self.amount = flt(self.amount, precision)
 		if self.amount <= 0:
 			frappe.throw(_("El valor recibido debe ser mayor que cero."), frappe.ValidationError)
@@ -71,10 +91,21 @@ class CarteraPago(Document):
 			frappe.throw(_("La fecha del pago no puede estar en el futuro."), frappe.ValidationError)
 
 		if self.source == cartera_service.PAYMENT_SOURCE_DRIVER:
+			if action != cartera_service.ACTION_DRIVER_PAYMENT:
+				frappe.throw(
+					_("Un pago con origen Conductor solo lo crea la entrega del conductor."), frappe.PermissionError
+				)
 			self._validate_driver_payment(obligation)
 		elif self.source == cartera_service.PAYMENT_SOURCE_CARTERA:
+			if action != cartera_service.ACTION_CARTERA_PAYMENT:
+				frappe.throw(_("Origen del pago inválido."), frappe.PermissionError)
 			if self.payment_method not in PAYMENT_METHODS:
 				frappe.throw(_("Selecciona el medio de pago."), frappe.ValidationError)
+			if not (self.client_request_id or "").startswith(cartera_service.CARTERA_REQUEST_PREFIX):
+				frappe.throw(_("Identificador de solicitud inválido."), frappe.ValidationError)
+			error = cartera_service.collectable_error(obligation)
+			if error:
+				frappe.throw(error, cartera_service.CarteraStateError)
 		else:
 			frappe.throw(_("Origen del pago inválido."), frappe.ValidationError)
 
@@ -84,6 +115,27 @@ class CarteraPago(Document):
 				frappe.ValidationError,
 			)
 		self.accounting_status = "Sin contabilizar"
+		self._validate_payment_proof()
+
+	def _validate_payment_proof(self):
+		"""H4 -- payment_proof is empty or EXACTLY the private File attached
+		to this payment in this field (created by the service). Any other
+		URL (another stop's proof, a public file...) is refused."""
+		if not self.payment_proof:
+			return
+		if self.source != cartera_service.PAYMENT_SOURCE_CARTERA or self.is_new():
+			frappe.throw(_("Comprobante inválido."), frappe.ValidationError)
+		if not frappe.db.exists(
+			"File",
+			{
+				"attached_to_doctype": cartera_service.PAYMENT_DOCTYPE,
+				"attached_to_name": self.name,
+				"attached_to_field": "payment_proof",
+				"file_url": self.payment_proof,
+				"is_private": 1,
+			},
+		):
+			frappe.throw(_("El comprobante no corresponde a este pago."), frappe.ValidationError)
 
 	def _obligation(self):
 		if not self.cartera_obligacion or not frappe.db.exists(
@@ -114,14 +166,20 @@ class CarteraPago(Document):
 		)
 		if other:
 			frappe.throw(_("Esta obligación ya tiene el pago reportado por el conductor."), frappe.ValidationError)
+		# H3 -- the report must still be unresolved: once Cartera confirmed
+		# or rejected it, no Conductor payment can be created again, and the
+		# key "conductor:<parada>" stays reserved by the original one.
+		if obligation.payment_verification != cartera_service.VERIFICATION_UNCONFIRMED:
+			frappe.throw(_("El reporte del conductor ya fue resuelto por Cartera."), frappe.ValidationError)
+		if self.client_request_id != f"{cartera_service.DRIVER_REQUEST_PREFIX}{obligation.recorrido_parada}":
+			frappe.throw(_("Identificador de solicitud inválido."), frappe.ValidationError)
 
 	def before_submit(self):
 		# Row lock on the obligation first, then a LOCKING read of the other
 		# submitted payments: concurrent submitters are serialized here and
 		# the second one always sees the first one's payment.
-		invoice_amount = frappe.db.get_value(
-			cartera_service.OBLIGATION_DOCTYPE, self.cartera_obligacion, "invoice_amount", for_update=True
-		)
+		cartera_service.lock_obligation(self.cartera_obligacion)
+		invoice_amount = frappe.db.get_value(cartera_service.OBLIGATION_DOCTYPE, self.cartera_obligacion, "invoice_amount")
 		precision = self.precision("amount")
 		paid_by_others, _last = cartera_service.submitted_payments(
 			self.cartera_obligacion, exclude=self.name, for_update=True
@@ -138,6 +196,26 @@ class CarteraPago(Document):
 
 	def on_submit(self):
 		cartera_service.recompute_obligation(self.cartera_obligacion)
+
+	def before_cancel(self):
+		"""H5 -- Frappe does NOT run validate() on cancel: this is the only
+		gate. Only the service's driver-payment rejection (or test teardown)
+		may cancel, always with a reason."""
+		action = cartera_service.authorized_action(self)
+		if action not in _CANCEL_ACTIONS:
+			frappe.throw(_("Un pago de cartera no se puede anular directamente."), frappe.PermissionError)
+		if action == cartera_service.ACTION_DRIVER_REJECTION and self.source != cartera_service.PAYMENT_SOURCE_DRIVER:
+			frappe.throw(_("Solo el pago reportado por el conductor se puede rechazar."), frappe.PermissionError)
+		self.cancellation_reason = cartera_service.clean_text(
+			self.cancellation_reason,
+			_("Motivo de anulación"),
+			cartera_service.REASON_MAX_LENGTH,
+			min_length=cartera_service.REASON_MIN_LENGTH,
+			required=True,
+		)
+
+	def before_update_after_submit(self):
+		frappe.throw(_("Un pago de cartera registrado no se puede modificar."), frappe.PermissionError)
 
 	def on_cancel(self):
 		cartera_service.recompute_obligation(self.cartera_obligacion)

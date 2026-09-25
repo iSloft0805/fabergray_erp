@@ -28,6 +28,9 @@
   "section_break_status",
   "status",
   "payment_verification",
+  "payment_verified_by",
+  "payment_verified_on",
+  "payment_rejection_reason",
   "column_break_credit",
   "credit_days",
   "due_date",
@@ -190,9 +193,33 @@
    "fieldname": "payment_verification",
    "fieldtype": "Select",
    "label": "Verificación del pago",
-   "options": "\nSin confirmar\nConfirmado",
+   "options": "\nSin confirmar\nConfirmado\nRechazado",
    "read_only": 1,
-   "description": "Pago REPORTADO por el conductor: 'Sin confirmar' hasta que Cartera lo confirme."
+   "description": "Pago REPORTADO por el conductor: 'Sin confirmar' hasta que Cartera lo confirme o lo rechace (27.3). Vacío = No aplica."
+  },
+  {
+   "fieldname": "payment_verified_by",
+   "fieldtype": "Link",
+   "label": "Verificado por",
+   "options": "User",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Quién confirmó o rechazó el pago reportado por el conductor (servidor)."
+  },
+  {
+   "fieldname": "payment_verified_on",
+   "fieldtype": "Datetime",
+   "label": "Verificado el",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "payment_rejection_reason",
+   "fieldtype": "Small Text",
+   "label": "Motivo del rechazo",
+   "read_only": 1,
+   "no_copy": 1,
+   "depends_on": "eval:doc.payment_verification=='Rechazado'"
   },
   {
    "fieldname": "column_break_credit",
@@ -297,7 +324,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-24 14:00:00.000000",
+ "modified": "2026-09-25 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Fabrigray ERP",
  "name": "Cartera Obligacion",
@@ -307,8 +334,6 @@
   {
    "role": "System Manager",
    "read": 1,
-   "write": 1,
-   "create": 1,
    "report": 1,
    "export": 1,
    "print": 1,
@@ -318,7 +343,6 @@
   {
    "role": "Cartera",
    "read": 1,
-   "write": 1,
    "report": 1,
    "export": 1,
    "print": 1

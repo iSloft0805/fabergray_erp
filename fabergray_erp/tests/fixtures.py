@@ -453,6 +453,13 @@ class TestWorld:
 				continue
 			doc = frappe.get_doc(doctype, name)
 			if doc.meta.is_submittable and doc.docstatus == 1:
+				if doctype == "Cartera Pago":
+					# Fase 27.3: Cartera Pago refuses any direct cancel (even
+					# Administrator); teardown uses the service's explicit,
+					# test-only authorization.
+					from fabergray_erp import cartera_service
+
+					cartera_service.authorize_teardown(doc)
 				doc.cancel()
 			if doctype == "Warehouse":
 				self._purge_stock_ledger_for_warehouse(name)

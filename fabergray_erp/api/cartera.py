@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
-"""api/cartera.py -- Page Cartera (Fase 27.1 foundation + 27.2 read API).
+"""api/cartera.py -- Page Cartera (27.1 foundation, 27.2 read API, 27.3
+cobros + validación del pago del conductor).
 
-Interactive API of the Cartera Page. 27.2 is READ-ONLY: the only write is
-the reconciler trigger that already existed in 27.1
-(sync_missing_obligations). No endpoint here registers, confirms or
-rejects a payment, and none creates Payment Entry/Sales Invoice/Journal
-Entry/GL Entry -- those arrive with the economic flow of 27.3.
-
-The derivation/creation logic of obligations lives in fabergray_erp/
-cartera_service.py (a system service); this module never bypasses
-permissions on its own and never changes an economic value.
+Writes (27.3): register_payment (REGISTRAR COBRO), confirm_driver_payment,
+reject_driver_payment -- plus the 27.1 reconciler trigger
+(sync_missing_obligations). Each one checks access here and then delegates
+to fabergray_erp/cartera_service.py, the ONLY writer of Cartera Pago and of
+the verification of Cartera Obligacion (private service token; Desk and
+frappe.client are refused by the controllers). None creates Payment
+Entry/Sales Invoice/Journal Entry/GL Entry: Cartera is operational, every
+payment stays "Sin contabilizar". Every write runs inside a bounded retry
+on deadlock (api.recorridos._retrying_on_deadlock, 3 attempts) and answers
+with the refreshed detail and KPIs, so the Page never reloads.
 
 Access (every endpoint): logged in + role Cartera or System Manager +
 read permission on Cartera Obligacion + the site's company, resolved
@@ -43,9 +45,10 @@ the card/detail badges -- see _BUCKET_SQL and _bucket()):
 POR CONFIRMAR is one population (POR_CONFIRMAR_SQL), shared by the KPI, the
 chip and each row's flag.
 
-Known debt, deliberately left for later phases (Fase 27.2 closure):
-- a manual Cartera payment's own proof is only flagged ("Comprobante
-  adjunto"), not viewable -- arrives with Registrar Cobro (27.3);
+Known debt, deliberately left for later phases:
+- anulación de cobros manuales (Cartera source): no endpoint, no cancel
+  path -- out of 27.3;
+- resolving the amount of a "Sin valor calculable" obligation: out of 27.3;
 - role Cartera is not in user_hooks.OPERATIONAL_ROLES (no "Fabrigray
   Operativo" module profile), same as Recorrido -- to be evaluated;
 - extremely long amounts (14+ chars) shrink their font instead of wrapping
@@ -63,6 +66,7 @@ from frappe.utils import cint, flt, get_fullname, getdate, nowdate
 from erpnext import get_default_company
 
 from fabergray_erp import cartera_service
+from fabergray_erp.api import recorridos as _recorridos
 from fabergray_erp.api.bodega import _require_login
 from fabergray_erp.permission_conditions import _allowed_companies
 
@@ -288,7 +292,10 @@ def get_dashboard():
 	  per obligation, for the full value), so nothing is counted twice;
 	  confirmed and manual Cartera payments never enter it."""
 	_require_cartera_access()
-	company = _company()
+	return _dashboard_payload(_company())
+
+
+def _dashboard_payload(company):
 	today = _today()
 	month_start = today.replace(day=1)
 	month_end = today.replace(day=calendar.monthrange(today.year, today.month)[1])
@@ -427,14 +434,38 @@ def get_obligation_detail(obligation_name):
 	Read-only: nothing here can change a value."""
 	_require_cartera_access()
 	company = _company()
-	today = _today()
-	doc = _load_obligation(obligation_name, company)
+	return _detail_payload(_load_obligation(obligation_name, company))
 
+
+def _detail_payload(doc):
+	today = _today()
 	row = doc.as_dict()
 	row["por_confirmar"] = _is_por_confirmar(doc.name)
 	data = _serialize_obligation(row, today)
+	has_active_driver_payment = bool(
+		frappe.db.exists(
+			cartera_service.PAYMENT_DOCTYPE,
+			{"cartera_obligacion": doc.name, "docstatus": 1, "source": cartera_service.PAYMENT_SOURCE_DRIVER},
+		)
+	)
+	unresolved_report = (
+		doc.payment_verification == cartera_service.VERIFICATION_UNCONFIRMED
+		and doc.driver_payment_status == cartera_service.DRIVER_PAID
+	)
 	data.update(
 		{
+			"today": str(today),
+			"payment_verified_by": doc.payment_verified_by or None,
+			"payment_verified_by_name": get_fullname(doc.payment_verified_by) if doc.payment_verified_by else None,
+			"payment_verified_on": _datetime_str(doc.payment_verified_on),
+			"payment_rejection_reason": doc.payment_rejection_reason or None,
+			# Action availability, decided HERE (the UI only shows/hides;
+			# every endpoint re-checks under lock).
+			"can_register_payment": cartera_service.collectable_error(doc) is None,
+			"can_confirm_driver_payment": bool(data["por_confirmar"]),
+			"can_reject_driver_report": unresolved_report,
+			"driver_report_has_payment": has_active_driver_payment,
+
 			"customer_commercial_name": frappe.db.get_value("Customer", doc.customer, "access_nombre_comercial")
 			or None,
 			"paid_on": _date_str(doc.paid_on),
@@ -486,6 +517,9 @@ def _payment_history(obligation):
 			"recorded_on",
 			"docstatus",
 			"payment_proof",
+			"cancellation_reason",
+			"modified",
+			"modified_by",
 		],
 		order_by="payment_date asc, creation asc",
 	)
@@ -507,8 +541,18 @@ def _payment_history(obligation):
 				"recorded_by_name": get_fullname(row.recorded_by) if row.recorded_by else None,
 				"recorded_on": _datetime_str(row.recorded_on),
 				"cancelled": row.docstatus == 2,
+				# A cancelled payment can never be modified again, so its
+				# modified/modified_by ARE who/when it was annulled (27.3).
+				"cancellation_reason": row.cancellation_reason if row.docstatus == 2 else None,
+				"cancelled_by_name": get_fullname(row.modified_by) if row.docstatus == 2 and row.modified_by else None,
+				"cancelled_on": _datetime_str(row.modified) if row.docstatus == 2 else None,
 				"has_payment_proof": bool(row.payment_proof) or (is_driver and bool(obligation.driver_payment_proof)),
 				"proof_is_driver_proof": is_driver and bool(obligation.driver_payment_proof),
+				# "payment" -> get_payment_proof(name); "driver" ->
+				# get_driver_payment_proof(obligation); None -> no proof.
+				"proof_kind": "driver"
+				if is_driver and obligation.driver_payment_proof
+				else ("payment" if row.payment_proof and not is_driver else None),
 			}
 		)
 	return history
@@ -536,32 +580,66 @@ def get_driver_payment_proof(obligation_name):
 	if not stop_proof or stop_proof != doc.driver_payment_proof:
 		frappe.throw(_("El comprobante del conductor no coincide con la entrega."), frappe.PermissionError)
 
+	content_type, data = _read_private_image("Recorrido Parada", doc.recorrido_parada, doc.driver_payment_proof)
+	return {"obligation": doc.name, "content_type": content_type, "data": data}
+
+
+@frappe.whitelist()
+def get_payment_proof(payment_name):
+	"""The proof of ONE Cartera payment (source Cartera), as base64 image
+	data. Same rules as get_driver_payment_proof(): the caller only names
+	the payment; its obligation must be readable and of the resolved
+	company, and the File must be exactly the private File attached to
+	Cartera Pago/<payment>/payment_proof with the URL the payment stores.
+	A driver payment's proof is served by get_driver_payment_proof()."""
+	_require_cartera_access()
+	company = _company()
+	if not payment_name or not isinstance(payment_name, str):
+		frappe.throw(_("Pago de cartera inválido."), frappe.ValidationError)
+	if not frappe.db.exists(cartera_service.PAYMENT_DOCTYPE, payment_name):
+		frappe.throw(_("El pago de cartera no existe."), frappe.DoesNotExistError)
+	payment = frappe.get_doc(cartera_service.PAYMENT_DOCTYPE, payment_name)
+	payment.check_permission("read")
+	_load_obligation(payment.cartera_obligacion, company)
+	if payment.company != company:
+		frappe.throw(_("No tienes acceso a documentos de otra empresa."), frappe.PermissionError)
+	if payment.source != cartera_service.PAYMENT_SOURCE_CARTERA or not payment.payment_proof:
+		frappe.throw(_("Este pago no tiene comprobante."), frappe.DoesNotExistError)
+
+	content_type, data = _read_private_image(cartera_service.PAYMENT_DOCTYPE, payment.name, payment.payment_proof)
+	return {"payment": payment.name, "content_type": content_type, "data": data}
+
+
+def _read_private_image(attached_to_doctype, attached_to_name, file_url):
+	"""(content_type, base64) of the ONE private File attached to exactly
+	that document in field payment_proof with exactly that URL -- read in
+	system context only after the caller's own checks. Never a URL/path
+	from the client."""
 	files = frappe.get_all(
 		"File",
 		filters={
-			"attached_to_doctype": "Recorrido Parada",
-			"attached_to_name": doc.recorrido_parada,
+			"attached_to_doctype": attached_to_doctype,
+			"attached_to_name": attached_to_name,
 			"attached_to_field": "payment_proof",
-			"file_url": doc.driver_payment_proof,
+			"file_url": file_url,
 		},
 		fields=["name", "is_private"],
 		limit_page_length=2,
 	)
 	if len(files) != 1 or not cint(files[0].is_private):
-		frappe.throw(_("El comprobante del conductor no está disponible."), frappe.PermissionError)
+		frappe.throw(_("El comprobante no está disponible."), frappe.PermissionError)
 
-	content = frappe.get_doc("File", files[0].name).get_content()
-	if isinstance(content, str):
-		content = content.encode()
+	# encodings=(): raw bytes. The default get_content() tries to DECODE the
+	# file as utf-8/windows-1250/windows-1252 and a JPEG that happens to
+	# decode came back as str -- re-encoding it corrupted the image (latent
+	# 27.2 bug, fixed in 27.3).
+	content = frappe.get_doc("File", files[0].name).get_content(encodings=())
+	if not isinstance(content, bytes):
+		frappe.throw(_("El comprobante no es una imagen válida."), frappe.ValidationError)
 	content_type = _image_content_type(content)
 	if not content_type or len(content) > MAX_PROOF_BYTES:
-		frappe.throw(_("El comprobante del conductor no es una imagen válida."), frappe.ValidationError)
-
-	return {
-		"obligation": doc.name,
-		"content_type": content_type,
-		"data": base64.b64encode(content).decode("ascii"),
-	}
+		frappe.throw(_("El comprobante no es una imagen válida."), frappe.ValidationError)
+	return content_type, base64.b64encode(content).decode("ascii")
 
 
 def _image_content_type(content):
@@ -596,3 +674,94 @@ def sync_missing_obligations():
 	result = cartera_service.sync_missing_obligations(company=company)
 	result["already_existing"] = already_existing
 	return result
+
+
+# ---------------------------------------------------------------------------
+# 27.3 -- Writes
+# ---------------------------------------------------------------------------
+
+
+def _action_response(obligation_name, company, result):
+	"""What the Page needs to refresh without a reload: the obligation's
+	detail and the company KPIs (the list is refreshed once, on return)."""
+	return {
+		"result": result,
+		"detail": _detail_payload(frappe.get_doc(cartera_service.OBLIGATION_DOCTYPE, obligation_name)),
+		"dashboard": _dashboard_payload(company),
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def register_payment(
+	obligation_name,
+	amount=None,
+	payment_date=None,
+	payment_method=None,
+	reference=None,
+	notes=None,
+	client_request_id=None,
+):
+	"""REGISTRAR COBRO (multipart: optional file "payment_proof").
+
+	The client sends only these fields and the image; company, customer,
+	currency, source (Cartera), recorded_by/on, accounting_status and every
+	balance are decided by the server. The proof is read ONCE and
+	validated/re-encoded (26.3 pipeline: real image bytes JPEG/PNG/WEBP,
+	EXIF orientation, max side 1600, JPEG without metadata, 8 MB input)
+	before any lock and outside the retried block."""
+	_require_cartera_access()
+	company = _company()
+	proof = _recorridos._read_uploaded_file("payment_proof", _recorridos.DELIVERY_PHOTO_MAX_BYTES)
+	proof_jpeg = _recorridos._normalize_payment_proof(proof) if proof else None
+	_load_obligation(obligation_name, company)
+
+	result = _register_payment_tx(
+		obligation_name, amount, payment_date, payment_method, reference, notes, client_request_id, proof_jpeg
+	)
+	return _action_response(obligation_name, company, result)
+
+
+@_recorridos._retrying_on_deadlock
+def _register_payment_tx(obligation_name, amount, payment_date, payment_method, reference, notes, client_request_id, proof_jpeg):
+	return cartera_service.register_cartera_payment(
+		obligation_name,
+		amount,
+		payment_date,
+		payment_method,
+		reference=reference,
+		notes=notes,
+		client_request_id=client_request_id,
+		proof_content=proof_jpeg,
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+def confirm_driver_payment(obligation_name):
+	"""CONFIRMAR PAGO del conductor (only the verification changes)."""
+	_require_cartera_access()
+	company = _company()
+	_load_obligation(obligation_name, company)
+	result = _confirm_tx(obligation_name)
+	return _action_response(obligation_name, company, result)
+
+
+@_recorridos._retrying_on_deadlock
+def _confirm_tx(obligation_name):
+	return cartera_service.confirm_driver_payment(obligation_name)
+
+
+@frappe.whitelist(methods=["POST"])
+def reject_driver_payment(obligation_name, reason=None):
+	"""RECHAZAR PAGO / REPORTE del conductor (motivo obligatorio). With a
+	driver payment it is cancelled (docstatus 2, kept as history) and the
+	debt comes back; without one only the report is resolved."""
+	_require_cartera_access()
+	company = _company()
+	_load_obligation(obligation_name, company)
+	result = _reject_tx(obligation_name, reason)
+	return _action_response(obligation_name, company, result)
+
+
+@_recorridos._retrying_on_deadlock
+def _reject_tx(obligation_name, reason):
+	return cartera_service.reject_driver_payment(obligation_name, reason)

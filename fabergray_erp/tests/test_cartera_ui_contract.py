@@ -190,14 +190,39 @@ class TestCarteraUIContract(IntegrationTestCase):
 		self.assertIn("this.list.has_more", block)
 		self.assertIn("PAGE_LENGTH = 20", self.code)
 
-	def test_no_economic_actions_in_27_2(self):
-		upper = self.code.upper()  # comments may say what is NOT here yet
-		for forbidden in ("REGISTRAR COBRO", "CONFIRMAR PAGO", "RECHAZAR", "NOTA CRÉDITO", "PAYMENT ENTRY", "SALES INVOICE"):
+	def test_only_the_27_3_economic_actions_exist(self):
+		"""27.3: REGISTRAR COBRO, CONFIRMAR/RECHAZAR del conductor y SINCRONIZAR
+		-- nothing that edits/deletes/annuls a payment, edits debt or due
+		date, or touches accounting."""
+		upper = self.code.upper()  # comments may say what is NOT here
+		for forbidden in (
+			"ANULAR COBRO",
+			"EDITAR PAGO",
+			"ELIMINAR PAGO",
+			"NOTA CRÉDITO",
+			"PAYMENT ENTRY",
+			"SALES INVOICE",
+			"JOURNAL ENTRY",
+			"PAGO CONTABILIZADO",
+			"CAMBIAR VENCIMIENTO",
+		):
 			self.assertNotIn(forbidden, upper)
-		methods = set(re.findall(r'this\.call\(\s*"([A-Za-z0-9_]+)"', self.js))
+		self.assertIn("COBRO REGISTRADO EN CARTERA", self.js)
+		methods = set(re.findall(r'this\.(?:call|run_action|show_proof)\(\s*"([A-Za-z0-9_]+)"', self.js))
+		methods.update(re.findall(r'"fabergray_erp\.api\.cartera\.([A-Za-z0-9_]+)"', self.js))
 		self.assertEqual(
 			methods,
-			{"get_dashboard", "get_obligations", "get_obligation_detail", "get_driver_payment_proof", "sync_missing_obligations"},
+			{
+				"get_dashboard",
+				"get_obligations",
+				"get_obligation_detail",
+				"get_driver_payment_proof",
+				"get_payment_proof",
+				"sync_missing_obligations",
+				"register_payment",
+				"confirm_driver_payment",
+				"reject_driver_payment",
+			},
 		)
 		self.assertNotIn("frappe.set_route", self.code)  # detail stays inside the Page
 		self.assertNotIn("frappe.db.", self.code)
@@ -467,7 +492,7 @@ class TestCarteraUIContract(IntegrationTestCase):
 		html = self._render_detail(
 			self._detail(status="Por Validar", bucket="por_validar", payment_verification="Sin confirmar", driver_payment_status="Pagado", has_delivery_issues=1, delivery_issues="Faltó 1 galón")
 		)
-		self.assertIn("PAGO REPORTADO POR CONDUCTOR SIN COMPROBANTE", html)
+		self.assertIn("PAGO REPORTADO SIN COMPROBANTE", html)
 		self.assertNotIn("VER COMPROBANTE", html)
 		self.assertNotIn("PENDIENTE DE CONFIRMACIÓN", html)
 		self.assertNotIn("SIN CONFIRMAR", html)
@@ -573,9 +598,12 @@ class TestCarteraUIContract(IntegrationTestCase):
 			"]));"
 		)
 		self.assertEqual(out, ["data:image/jpeg;base64,/9j/4AAQSkZJRg==", "data:image/png;base64,iVBORw0KGgo=", None, None, None, None, None])
-		show = self.code[self.code.index("show_driver_proof(obligation_name, $btn) {") :]
-		self.assertIn('this.call("get_driver_payment_proof", { obligation_name: obligation_name })', show)
+		show = self.code[self.code.index("show_proof(method, args, title, $btn) {") :]
+		self.assertIn("this.call(method, args)", show)
 		self.assertIn('$img.attr("src", src)', show)
+		# Only the two controlled proof endpoints feed it, by name/obligation.
+		self.assertIn('this.show_proof("get_driver_payment_proof", { obligation_name: d.name }', self.code)
+		self.assertIn('this.show_proof("get_payment_proof", { payment_name: $btn.attr("data-payment") }', self.code)
 		self.assertNotIn("/private/files", self.js)
 		self.assertNotIn("file_url", self.code)
 		self.assertNotIn("window.open", self.code)

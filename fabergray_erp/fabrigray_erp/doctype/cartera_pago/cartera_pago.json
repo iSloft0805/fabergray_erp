@@ -25,6 +25,7 @@
   "recorded_by",
   "recorded_on",
   "client_request_id",
+  "cancellation_reason",
   "section_break_accounting",
   "accounting_status",
   "payment_entry",
@@ -38,7 +39,8 @@
    "options": "Cartera Obligacion",
    "reqd": 1,
    "in_list_view": 1,
-   "in_standard_filter": 1
+   "in_standard_filter": 1,
+   "search_index": 1
   },
   {
    "fieldname": "company",
@@ -147,6 +149,15 @@
    "description": "Idempotencia: un doble envío del mismo cobro nunca crea dos pagos."
   },
   {
+   "fieldname": "cancellation_reason",
+   "fieldtype": "Small Text",
+   "label": "Motivo de anulación",
+   "read_only": 1,
+   "no_copy": 1,
+   "depends_on": "eval:doc.docstatus==2",
+   "description": "Escrito por el servidor al anular (27.3: rechazo del pago del conductor). Quién/cuándo: modified_by/modified del pago anulado."
+  },
+  {
    "fieldname": "section_break_accounting",
    "fieldtype": "Section Break",
    "label": "Contabilidad (futuro)",
@@ -180,7 +191,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-24 14:00:00.000000",
+ "modified": "2026-09-25 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Fabrigray ERP",
  "name": "Cartera Pago",
@@ -190,10 +201,6 @@
   {
    "role": "System Manager",
    "read": 1,
-   "write": 1,
-   "create": 1,
-   "submit": 1,
-   "cancel": 1,
    "report": 1,
    "export": 1,
    "print": 1,
@@ -203,9 +210,6 @@
   {
    "role": "Cartera",
    "read": 1,
-   "write": 1,
-   "create": 1,
-   "submit": 1,
    "report": 1,
    "export": 1,
    "print": 1

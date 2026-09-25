@@ -27,8 +27,12 @@ class CarteraObligacion(Document):
 	  they can only follow the payments, never be typed in.
 	- delete: never. History must not disappear (on_trash).
 
-	payment_verification is immutable in 27.1; confirming a driver-reported
-	payment arrives with the Cartera endpoints (27.2)."""
+	27.3 -- payment_verification and its audit (payment_verified_by/_on,
+	payment_rejection_reason) are immutable except for ONE transition,
+	written only by cartera_service (private token): "Sin confirmar" ->
+	"Confirmado" or "Rechazado", with who/when (and the reason for a
+	rejection). Every other path -- Desk, frappe.client, Administrator --
+	is refused. Balances keep following the payments."""
 
 	def validate(self):
 		if self.is_new():
@@ -42,9 +46,19 @@ class CarteraObligacion(Document):
 
 		changed = [
 			fieldname
-			for fieldname in ("recorrido_parada", "sales_invoice", *cartera_service.DERIVED_FIELDS)
+			for fieldname in (
+				"recorrido_parada",
+				"sales_invoice",
+				*cartera_service.DERIVED_FIELDS,
+				*cartera_service.VERIFICATION_FIELDS,
+			)
 			if _changed(self, before, fieldname)
 		]
+		if any(f in cartera_service.VERIFICATION_FIELDS for f in changed) and (
+			cartera_service.authorized_action(self) == cartera_service.ACTION_VERIFICATION
+		):
+			self._validate_verification_transition(before)
+			changed = [f for f in changed if f not in cartera_service.VERIFICATION_FIELDS]
 		if changed:
 			frappe.throw(
 				_("Los datos de origen de la obligación no se pueden modificar ({0}).").format(", ".join(changed)),
@@ -61,6 +75,23 @@ class CarteraObligacion(Document):
 				),
 				frappe.ValidationError,
 			)
+
+	def _validate_verification_transition(self, before):
+		new = self.payment_verification
+		if before.payment_verification != cartera_service.VERIFICATION_UNCONFIRMED or new not in (
+			cartera_service.VERIFICATION_CONFIRMED,
+			cartera_service.VERIFICATION_REJECTED,
+		):
+			frappe.throw(_("Transición de verificación inválida."), frappe.ValidationError)
+		if self.driver_payment_status != cartera_service.DRIVER_PAID:
+			frappe.throw(_("Solo un pago reportado por el conductor se verifica."), frappe.ValidationError)
+		if not self.payment_verified_by or not self.payment_verified_on:
+			frappe.throw(_("La verificación debe registrar quién y cuándo."), frappe.ValidationError)
+		reason = (self.payment_rejection_reason or "").strip()
+		if new == cartera_service.VERIFICATION_REJECTED and len(reason) < cartera_service.REASON_MIN_LENGTH:
+			frappe.throw(_("El rechazo requiere un motivo."), frappe.ValidationError)
+		if new == cartera_service.VERIFICATION_CONFIRMED and reason:
+			frappe.throw(_("Una confirmación no lleva motivo de rechazo."), frappe.ValidationError)
 
 	def after_insert(self):
 		# Decision V2: driver reported "Pagado" with a proof -> a Conductor

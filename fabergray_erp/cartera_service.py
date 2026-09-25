@@ -40,9 +40,12 @@ Entry, Sales Invoice, Journal Entry or GL Entry, or touches Sales Order,
 Pick List, Customer or stock.
 """
 
+import uuid
+from decimal import Decimal, InvalidOperation
+
 import frappe
 from frappe import _
-from frappe.utils import add_days, cint, flt, getdate
+from frappe.utils import add_days, cint, flt, getdate, now_datetime, nowdate, strip_html
 
 from fabergray_erp.api import facturacion
 
@@ -55,6 +58,17 @@ STATUS_PAGADO = "Pagado"
 STATUS_ANULADA = "Anulada"
 
 VERIFICATION_UNCONFIRMED = "Sin confirmar"
+VERIFICATION_CONFIRMED = "Confirmado"
+VERIFICATION_REJECTED = "Rechazado"
+
+#: Audit of the Cartera decision on a driver-reported payment (27.3). Only
+#: the verification transition of this module may write them.
+VERIFICATION_FIELDS = (
+	"payment_verification",
+	"payment_verified_by",
+	"payment_verified_on",
+	"payment_rejection_reason",
+)
 
 AMOUNT_SOURCE_INVOICE = "Factura comercial"
 AMOUNT_SOURCE_UNAVAILABLE = "Sin valor calculable"
@@ -64,6 +78,20 @@ DRIVER_CREDIT = "Crédito"
 
 PAYMENT_SOURCE_CARTERA = "Cartera"
 PAYMENT_SOURCE_DRIVER = "Conductor"
+
+PAYMENT_METHODS = ("Transferencia", "Efectivo", "Consignación", "Otro")
+
+REFERENCE_MAX_LENGTH = 140
+NOTES_MAX_LENGTH = 500
+REASON_MIN_LENGTH = 5
+REASON_MAX_LENGTH = 500
+
+#: client_request_id namespaces: the driver's payment owns
+#: "conductor:<parada>" (reserved forever, even once rejected); a Cartera
+#: payment is always stored as "cartera:<uuid>", so a client can never take
+#: a driver key.
+DRIVER_REQUEST_PREFIX = "conductor:"
+CARTERA_REQUEST_PREFIX = "cartera:"
 
 #: Approved decision: every "Crédito" delivery gets 30 days for now. Stored
 #: on each obligation (credit_days), so a future per-customer term never
@@ -105,6 +133,55 @@ _SAVEPOINT = "fg_cartera_obligation"
 
 class ObligationSourceError(frappe.ValidationError):
 	pass
+
+
+class CarteraRequestConflictError(frappe.ValidationError):
+	"""Same client_request_id, different data."""
+
+
+class CarteraStateError(frappe.ValidationError):
+	"""The obligation is not in a state that allows this operation."""
+
+
+# ---------------------------------------------------------------------------
+# Write authorization (27.3) -- H2/H3/H5
+# ---------------------------------------------------------------------------
+#
+# Every economic write on Cartera Pago (insert, submit, cancel) and every
+# verification transition on Cartera Obligacion requires this private token
+# on the document's flags. It is a Python object: it cannot be produced by
+# JSON, so Desk, frappe.client, REST and a bare doc.insert()/submit()/
+# cancel() -- Administrator included -- are refused by the controllers.
+# DocPerms are read-only on top of this; they are not the only barrier.
+
+_SERVICE_TOKEN = object()
+
+ACTION_CARTERA_PAYMENT = "cartera_payment"
+ACTION_DRIVER_PAYMENT = "driver_payment"
+ACTION_DRIVER_REJECTION = "driver_rejection"
+ACTION_VERIFICATION = "verification"
+ACTION_TEARDOWN = "test_teardown"
+
+
+def _authorize(doc, action):
+	doc.flags.cartera_service_token = _SERVICE_TOKEN
+	doc.flags.cartera_service_action = action
+	return doc
+
+
+def authorized_action(doc):
+	"""The service action a document was authorized for, or None."""
+	if doc.flags.get("cartera_service_token") is _SERVICE_TOKEN:
+		return doc.flags.get("cartera_service_action")
+	return None
+
+
+def authorize_teardown(doc):
+	"""TEST TEARDOWN ONLY (tests/fixtures.py TestWorld.cleanup and the Cartera
+	test classes): lets a fixture payment be cancelled so it can be deleted.
+	Never called by application code."""
+	doc.cancellation_reason = doc.cancellation_reason or "Limpieza de pruebas"
+	return _authorize(doc, ACTION_TEARDOWN)
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +267,10 @@ def derive_obligation_values(recorrido_parada):
 		# Decision V2: a payment REPORTED by the driver stays "Sin
 		# confirmar" until Cartera confirms it (Fase 27.2).
 		"payment_verification": VERIFICATION_UNCONFIRMED if stop.payment_status == DRIVER_PAID else None,
+		# 27.3 -- a new obligation has never been verified.
+		"payment_verified_by": None,
+		"payment_verified_on": None,
+		"payment_rejection_reason": None,
 	}
 
 
@@ -206,13 +287,35 @@ def _commercial_name(sales_order):
 # ---------------------------------------------------------------------------
 
 
+def lock_obligation(obligation_name):
+	"""Lock order, global and never inverted: 1. the Cartera Obligacion row
+	(this), 2. the Cartera Pago rows of THAT obligation (submitted_payments/
+	_active_driver_payments, both filtered by cartera_obligacion, indexed)."""
+	return frappe.db.get_value(OBLIGATION_DOCTYPE, obligation_name, "name", for_update=True)
+
+
+def locked_obligation(obligation_name):
+	"""lock_obligation() + the document loaded with a LOCKING read. Under
+	REPEATABLE READ a plain get_doc() after the lock may still return the
+	snapshot taken by an earlier query of this transaction (stale
+	verification/balances from before a concurrent write committed); a
+	FOR UPDATE load always returns the latest committed row."""
+	lock_obligation(obligation_name)
+	return frappe.get_doc(OBLIGATION_DOCTYPE, obligation_name, for_update=True)
+
+
 def submitted_payments(obligation_name, exclude=None, for_update=False):
 	"""(total, last_payment_date) of the SUBMITTED payments of an obligation.
 	for_update=True turns it into a locking read, which always returns the
 	latest committed rows (a plain read inside a REPEATABLE READ transaction
 	may return a stale snapshot -- see api.recorridos.
 	_locked_assigned_pick_lists()). A narrow parameterized query: frappe.
-	get_list() has no FOR UPDATE."""
+	get_list() has no FOR UPDATE.
+
+	27.3 (H1): `cartera_obligacion` has its own index (search_index), so the
+	locking read touches only THIS obligation's payment rows -- never a scan
+	that would lock every other obligation's payments. Callers hold the
+	obligation's row lock first (lock_obligation())."""
 	if not obligation_name:
 		return 0.0, None
 	params = [obligation_name]
@@ -276,8 +379,7 @@ def recompute_obligation(obligation_name):
 	already-validated, submitted Cartera Pago rows -- no user input is
 	written. The caller (a payment's on_submit/on_cancel) already passed its
 	own permission checks."""
-	frappe.db.get_value(OBLIGATION_DOCTYPE, obligation_name, "name", for_update=True)
-	doc = frappe.get_doc(OBLIGATION_DOCTYPE, obligation_name)
+	doc = locked_obligation(obligation_name)
 	paid, last = submitted_payments(obligation_name, for_update=True)
 	doc.update(expected_balances(doc, paid, last))
 	doc.save(ignore_permissions=True)
@@ -308,7 +410,7 @@ def create_driver_reported_payment(obligation):
 	):
 		return None
 
-	request_id = f"conductor:{obligation.recorrido_parada}"
+	request_id = f"{DRIVER_REQUEST_PREFIX}{obligation.recorrido_parada}"
 	existing = frappe.db.get_value(PAYMENT_DOCTYPE, {"client_request_id": request_id}, "name")
 	if existing:
 		return existing
@@ -324,6 +426,7 @@ def create_driver_reported_payment(obligation):
 			"client_request_id": request_id,
 		}
 	)
+	_authorize(payment, ACTION_DRIVER_PAYMENT)
 	payment.insert(ignore_permissions=True)
 	payment.submit()
 	return payment.name
@@ -448,3 +551,343 @@ def _discard_messages_since(count):
 	log = frappe.local.message_log
 	if log is not None and len(log) > count:
 		del log[count:]
+
+
+# ---------------------------------------------------------------------------
+# 27.3 -- Cobros y validación del pago del conductor
+# ---------------------------------------------------------------------------
+#
+# All three operations follow the same shape: normalize input (no lock yet),
+# lock the obligation, re-read it, check its state, then write ONLY through
+# the controllers (authorized with the private token) so every invariant is
+# re-checked. Balances are never touched here: they follow the submitted
+# payments through recompute_obligation()/expected_balances(). Callers
+# (api/cartera.py) wrap each call in a bounded retry on deadlock.
+
+
+def normalize_amount(value):
+	"""A positive amount with at most 2 decimals, parsed exactly (Decimal
+	from the text) -- more precision is REJECTED, never rounded."""
+	if value is None or isinstance(value, bool) or str(value).strip() == "":
+		frappe.throw(_("El valor recibido es obligatorio."), frappe.ValidationError)
+	try:
+		amount = Decimal(str(value).strip())
+	except (InvalidOperation, ValueError):
+		frappe.throw(_("El valor recibido no es un número válido."), frappe.ValidationError)
+	if not amount.is_finite():
+		frappe.throw(_("El valor recibido no es un número válido."), frappe.ValidationError)
+	if amount <= 0:
+		frappe.throw(_("El valor recibido debe ser mayor que cero."), frappe.ValidationError)
+	if amount.normalize().as_tuple().exponent < -2:
+		frappe.throw(_("El valor recibido admite como máximo 2 decimales."), frappe.ValidationError)
+	return float(amount)
+
+
+def normalize_payment_date(value):
+	"""A real date, not after the site's today. It may be earlier than the
+	delivery (decision 5: advance payments)."""
+	if not value:
+		frappe.throw(_("La fecha del pago es obligatoria."), frappe.ValidationError)
+	try:
+		payment_date = getdate(value)
+	except Exception:
+		payment_date = None
+	if not payment_date:
+		frappe.throw(_("La fecha del pago no es válida."), frappe.ValidationError)
+	if payment_date > getdate(nowdate()):
+		frappe.throw(_("La fecha del pago no puede estar en el futuro."), frappe.ValidationError)
+	return payment_date
+
+
+def normalize_payment_method(value):
+	if value not in PAYMENT_METHODS:
+		frappe.throw(_("Selecciona el medio de pago."), frappe.ValidationError)
+	return value
+
+
+def clean_text(value, label, max_length, min_length=0, required=False):
+	"""Free text: HTML stripped, trimmed; too long is rejected (never cut)."""
+	text = strip_html(str(value) if value is not None else "").strip()
+	if required and not text:
+		frappe.throw(_("{0} es obligatorio.").format(label), frappe.ValidationError)
+	if text and len(text) < min_length:
+		frappe.throw(_("{0}: escribe al menos {1} caracteres.").format(label, min_length), frappe.ValidationError)
+	if len(text) > max_length:
+		frappe.throw(_("{0}: no puede superar {1} caracteres.").format(label, max_length), frappe.ValidationError)
+	return text or None
+
+
+def normalize_request_id(value):
+	"""The UI's UUID, validated, stored as "cartera:<uuid>"."""
+	try:
+		parsed = uuid.UUID(str(value or "").strip())
+	except (ValueError, AttributeError, TypeError):
+		frappe.throw(_("Identificador de solicitud inválido."), frappe.ValidationError)
+	return f"{CARTERA_REQUEST_PREFIX}{parsed}"
+
+
+def _payment_by_request_id(request_id):
+	"""Locking read on the unique client_request_id index (latest committed
+	row, never a stale snapshot)."""
+	rows = frappe.db.sql(
+		"""
+		SELECT name FROM `tabCartera Pago`
+		WHERE client_request_id = %s
+		FOR UPDATE
+		""",
+		(request_id,),
+	)
+	return rows[0][0] if rows else None
+
+
+def _active_driver_payments(obligation_name):
+	"""Submitted Conductor payments of ONE obligation, locked (lock order:
+	the obligation row is already held by the caller)."""
+	return frappe.db.sql_list(
+		"""
+		SELECT name FROM `tabCartera Pago`
+		WHERE cartera_obligacion = %s AND docstatus = 1 AND source = %s
+		ORDER BY name
+		FOR UPDATE
+		""",
+		(obligation_name, PAYMENT_SOURCE_DRIVER),
+	)
+
+
+def collectable_error(obligation, amount=None):
+	"""Why this obligation cannot take a Cartera payment now (None if it
+	can). One rule for the service, the controller and the UI flag."""
+	if obligation.status == STATUS_ANULADA:
+		return _("La obligación está anulada.")
+	if obligation.amount_source != AMOUNT_SOURCE_INVOICE:
+		return _("La obligación todavía no tiene un valor facturado definido.")
+	if obligation.payment_verification == VERIFICATION_UNCONFIRMED:
+		return _(
+			"El conductor reportó este pedido como pagado. Confirma o rechaza ese reporte antes de registrar un cobro."
+		)
+	if flt(obligation.outstanding_amount, 2) <= 0:
+		return _("La obligación no tiene saldo pendiente.")
+	if amount is not None and flt(amount, 2) > flt(obligation.outstanding_amount, 2):
+		return _("El valor recibido supera el saldo pendiente.")
+	return None
+
+
+def _payment_fingerprint(obligation, amount, payment_date, payment_method, reference, notes):
+	return (obligation, flt(amount, 2), str(getdate(payment_date)), payment_method, reference or None, notes or None)
+
+
+def register_cartera_payment(
+	obligation_name,
+	amount,
+	payment_date,
+	payment_method,
+	reference=None,
+	notes=None,
+	client_request_id=None,
+	proof_content=None,
+):
+	"""REGISTRAR COBRO -- one submitted Cartera Pago (source Cartera).
+
+	proof_content: an ALREADY normalized image (api.recorridos.
+	_normalize_payment_proof(), re-encoded JPEG) or None; it becomes a
+	private File attached to exactly this payment/field, inside this
+	transaction (Frappe's File.on_rollback removes it from disk if anything
+	later fails -- same guarantee as 26.3).
+
+	Idempotent on client_request_id: the same request (same obligation,
+	amount, date, method, reference, notes) returns the existing payment
+	with already_registered=True -- no second payment, no second File; the
+	same id with other data raises CarteraRequestConflictError."""
+	amount = normalize_amount(amount)
+	payment_date = normalize_payment_date(payment_date)
+	payment_method = normalize_payment_method(payment_method)
+	reference = clean_text(reference, _("Referencia"), REFERENCE_MAX_LENGTH)
+	notes = clean_text(notes, _("Observaciones"), NOTES_MAX_LENGTH)
+	request_id = normalize_request_id(client_request_id)
+	fingerprint = _payment_fingerprint(obligation_name, amount, payment_date, payment_method, reference, notes)
+
+	obligation = locked_obligation(obligation_name)
+
+	existing = _payment_by_request_id(request_id)
+	if existing:
+		return _idempotent_result(existing, fingerprint, obligation)
+
+	error = collectable_error(obligation, amount)
+	if error:
+		frappe.throw(error, CarteraStateError)
+	previous_outstanding = flt(obligation.outstanding_amount, 2)
+
+	payment = frappe.get_doc(
+		{
+			"doctype": PAYMENT_DOCTYPE,
+			"cartera_obligacion": obligation_name,
+			"amount": amount,
+			"payment_date": payment_date,
+			"payment_method": payment_method,
+			"reference": reference,
+			"notes": notes,
+			"source": PAYMENT_SOURCE_CARTERA,
+			"client_request_id": request_id,
+		}
+	)
+	_authorize(payment, ACTION_CARTERA_PAYMENT)
+	message_count = len(frappe.local.message_log or [])
+	frappe.db.savepoint("fg_cartera_payment")
+	try:
+		payment.insert(ignore_permissions=True)
+	except (frappe.UniqueValidationError, frappe.DuplicateEntryError):
+		# Lost a race on the unique client_request_id: the winner is the
+		# same request -> idempotent answer.
+		frappe.db.rollback(save_point="fg_cartera_payment")
+		_discard_messages_since(message_count)
+		winner = _payment_by_request_id(request_id)
+		if winner:
+			return _idempotent_result(winner, fingerprint, obligation)
+		raise
+
+	if proof_content:
+		file_doc = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": f"{payment.name}-comprobante.jpg",
+				"attached_to_doctype": PAYMENT_DOCTYPE,
+				"attached_to_name": payment.name,
+				"attached_to_field": "payment_proof",
+				"is_private": 1,
+				"content": proof_content,
+			}
+		)
+		file_doc.insert(ignore_permissions=True)
+		payment.payment_proof = file_doc.file_url
+
+	payment.submit()
+	obligation = frappe.get_doc(OBLIGATION_DOCTYPE, obligation_name, for_update=True)
+	return {
+		"payment": payment.name,
+		"already_registered": False,
+		"previous_outstanding": previous_outstanding,
+		"new_outstanding": flt(obligation.outstanding_amount, 2),
+		"is_full_payment": flt(obligation.outstanding_amount, 2) <= 0,
+	}
+
+
+def _idempotent_result(payment_name, fingerprint, obligation):
+	payment = frappe.get_doc(PAYMENT_DOCTYPE, payment_name)
+	stored = _payment_fingerprint(
+		payment.cartera_obligacion,
+		payment.amount,
+		payment.payment_date,
+		payment.payment_method,
+		payment.reference,
+		payment.notes,
+	)
+	if payment.docstatus != 1 or payment.source != PAYMENT_SOURCE_CARTERA or stored != fingerprint:
+		frappe.throw(
+			_("Esta solicitud ya fue registrada con otros datos. Abre de nuevo el formulario de cobro."),
+			CarteraRequestConflictError,
+		)
+	obligation = frappe.get_doc(OBLIGATION_DOCTYPE, obligation.name, for_update=True)
+	return {
+		"payment": payment.name,
+		"already_registered": True,
+		"previous_outstanding": None,
+		"new_outstanding": flt(obligation.outstanding_amount, 2),
+		"is_full_payment": flt(obligation.outstanding_amount, 2) <= 0,
+	}
+
+
+def _save_verification(obligation):
+	"""Persist a verification transition: balances re-derived in the same
+	save (a rejected report without money moves Por Validar -> Pendiente),
+	checked again by Cartera Obligacion.validate()."""
+	paid, last = submitted_payments(obligation.name, for_update=True)
+	obligation.update(expected_balances(obligation, paid, last))
+	_authorize(obligation, ACTION_VERIFICATION)
+	obligation.save(ignore_permissions=True)
+
+
+def confirm_driver_payment(obligation_name):
+	"""CONFIRMAR PAGO: the driver-reported payment is real. Only the
+	verification changes (who/when); no payment is created or touched and
+	the balance stays 0."""
+	obligation = locked_obligation(obligation_name)
+
+	if obligation.payment_verification == VERIFICATION_CONFIRMED:
+		return {"already_done": True}
+	if obligation.payment_verification == VERIFICATION_REJECTED:
+		frappe.throw(_("Este reporte del conductor ya fue rechazado; no se puede confirmar."), CarteraStateError)
+	if obligation.payment_verification != VERIFICATION_UNCONFIRMED or obligation.driver_payment_status != DRIVER_PAID:
+		frappe.throw(_("Esta obligación no tiene un pago del conductor por confirmar."), CarteraStateError)
+
+	driver_payments = _active_driver_payments(obligation_name)
+	if not driver_payments:
+		frappe.throw(
+			_("El conductor no registró comprobante: no hay pago que confirmar. Rechaza el reporte."),
+			CarteraStateError,
+		)
+	if len(driver_payments) != 1:
+		frappe.throw(_("La obligación tiene más de un pago del conductor activo."), CarteraStateError)
+	payment = frappe.get_doc(PAYMENT_DOCTYPE, driver_payments[0])
+	if (
+		flt(payment.amount, 2) != flt(obligation.invoice_amount, 2)
+		or flt(obligation.outstanding_amount, 2) != 0
+		or obligation.status != STATUS_PAGADO
+	):
+		frappe.throw(_("El pago del conductor no coincide con la obligación."), CarteraStateError)
+
+	obligation.payment_verification = VERIFICATION_CONFIRMED
+	obligation.payment_verified_by = frappe.session.user
+	obligation.payment_verified_on = now_datetime()
+	obligation.payment_rejection_reason = None
+	_save_verification(obligation)
+	return {"already_done": False}
+
+
+def reject_driver_payment(obligation_name, reason):
+	"""RECHAZAR: the driver's "Pagado" report is not accepted.
+
+	A. With a driver payment (Pagado + comprobante): the verification
+	   becomes Rechazado (audited), then THAT payment is cancelled through
+	   its controller (docstatus 2, cancellation_reason) and on_cancel
+	   re-derives the balance from the remaining submitted payments -> the
+	   debt is collectable again (Pendiente).
+	B. Without one (Pagado sin comprobante, Por Validar): no payment
+	   exists, so nothing is cancelled; the verification becomes Rechazado
+	   and the balance re-derivation moves the obligation to Pendiente.
+
+	The driver key "conductor:<parada>" stays taken by the cancelled
+	payment, and Cartera Pago refuses any new Conductor payment once the
+	report is Rechazado -- a rejected payment can never come back."""
+	reason = clean_text(
+		reason, _("Motivo del rechazo"), REASON_MAX_LENGTH, min_length=REASON_MIN_LENGTH, required=True
+	)
+	obligation = locked_obligation(obligation_name)
+
+	if obligation.payment_verification == VERIFICATION_REJECTED:
+		return {"already_done": True, "cancelled_payment": None}
+	if obligation.payment_verification == VERIFICATION_CONFIRMED:
+		frappe.throw(_("Este pago del conductor ya fue confirmado; no se puede rechazar."), CarteraStateError)
+	if obligation.payment_verification != VERIFICATION_UNCONFIRMED or obligation.driver_payment_status != DRIVER_PAID:
+		frappe.throw(_("Esta obligación no tiene un reporte de pago del conductor por resolver."), CarteraStateError)
+
+	driver_payments = _active_driver_payments(obligation_name)
+	if len(driver_payments) > 1:
+		frappe.throw(_("La obligación tiene más de un pago del conductor activo."), CarteraStateError)
+
+	obligation.payment_verification = VERIFICATION_REJECTED
+	obligation.payment_verified_by = frappe.session.user
+	obligation.payment_verified_on = now_datetime()
+	obligation.payment_rejection_reason = reason
+	_save_verification(obligation)
+
+	cancelled = None
+	if driver_payments:
+		payment = frappe.get_doc(PAYMENT_DOCTYPE, driver_payments[0])
+		payment.cancellation_reason = reason
+		_authorize(payment, ACTION_DRIVER_REJECTION)
+		# No role holds "cancel" on Cartera Pago (27.3 DocPerms): the checks
+		# above (role/company in api/cartera.py, state here) replace it.
+		payment.flags.ignore_permissions = True
+		payment.cancel()  # on_cancel -> recompute_obligation()
+		cancelled = payment.name
+	return {"already_done": False, "cancelled_payment": cancelled}

@@ -17,6 +17,7 @@ import inspect
 import json
 import os
 import re
+import uuid
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -39,8 +40,16 @@ from fabergray_erp.tests.test_recorridos_deliver_stop import _photo_jpeg
 EXTRA_TEST_RECORD_DEPENDENCIES = []
 IGNORE_TEST_RECORD_DEPENDENCIES = []
 
-READ_ENDPOINTS = ("get_dashboard", "get_obligations", "get_obligation_detail", "get_driver_payment_proof")
-ALL_ENDPOINTS = (*READ_ENDPOINTS, "sync_missing_obligations")
+READ_ENDPOINTS = (
+	"get_dashboard",
+	"get_obligations",
+	"get_obligation_detail",
+	"get_driver_payment_proof",
+	"get_payment_proof",
+)
+# 27.3 writes: the reconciler (27.1) + REGISTRAR COBRO + confirm/reject.
+WRITE_ENDPOINTS = ("sync_missing_obligations", "register_payment", "confirm_driver_payment", "reject_driver_payment")
+ALL_ENDPOINTS = (*READ_ENDPOINTS, *WRITE_ENDPOINTS)
 _CARTERA_JS = os.path.join(frappe.get_app_path("fabergray_erp"), "fabrigray_erp", "page", "cartera", "cartera.js")
 
 XSS = '<img src=x onerror="alert(1)">'
@@ -196,23 +205,19 @@ class TestCarteraDashboard(IntegrationTestCase):
 		with fx.as_user(user or self.cartera_user):
 			return cartera_api.get_driver_payment_proof(name)
 
-	def _pay(self, obligation, amount, payment_date=None, submit=True):
+	def _pay(self, obligation, amount, payment_date=None):
+		"""27.3: REGISTRAR COBRO through the service (the only writer)."""
 		with fx.as_user(self.cartera_user):
-			doc = frappe.get_doc(
-				{
-					"doctype": "Cartera Pago",
-					"cartera_obligacion": obligation,
-					"amount": amount,
-					"payment_date": payment_date or nowdate(),
-					"payment_method": "Transferencia",
-					"reference": f"REF {XSS}",
-				}
+			result = cartera_service.register_cartera_payment(
+				obligation,
+				amount,
+				payment_date or nowdate(),
+				"Transferencia",
+				reference=f"REF {XSS}",
+				client_request_id=str(uuid.uuid4()),
 			)
-			doc.insert()
-			self.world.track_existing("Cartera Pago", doc.name)
-			if submit:
-				doc.submit()
-		return doc
+		self.world.track_existing("Cartera Pago", result["payment"])
+		return frappe.get_doc("Cartera Pago", result["payment"])
 
 	def _execute_cmd(self, method, http_method="POST", **form_dict):
 		"""Real RPC path (frappe.handler.execute_cmd: whitelist + HTTP method
@@ -294,8 +299,12 @@ class TestCarteraDashboard(IntegrationTestCase):
 			source = fh.read()
 		prefix = re.search(r'this\.method_prefix\s*=\s*"([^"]+)"', source)
 		self.assertEqual(prefix.group(1), "fabergray_erp.api.cartera.")
-		js_methods = set(re.findall(r'this\.call\(\s*"([A-Za-z0-9_]+)"', source))
+		js_methods = set(re.findall(r'this\.(?:call|run_action|show_proof)\(\s*"([A-Za-z0-9_]+)"', source))
+		js_methods.update(re.findall(r'"fabergray_erp\.api\.cartera\.([A-Za-z0-9_]+)"', source))
 		self.assertEqual(js_methods, set(ALL_ENDPOINTS))
+		# Every write is POST-only.
+		for name in WRITE_ENDPOINTS:
+			self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[getattr(cartera_api, name)], ["POST"], name)
 
 		# Real dispatch through the /api/method entry point.
 		with fx.as_user(self.cartera_user):
@@ -419,20 +428,21 @@ class TestCarteraDashboard(IntegrationTestCase):
 		self.assertEqual(self._kpi(k3, "cartera_actual")[0], flt(self._kpi(k2, "cartera_actual")[0] + noproof_amount, 2))
 		self.assertEqual(self._kpi(k3, "por_confirmar"), self._kpi(k2, "por_confirmar"))
 
-		# A Cartera payment this month + one of an earlier month; a cancelled
-		# one and a draft never count.
+		# A Cartera payment this month + one of an earlier month.
 		part = flt(amount / 4, 2)
-		current = self._pay(cred, part)
+		self._pay(cred, part)
 		self._pay(cred, part, payment_date=add_days(getdate(nowdate()).replace(day=1), -1))
-		self._pay(cred, part, submit=False)
 		k4 = self._dashboard()
 		self.assertEqual(self._kpi(k4, "cobrado_mes")[0], flt(self._kpi(k3, "cobrado_mes")[0] + part, 2))
 		self.assertEqual(self._kpi(k4, "cartera_actual")[0], flt(self._kpi(k3, "cartera_actual")[0] - 2 * part, 2))
 		self.assertEqual(self._kpi(k4, "por_confirmar"), self._kpi(k3, "por_confirmar"))
-		with fx.as_user(self.system_manager_user):
-			frappe.get_doc("Cartera Pago", current.name).cancel()
+		# A cancelled payment (27.3: only the rejected driver payment) never
+		# counts as collected.
+		with fx.as_user(self.cartera_user):
+			cartera_service.reject_driver_payment(paid, "El dinero no llegó")
 		k5 = self._dashboard()
-		self.assertEqual(self._kpi(k5, "cobrado_mes"), self._kpi(k3, "cobrado_mes"))
+		self.assertEqual(self._kpi(k5, "cobrado_mes")[0], flt(self._kpi(k4, "cobrado_mes")[0] - paid_amount, 2))
+		self.assertEqual(self._kpi(k5, "cartera_actual")[0], flt(self._kpi(k4, "cartera_actual")[0] + paid_amount, 2))
 
 	def test_vencida_uses_the_site_today(self):
 		f = self._fx()
@@ -703,17 +713,30 @@ class TestCarteraDashboard(IntegrationTestCase):
 		self.assertEqual(no_proof["payments"], [])
 
 	def test_history_shows_cancelled_but_not_drafts(self):
-		cred = self._delivered(payment_status="Crédito")
+		# 27.3: drafts cannot exist at all (the service inserts + submits in
+		# one transaction); the cancelled row is the rejected driver payment.
+		cred = self._delivered(payment_status="Pagado", payment_proof=_photo_jpeg())
+		driver_payment = frappe.get_all("Cartera Pago", filters={"cartera_obligacion": cred}, pluck="name")[0]
+		with fx.as_user(self.cartera_user):
+			cartera_service.reject_driver_payment(cred, "No llegó el dinero")
 		quarter = flt(flt(self._ob(cred).invoice_amount) / 4, 2)
 		kept = self._pay(cred, quarter)
-		cancelled = self._pay(cred, quarter)
-		draft = self._pay(cred, quarter, submit=False)
-		with fx.as_user(self.system_manager_user):
-			frappe.get_doc("Cartera Pago", cancelled.name).cancel()
+		with fx.as_user("Administrator"):
+			draft = frappe.get_doc(
+				{"doctype": "Cartera Pago", "cartera_obligacion": cred, "amount": quarter, "payment_date": nowdate(),
+				 "payment_method": "Efectivo", "client_request_id": f"cartera:{uuid.uuid4()}"}
+			)
+			with self.assertRaises(frappe.PermissionError):
+				draft.insert()
 		history = {p["name"]: p for p in self._detail(cred)["payments"]}
-		self.assertEqual(set(history), {kept.name, cancelled.name})
-		self.assertNotIn(draft.name, history)
-		self.assertTrue(history[cancelled.name]["cancelled"])
+		self.assertEqual(set(history), {kept.name, driver_payment})
+		cancelled = history[driver_payment]
+		self.assertTrue(cancelled["cancelled"])
+		self.assertEqual(cancelled["cancellation_reason"], "No llegó el dinero")
+		self.assertEqual(cancelled["cancelled_by_name"], frappe.utils.get_fullname(self.cartera_user))
+		self.assertTrue(cancelled["cancelled_on"])
+		self.assertFalse(history[kept.name]["cancelled"])
+		self.assertIsNone(history[kept.name]["cancellation_reason"])
 		self.assertEqual(history[kept.name]["source"], "Cartera")
 		self.assertEqual(history[kept.name]["payment_method"], "Transferencia")
 		# Frappe sanitizes Data on save; the API returns exactly what is stored.

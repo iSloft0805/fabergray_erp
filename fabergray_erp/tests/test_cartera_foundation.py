@@ -11,6 +11,7 @@ that whole suite inside this module)."""
 import json
 import os
 import threading
+import uuid
 from unittest.mock import patch
 
 import frappe
@@ -85,7 +86,7 @@ class TestCarteraFoundation(IntegrationTestCase):
 				"Cartera Pago", filters={"cartera_obligacion": obligation}, fields=["name", "docstatus"]
 			):
 				if payment.docstatus == 1:
-					frappe.get_doc("Cartera Pago", payment.name).cancel()
+					cartera_service.authorize_teardown(frappe.get_doc("Cartera Pago", payment.name)).cancel()
 				frappe.delete_doc("Cartera Pago", payment.name, ignore_permissions=True, force=True, ignore_on_trash=True)
 			frappe.delete_doc("Cartera Obligacion", obligation, ignore_permissions=True, force=True, ignore_on_trash=True)
 		frappe.db.commit()
@@ -121,22 +122,36 @@ class TestCarteraFoundation(IntegrationTestCase):
 	def _ob(self, name):
 		return frappe.get_doc("Cartera Obligacion", name)
 
-	def _new_payment(self, obligation, amount, user=None, submit=True, **fields):
+	def _new_payment(self, obligation, amount, user=None, request_id=None, **fields):
+		"""Fase 27.3: a Cartera payment only exists through the service
+		(REGISTRAR COBRO); direct ORM inserts are refused by the controller."""
+		values = {"payment_date": nowdate(), "payment_method": "Transferencia"}
+		values.update(fields)
+		with fx.as_user(user or self.cartera_user):
+			result = cartera_service.register_cartera_payment(
+				obligation,
+				amount,
+				values["payment_date"],
+				values["payment_method"],
+				reference=values.get("reference"),
+				notes=values.get("notes"),
+				client_request_id=request_id or str(uuid.uuid4()),
+			)
+		self.world.track_existing("Cartera Pago", result["payment"])
+		return frappe.get_doc("Cartera Pago", result["payment"])
+
+	def _direct_payment(self, obligation, amount, **fields):
+		"""A payment built WITHOUT the service (Desk/frappe.client/bare ORM)."""
 		values = {
 			"doctype": "Cartera Pago",
 			"cartera_obligacion": obligation,
 			"amount": amount,
 			"payment_date": nowdate(),
 			"payment_method": "Transferencia",
+			"client_request_id": f"cartera:{uuid.uuid4()}",
 		}
 		values.update(fields)
-		with fx.as_user(user or self.cartera_user):
-			doc = frappe.get_doc(values)
-			doc.insert()
-			self.world.track_existing("Cartera Pago", doc.name)
-			if submit:
-				doc.submit()
-		return doc
+		return frappe.get_doc(values)
 
 	def _payments(self, obligation):
 		return frappe.get_all(
@@ -446,14 +461,24 @@ class TestCarteraFoundation(IntegrationTestCase):
 			("delivered_on", "2020-01-01 10:00:00"),
 			("recorrido_parada", "otra"),
 			("payment_verification", "Confirmado"),
+			("payment_verified_by", "Administrator"),
+			("payment_verified_on", "2026-01-01 10:00:00"),
+			("payment_rejection_reason", "motivo inventado"),
 			("sales_invoice", "ACC-SINV-X"),
 			("status", "Pagado"),
 			("paid_amount", 1),
 			("outstanding_amount", 0),
 			("paid_on", "2026-01-01"),
 		)
+		# 27.3: no role holds write any more (PermissionError)...
+		for user in (self.system_manager_user, self.cartera_user):
+			with fx.as_user(user):
+				with self.assertRaises(frappe.PermissionError, msg=user):
+					frappe.client.set_value("Cartera Obligacion", obligation, "invoice_amount", 1)
+		# ...and the controller refuses every change even for Administrator,
+		# who bypasses DocPerms.
 		for field, value in changes:
-			with fx.as_user(self.system_manager_user):
+			with fx.as_user("Administrator"):
 				with self.assertRaises(frappe.ValidationError, msg=field):
 					frappe.client.set_value("Cartera Obligacion", obligation, field, value)
 		after = self._ob(obligation)
@@ -509,61 +534,87 @@ class TestCarteraFoundation(IntegrationTestCase):
 		cases = (
 			({"amount": 0}, "mayor que cero"),
 			({"amount": -5}, "mayor que cero"),
+			({"amount": "12.345"}, "2 decimales"),
 			({"payment_date": add_days(nowdate(), 1)}, "futuro"),
 			({"payment_method": ""}, "medio de pago"),
 			({"payment_method": "Bitcoin"}, "medio de pago"),
-			({"source": "Conductor"}, "conductor"),
-			({"accounting_status": "Contabilizado"}, "contabiliza"),
 		)
 		for fields, message in cases:
 			values = {"amount": flt(total / 4, 2), **fields}
 			with self.assertRaisesRegex(frappe.ValidationError, message, msg=str(fields)):
 				self._new_payment(obligation, values.pop("amount"), **values)
+		# source/accounting_status are never taken from a caller: the service
+		# has no such parameters, and a direct document is refused outright.
+		for fields in ({"source": "Conductor"}, {"accounting_status": "Contabilizado"}):
+			with fx.as_user("Administrator"):
+				with self.assertRaises(frappe.PermissionError, msg=str(fields)):
+					self._direct_payment(obligation, flt(total / 4, 2), **fields).insert()
 		self.assertEqual(flt(self._ob(obligation).paid_amount), 0)
 
 	def test_recorded_by_is_always_the_server_user(self):
 		_stop, obligation = self._delivered(payment_status="Crédito")
-		payment = self._new_payment(
-			obligation,
-			flt(flt(self._ob(obligation).invoice_amount) / 4, 2),
-			recorded_by=self.system_manager_user,
-			recorded_on="2020-01-01 00:00:00",
-		)
+		payment = self._new_payment(obligation, flt(flt(self._ob(obligation).invoice_amount) / 4, 2))
 		self.assertEqual(payment.recorded_by, self.cartera_user)
-		self.assertNotEqual(str(payment.recorded_on), "2020-01-01 00:00:00")
+		self.assertTrue(payment.recorded_on)
+		# The only entry point takes no recorded_by/recorded_on/source/company.
+		import inspect
+
+		params = set(inspect.signature(cartera_api.register_payment).parameters)
+		self.assertFalse(params & {"recorded_by", "recorded_on", "source", "company", "customer", "currency", "accounting_status"})
 
 	def test_payment_cannot_be_deleted_nor_cancelled_by_cartera(self):
 		_stop, obligation = self._delivered(payment_status="Crédito")
 		payment = self._new_payment(obligation, flt(flt(self._ob(obligation).invoice_amount) / 4, 2))
-		with fx.as_user(self.cartera_user):
-			with self.assertRaises(frappe.PermissionError):
-				frappe.get_doc("Cartera Pago", payment.name).cancel()
+		# 27.3: nobody cancels directly -- Cartera, System Manager nor
+		# Administrator (the controller refuses without the service token).
+		for user in (self.cartera_user, self.system_manager_user, "Administrator"):
+			with fx.as_user(user):
+				with self.assertRaises(frappe.PermissionError, msg=user):
+					frappe.get_doc("Cartera Pago", payment.name).cancel()
 		for user in (self.cartera_user, self.system_manager_user, "Administrator"):
 			with fx.as_user(user):
 				with self.assertRaises((frappe.ValidationError, frappe.PermissionError), msg=user):
 					frappe.delete_doc("Cartera Pago", payment.name)
 		self.assertEqual(frappe.db.get_value("Cartera Pago", payment.name, "docstatus"), 1)
 
-	def test_system_manager_cancel_restores_balance(self):
-		_stop, obligation = self._delivered(payment_status="Crédito")
+	def test_cancel_restores_balance_only_through_the_service(self):
+		"""27.3: a direct cancel (System Manager, frappe.client) is refused and
+		changes nothing; the service's rejection of the driver payment is the
+		cancel path, and on_cancel re-derives the balance from what is left."""
+		_stop, obligation = self._delivered(payment_status="Pagado", payment_proof=_photo_jpeg())
+		self._track_obligation(obligation)
 		total = flt(self._ob(obligation).invoice_amount)
-		payment = self._new_payment(obligation, total)
+		payment = frappe.get_all("Cartera Pago", filters={"cartera_obligacion": obligation}, pluck="name")[0]
 		self.assertEqual(self._ob(obligation).status, "Pagado")
 		with fx.as_user(self.system_manager_user):
-			frappe.get_doc("Cartera Pago", payment.name).cancel()
+			with self.assertRaises(frappe.PermissionError):
+				frappe.client.cancel("Cartera Pago", payment)
+		self.assertEqual(self._ob(obligation).status, "Pagado")
+		with fx.as_user(self.cartera_user):
+			cartera_service.reject_driver_payment(obligation, "No llegó el dinero")
 		ob = self._ob(obligation)
 		self.assertEqual(ob.status, "Pendiente")
 		self.assertEqual(flt(ob.outstanding_amount), total)
 		self.assertIsNone(ob.paid_on)
-		self.assertTrue(frappe.db.exists("Cartera Pago", payment.name))  # history kept
+		self.assertEqual(frappe.db.get_value("Cartera Pago", payment, "docstatus"), 2)  # history kept
 
 	def test_client_request_id_is_unique(self):
+		"""27.3: the unique index stays the last guarantee; the service turns a
+		repeated id into the same payment (or an explicit conflict)."""
 		_stop, obligation = self._delivered(payment_status="Crédito")
 		quarter = flt(flt(self._ob(obligation).invoice_amount) / 4, 2)
-		request_id = f"req-fg271-{frappe.generate_hash(length=8)}"
-		self._new_payment(obligation, quarter, client_request_id=request_id)
+		request_id = str(uuid.uuid4())
+		first = self._new_payment(obligation, quarter, request_id=request_id)
+		again = self._new_payment(obligation, quarter, request_id=request_id)
+		self.assertEqual(again.name, first.name)
+		with self.assertRaises(cartera_service.CarteraRequestConflictError):
+			self._new_payment(obligation, flt(quarter / 2, 2), request_id=request_id)
+		self.assertEqual(frappe.db.count("Cartera Pago", {"client_request_id": f"cartera:{request_id}"}), 1)
+		# The DB index itself still refuses a duplicate that bypasses the check.
+		clone = self._direct_payment(obligation, quarter, client_request_id=f"cartera:{request_id}")
+		cartera_service._authorize(clone, cartera_service.ACTION_CARTERA_PAYMENT)
 		with self.assertRaises((frappe.UniqueValidationError, frappe.DuplicateEntryError)):
-			self._new_payment(obligation, quarter, client_request_id=request_id)
+			clone.insert(ignore_permissions=True)
 
 	def test_concurrent_payments_never_overpay(self):
 		_stop, obligation = self._delivered(payment_status="Crédito")
@@ -580,26 +631,13 @@ class TestCarteraFoundation(IntegrationTestCase):
 			frappe.db.begin()
 			frappe.set_user(user_email)
 			try:
-				# Caller-level retry on a naming-series (tabSeries) conflict,
-				# as the 27.2 REGISTRAR COBRO endpoint will do.
-				for _attempt in range(3):
-					try:
-						doc = frappe.get_doc(
-							{
-								"doctype": "Cartera Pago",
-								"cartera_obligacion": obligation,
-								"amount": share,
-								"payment_date": nowdate(),
-								"payment_method": "Transferencia",
-							}
-						)
-						doc.insert()
-						doc.submit()
-						frappe.db.commit()
-						results[key] = ("ok", doc.name)
-						break
-					except frappe.QueryDeadlockError:
-						frappe.db.rollback()
+				# 27.3: the REGISTRAR COBRO transaction (with its bounded
+				# retry on deadlock), exactly as the endpoint runs it.
+				result = cartera_api._register_payment_tx(
+					obligation, share, nowdate(), "Transferencia", None, None, str(uuid.uuid4()), None
+				)
+				frappe.db.commit()
+				results[key] = ("ok", result["payment"])
 			except frappe.ValidationError as e:
 				frappe.db.rollback()
 				results[key] = ("error", str(e))
