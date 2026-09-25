@@ -1,0 +1,688 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Fase 27.2 -- Page Cartera. Everything generic (header, KPI shell, badge
+ * shell, buttons, search bar, skeletons, design tokens) comes from the
+ * shared fg_shell.css; this file only styles what is new here, reproduced
+ * (not imported) from clientes.css/ventas.css/recorridos.css, same
+ * reasoning those files document. Scoped under .fg-cartera.
+ *
+ * Mobile-first: one column of cards, KPIs in a 2-column grid with CARTERA
+ * ACTUAL full width; 2 card columns from 700px, 3 + one KPI row from
+ * 1100px. Every tappable control is >= 44px. Long names/amounts wrap
+ * (overflow-wrap: anywhere) instead of widening the page -- no horizontal
+ * overflow at 360/390/430px.
+ *
+ * Colors (few, by meaning): pagado -> success, vencido -> danger, por
+ * vencer -> warning, pendiente -> neutral/primary, por validar / por
+ * confirmar ("atención") -> purple.
+ */
+
+.fg-cartera {
+	--fg-cartera-attention: var(--fg-purple);
+	--fg-cartera-attention-tint: #f1ebfe;
+	overflow-x: hidden;
+}
+
+.fg-cartera .fg-body {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.fg-cartera .fg-body > * {
+	min-width: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* KPIs                                                                 */
+/* ------------------------------------------------------------------ */
+.fg-cartera.fg-shell .fg-cartera-kpis {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 10px;
+	margin-bottom: 20px;
+}
+
+.fg-cartera .fg-cartera-kpi {
+	min-width: 0;
+	padding: 14px;
+	gap: 8px;
+	/* The amount is sized to its own card (cqi below), never to the viewport. */
+	container-type: inline-size;
+}
+
+.fg-cartera .fg-cartera-kpi--actual {
+	grid-column: 1 / -1;
+	--fg-kpi-color: var(--fg-primary-dark);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-cartera .fg-cartera-kpi--por-vencer {
+	--fg-kpi-color: var(--fg-warning-dark);
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-cartera .fg-cartera-kpi--vencida {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+.fg-cartera .fg-cartera-kpi--cobrado {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+.fg-cartera .fg-cartera-kpi--por-confirmar {
+	--fg-kpi-color: var(--fg-cartera-attention);
+	--fg-kpi-tint: var(--fg-cartera-attention-tint);
+}
+
+.fg-cartera .fg-cartera-kpi-top {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-width: 0;
+}
+
+.fg-cartera .fg-cartera-kpi .fg-kpi-icon {
+	width: 36px;
+	height: 36px;
+	flex-shrink: 0;
+}
+
+.fg-cartera .fg-cartera-kpi .fg-kpi-label {
+	font-size: 0.72rem;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	overflow-wrap: anywhere;
+}
+
+.fg-cartera .fg-cartera-kpi-amount {
+	font-size: 1.15rem;
+	font-weight: 800;
+	line-height: 1.15;
+	color: var(--fg-kpi-color);
+	overflow-wrap: anywhere;
+}
+
+.fg-cartera .fg-cartera-kpi--actual .fg-cartera-kpi-amount {
+	font-size: 1.6rem;
+}
+
+/* A money figure must never break between its digits: with container query
+ * units it stays on one line and shrinks with its own box ("$ 125.450.000,50"
+ * still fits a 2-column KPI or a card column at 360px). Without cqi support
+ * the rules above apply and it wraps instead of overflowing. */
+.fg-cartera .fg-cartera-card-money > div,
+.fg-cartera .fg-cartera-detail-money > .fg-cartera-detail-field {
+	container-type: inline-size;
+}
+
+@supports (font-size: 1cqi) {
+	.fg-cartera .fg-cartera-kpi-amount,
+	.fg-cartera .fg-cartera-money-value,
+	.fg-cartera .fg-cartera-detail-money .fg-cartera-detail-value {
+		white-space: nowrap;
+		overflow-wrap: normal;
+	}
+
+	.fg-cartera .fg-cartera-kpi-amount {
+		font-size: clamp(0.65rem, 9.5cqi, 1.25rem);
+	}
+
+	.fg-cartera .fg-cartera-kpi--actual .fg-cartera-kpi-amount {
+		font-size: clamp(1rem, 9.5cqi, 1.75rem);
+	}
+
+	.fg-cartera .fg-cartera-money-value,
+	.fg-cartera .fg-cartera-detail-money .fg-cartera-detail-value {
+		font-size: clamp(0.6rem, 9.5cqi, 1.1rem);
+	}
+
+	/* 14+ characters ("$ 12.500.000,50", "$ 125.450.000"): rare in COP. */
+	.fg-cartera .fg-cartera-kpi-amount.is-long,
+	.fg-cartera .fg-cartera-money-value.is-long {
+		font-size: clamp(0.55rem, 7.5cqi, 1.1rem);
+	}
+
+	.fg-cartera .fg-cartera-kpi--actual .fg-cartera-kpi-amount.is-long {
+		font-size: clamp(1rem, 7.5cqi, 1.75rem);
+	}
+}
+
+.fg-cartera .fg-cartera-kpi-count {
+	font-size: 0.75rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-cartera.fg-shell .fg-cartera-skeleton-kpis {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 10px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Section head / SINCRONIZAR / search / chips                          */
+/* ------------------------------------------------------------------ */
+.fg-cartera .fg-section-head {
+	align-items: center;
+}
+
+.fg-cartera .fg-cartera-sync-btn {
+	min-height: var(--fg-touch);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+}
+
+.fg-cartera .fg-cartera-search {
+	margin-bottom: 12px;
+}
+
+.fg-cartera .fg-cartera-search .fg-search-input {
+	height: 52px;
+	font-size: 1rem;
+	font-weight: 600;
+}
+
+.fg-cartera .fg-cartera-search .fg-search-clear {
+	width: 44px;
+	height: 44px;
+	right: 4px;
+}
+
+.fg-cartera .fg-cartera-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 16px;
+}
+
+.fg-cartera .fg-cartera-chip {
+	min-height: var(--fg-touch);
+	background: var(--fg-card);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-pill);
+	padding: 0 16px;
+	font-size: 0.78rem;
+	font-weight: 700;
+	color: var(--fg-text-muted);
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition), color var(--fg-transition);
+}
+
+.fg-cartera .fg-cartera-chip.is-active {
+	background: var(--fg-primary-tint);
+	border-color: var(--fg-primary);
+	color: var(--fg-primary-dark);
+}
+
+/* ------------------------------------------------------------------ */
+/* Cards                                                                */
+/* ------------------------------------------------------------------ */
+.fg-cartera .fg-cartera-cards {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 12px;
+	margin-bottom: 16px;
+}
+
+.fg-cartera .fg-cartera-cards > .fg-empty,
+.fg-cartera .fg-cartera-cards > .fg-search-empty,
+.fg-cartera .fg-cartera-cards > .fg-cartera-error,
+.fg-cartera .fg-cartera-cards > .fg-skeleton-cards {
+	grid-column: 1 / -1;
+}
+
+.fg-cartera .fg-cartera-card {
+	min-width: 0;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-left: 4px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.fg-cartera .fg-cartera-card--vencido {
+	border-left-color: var(--fg-danger);
+}
+
+.fg-cartera .fg-cartera-card--por-vencer {
+	border-left-color: var(--fg-warning);
+}
+
+.fg-cartera .fg-cartera-card--pendiente {
+	border-left-color: var(--fg-primary);
+}
+
+.fg-cartera .fg-cartera-card--atencion {
+	border-left-color: var(--fg-cartera-attention);
+}
+
+.fg-cartera .fg-cartera-card--pagado {
+	border-left-color: var(--fg-success);
+}
+
+.fg-cartera .fg-cartera-card-top {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 10px;
+	min-width: 0;
+}
+
+.fg-cartera .fg-cartera-card-customer {
+	min-width: 0;
+}
+
+.fg-cartera .fg-cartera-card-name,
+.fg-cartera .fg-cartera-detail-name {
+	font-weight: 800;
+	font-size: 0.98rem;
+	text-transform: uppercase;
+	overflow-wrap: anywhere;
+}
+
+.fg-cartera .fg-cartera-card-commercial {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	overflow-wrap: anywhere;
+}
+
+.fg-cartera .fg-cartera-card-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 14px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-cartera .fg-cartera-card-order {
+	font-weight: 700;
+	color: var(--fg-text);
+	overflow-wrap: anywhere;
+}
+
+.fg-cartera .fg-cartera-card-money {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 10px;
+	padding: 10px 12px;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-md);
+}
+
+.fg-cartera .fg-cartera-money-label {
+	font-size: 0.7rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	color: var(--fg-text-muted);
+}
+
+.fg-cartera .fg-cartera-money-value {
+	font-size: 1rem;
+	font-weight: 700;
+	overflow-wrap: anywhere;
+}
+
+.fg-cartera .fg-cartera-money-value--balance {
+	font-size: 1.1rem;
+	font-weight: 800;
+}
+
+.fg-cartera .fg-cartera-card-pending {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 10px;
+	font-size: 0.78rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-cartera .fg-cartera-card-pending strong {
+	color: var(--fg-primary-dark);
+}
+
+.fg-cartera .fg-cartera-card-badges {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.fg-cartera .fg-cartera-card-detail {
+	width: 100%;
+}
+
+/* Badges (by meaning) */
+.fg-cartera .fg-cartera-badge {
+	white-space: normal;
+	text-align: left;
+}
+
+.fg-cartera .fg-cartera-badge--vencido {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+.fg-cartera .fg-cartera-badge--por-vencer {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-cartera .fg-cartera-badge--pendiente {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-cartera .fg-cartera-badge--atencion {
+	background: var(--fg-cartera-attention-tint);
+	color: var(--fg-cartera-attention);
+}
+
+.fg-cartera .fg-cartera-badge--pagado {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-cartera .fg-cartera-badge--neutral,
+.fg-cartera .fg-cartera-badge--anulada {
+	background: #eef1f6;
+	color: var(--fg-text-muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* Empty / error / pagination                                           */
+/* ------------------------------------------------------------------ */
+.fg-cartera .fg-cartera-empty {
+	font-weight: 700;
+	padding: 36px 16px;
+}
+
+.fg-cartera .fg-cartera-error {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 12px;
+	text-align: center;
+	color: var(--fg-text-muted);
+	padding: 28px 16px;
+	margin-bottom: 16px;
+	background: var(--fg-card);
+	border: 1px dashed var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+}
+
+.fg-cartera .fg-cartera-pagination {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.fg-cartera .fg-cartera-pagination:empty {
+	display: none;
+}
+
+.fg-cartera .fg-cartera-pagination-info {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-cartera .fg-cartera-pagination-controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-cartera .fg-cartera-pagination-btn {
+	appearance: none;
+	width: 44px;
+	height: 44px;
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+.fg-cartera .fg-cartera-pagination-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.fg-cartera .fg-cartera-pagination-page {
+	font-weight: 700;
+	font-size: 0.86rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Detail (in-page view)                                                */
+/* ------------------------------------------------------------------ */
+.fg-cartera .fg-np-header {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 12px;
+	margin-bottom: 16px;
+}
+
+.fg-cartera .fg-np-back {
+	appearance: none;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	height: var(--fg-touch);
+	padding: 0 16px;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 600;
+	font-size: 0.85rem;
+	color: var(--fg-text);
+	cursor: pointer;
+}
+
+.fg-cartera .fg-np-title {
+	font-size: 1.2rem;
+	font-weight: 700;
+}
+
+.fg-cartera .fg-cartera-detail-skeleton {
+	height: 200px;
+	margin-bottom: 14px;
+}
+
+.fg-cartera .fg-cartera-detail-card,
+.fg-cartera .fg-cartera-detail-section {
+	min-width: 0;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px;
+	margin-bottom: 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.fg-cartera .fg-cartera-detail-top {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: space-between;
+	align-items: flex-start;
+	gap: 10px;
+}
+
+.fg-cartera .fg-cartera-detail-grid,
+.fg-cartera .fg-cartera-detail-money,
+.fg-cartera .fg-cartera-payment-grid {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 12px;
+}
+
+.fg-cartera .fg-cartera-detail-money {
+	grid-template-columns: minmax(0, 1fr);
+	padding: 12px;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-md);
+}
+
+.fg-cartera .fg-cartera-detail-field {
+	min-width: 0;
+}
+
+.fg-cartera .fg-cartera-detail-label {
+	font-size: 0.7rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	color: var(--fg-text-muted);
+	margin-bottom: 2px;
+}
+
+.fg-cartera .fg-cartera-detail-value {
+	font-size: 0.92rem;
+	font-weight: 600;
+	overflow-wrap: anywhere;
+}
+
+.fg-cartera .fg-cartera-section-title {
+	font-size: 0.85rem;
+	font-weight: 800;
+	letter-spacing: 0.03em;
+}
+
+.fg-cartera .fg-cartera-muted {
+	color: var(--fg-text-muted);
+	font-size: 0.82rem;
+}
+
+.fg-cartera .fg-cartera-pre {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.fg-cartera .fg-cartera-reported {
+	border-color: var(--fg-cartera-attention);
+	background: var(--fg-cartera-attention-tint);
+	gap: 8px;
+}
+
+.fg-cartera .fg-cartera-reported-title {
+	font-size: 0.8rem;
+	font-weight: 800;
+	color: var(--fg-cartera-attention);
+}
+
+.fg-cartera .fg-cartera-reported-amount {
+	font-size: 1.5rem;
+	font-weight: 800;
+	overflow-wrap: anywhere;
+}
+
+.fg-cartera .fg-cartera-reported-warning {
+	font-weight: 700;
+	color: var(--fg-warning-dark);
+}
+
+.fg-cartera .fg-cartera-issues {
+	border-color: var(--fg-danger);
+	background: var(--fg-danger-tint);
+	gap: 6px;
+}
+
+.fg-cartera .fg-cartera-issues-title {
+	font-weight: 800;
+	color: var(--fg-danger);
+}
+
+.fg-cartera .fg-cartera-proof-btn {
+	align-self: flex-start;
+	max-width: 100%;
+}
+
+.fg-cartera .fg-cartera-payments {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.fg-cartera .fg-cartera-payment {
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+	padding: 12px;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	min-width: 0;
+}
+
+.fg-cartera .fg-cartera-payment.is-cancelled {
+	opacity: 0.6;
+}
+
+.fg-cartera .fg-cartera-payment-top {
+	display: flex;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+/* Proof dialog (outside .fg-cartera: frappe.ui.Dialog lives in <body>). */
+.fg-cartera-proof-dialog .fg-cartera-proof-wrap {
+	display: flex;
+	justify-content: center;
+}
+
+.fg-cartera-proof-dialog .fg-cartera-proof-img {
+	max-width: 100%;
+	max-height: 75vh;
+	height: auto;
+	border-radius: 10px;
+}
+
+/* ------------------------------------------------------------------ */
+/* Wider screens                                                        */
+/* ------------------------------------------------------------------ */
+@media (min-width: 700px) {
+	.fg-cartera .fg-cartera-cards {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.fg-cartera .fg-cartera-detail-money {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.fg-cartera .fg-cartera-detail-grid,
+	.fg-cartera .fg-cartera-payment-grid {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
+
+	.fg-cartera .fg-cartera-card-detail {
+		width: auto;
+		align-self: flex-end;
+	}
+}
+
+@media (min-width: 1100px) {
+	.fg-cartera.fg-shell .fg-cartera-kpis,
+	.fg-cartera.fg-shell .fg-cartera-skeleton-kpis {
+		grid-template-columns: repeat(5, minmax(0, 1fr));
+		gap: 14px;
+	}
+
+	.fg-cartera .fg-cartera-kpi--actual {
+		grid-column: auto;
+	}
+
+	.fg-cartera .fg-cartera-cards {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+}
