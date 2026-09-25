@@ -70,7 +70,9 @@ from fabergray_erp.api.bodega import (
 	_require_login,
 	get_queue,
 )
+from fabergray_erp import production_service
 from fabergray_erp.api.inventario import PRICE_LIST_BUYING, _selling_rates, _upsert_item_price
+from fabergray_erp.fulfillment.remainder_service import ensure_remaining_pick_list
 from fabergray_erp.sales_order_naming import root_commercial_name
 from fabergray_erp.search_utils import normalize_search_date
 
@@ -183,6 +185,10 @@ class ExcessReceiptQuantityError(frappe.ValidationError):
 
 class MissingReceiptAccountError(frappe.ValidationError):
 	pass
+
+
+class ShortageRoutedToProductionError(frappe.ValidationError):
+	"""Fase 28.2 -- the report is linked to an active Work Order."""
 
 
 @frappe.whitelist()
@@ -495,6 +501,24 @@ def get_shortage_purchase_status(shortage_report):
 def receive_shortage_purchase(
 	shortage_report, qty, purchase_rate, warehouse=None, purchase_reference=None, note=None
 ):
+	"""Fase 28.2 -- thin retry wrapper (bounded, 3 attempts, the same
+	api.recorridos._retrying_on_deadlock already proven for routes and
+	Cartera): since this now also locks the Sales Order and reads its Pick
+	List rows with a locking read (remainder Pick List), two resolutions of
+	the same order can hit MariaDB's snapshot-isolation conflict (1020,
+	raised by Frappe as QueryDeadlockError). The whole transaction -- Stock
+	Entry included -- is rolled back and re-run from scratch, never
+	half-applied. See _receive_shortage_purchase() for the actual rules."""
+	from fabergray_erp.api.recorridos import _retrying_on_deadlock
+
+	return _retrying_on_deadlock(_receive_shortage_purchase)(
+		shortage_report, qty, purchase_rate, warehouse, purchase_reference, note
+	)
+
+
+def _receive_shortage_purchase(
+	shortage_report, qty, purchase_rate, warehouse=None, purchase_reference=None, note=None
+):
 	"""Registers merchandise that physically arrived from a purchase against
 	one Reporte de Faltante -- exclusively via a native, submitted Stock
 	Entry (purpose="Material Receipt"); see this module's own top docstring
@@ -602,6 +626,17 @@ def receive_shortage_purchase(
 			ShortageAlreadyResolvedError,
 		)
 
+	# Fase 28.2 -- a shortage routed to Producción (active Work Order) is
+	# resolved by production, never by a purchase receipt at the same time.
+	if report.get("work_order") and production_service.is_active_work_order(report.work_order):
+		frappe.throw(
+			_(
+				"Este Reporte de Faltante está enrutado a Producción ({0}); no se puede registrar "
+				"una compra sobre él."
+			).format(report.work_order),
+			ShortageRoutedToProductionError,
+		)
+
 	if not frappe.db.exists("Item", report.item_code):
 		frappe.throw(_("Item inválido: {0}").format(report.item_code), InvalidReceiptItemError)
 
@@ -671,6 +706,14 @@ def receive_shortage_purchase(
 		report.status = IN_PROGRESS_STATUS
 	report.save()  # real permission, no ignore_permissions
 
+	# Fase 28.2 -- the shortage is really resolved by received stock: if its
+	# original Pick List was already submitted with fewer units, bring the
+	# line's remainder back to Bodega (idempotent; none for a draft Pick
+	# List, which Bodega completes in place).
+	remaining_pick_list = None
+	if report.status == RESOLVED_STATUS:
+		remaining_pick_list = ensure_remaining_pick_list(report)
+
 	# Read-only, post-submit -- current_stock is just what the confirmation
 	# screen shows the user, never used to derive received_qty/remaining_qty
 	# above (see _shortage_receipts()'s own docstring for why: current Bin
@@ -690,7 +733,55 @@ def receive_shortage_purchase(
 		"remaining_qty": remaining_qty,
 		"status": report.status,
 		"receipts": receipts,
+		"remaining_pick_list": remaining_pick_list,
 	}
+
+
+# ---------------------------------------------------------------------------
+# Fase 28.2 -- ENRUTAR faltante (Compra / Producción)
+# ---------------------------------------------------------------------------
+
+ROUTING_ROLES = ("Jefe de Bodega", "System Manager")
+
+
+@frappe.whitelist(methods=["POST"])
+def route_shortage(shortage_report):
+	"""Jefe de Bodega decides WHEN to route; the server decides WHERE:
+	fabergray_erp.production_service.route_shortage() fixes
+	procurement_route from the native make/buy rule and, for Manufacture,
+	creates or reuses the Work Order. The client sends only the report
+	name -- never a route, BOM, warehouse, company or quantity.
+
+	Access: logged in, role Jefe de Bodega or System Manager, write
+	permission on the report, and the report's warehouse must belong to
+	the site's company (and to one the caller may operate in). Runs inside
+	a bounded retry on deadlock (3 attempts)."""
+	from erpnext import get_default_company
+
+	from fabergray_erp.permission_conditions import _allowed_companies
+
+	_require_login()
+	frappe.only_for(ROUTING_ROLES)
+	if not shortage_report or not isinstance(shortage_report, str):
+		frappe.throw(_("Reporte de Faltante inválido."), frappe.ValidationError)
+	if not frappe.db.exists("Reporte de Faltante", shortage_report):
+		frappe.throw(_("El Reporte de Faltante no existe."), frappe.DoesNotExistError)
+	report = frappe.get_doc("Reporte de Faltante", shortage_report)
+	report.check_permission("write")
+
+	company = get_default_company()
+	allowed = _allowed_companies()
+	warehouse_company = frappe.db.get_value("Warehouse", report.warehouse, "company")
+	if not company or warehouse_company != company or (allowed is not None and company not in allowed):
+		frappe.throw(_("No tienes acceso a faltantes de otra empresa."), frappe.PermissionError)
+
+	return _route_shortage_tx(shortage_report, company)
+
+
+def _route_shortage_tx(shortage_report, company):
+	from fabergray_erp.api.recorridos import _retrying_on_deadlock
+
+	return _retrying_on_deadlock(production_service.route_shortage)(shortage_report, company)
 
 
 # ---------------------------------------------------------------------------

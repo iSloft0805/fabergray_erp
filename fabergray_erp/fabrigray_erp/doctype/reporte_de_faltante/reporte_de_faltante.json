@@ -29,7 +29,13 @@
   "reported_on",
   "section_break_estado",
   "status",
-  "resolution_note"
+  "resolution_note",
+  "section_break_routing",
+  "procurement_route",
+  "procurement_route_reason",
+  "column_break_routing",
+  "work_order",
+  "production_qty_allocated"
  ],
  "fields": [
   {
@@ -178,12 +184,55 @@
    "fieldname": "resolution_note",
    "fieldtype": "Small Text",
    "label": "Nota de Resoluci\u00f3n"
+  },
+  {
+   "fieldname": "section_break_routing",
+   "fieldtype": "Section Break",
+   "label": "Enrutamiento (Compra / Producci\u00f3n)"
+  },
+  {
+   "description": "Fase 28.2 -- fijada solo por el servidor al enrutar (fabergray_erp.manufacturing.get_manufacturing_route). No es el motivo de Bodega.",
+   "fieldname": "procurement_route",
+   "fieldtype": "Select",
+   "in_standard_filter": 1,
+   "label": "Ruta de abastecimiento",
+   "no_copy": 1,
+   "options": "\nPurchase\nManufacture\nBlocked",
+   "read_only": 1
+  },
+  {
+   "fieldname": "procurement_route_reason",
+   "fieldtype": "Small Text",
+   "label": "Motivo del bloqueo / enrutamiento",
+   "no_copy": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_routing",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "work_order",
+   "fieldtype": "Link",
+   "label": "Orden de producci\u00f3n (Work Order)",
+   "no_copy": 1,
+   "options": "Work Order",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "description": "Parte del Work Order que corresponde a este faltante; el resto de lo que se fabrique es inventario libre.",
+   "fieldname": "production_qty_allocated",
+   "fieldtype": "Float",
+   "label": "Cantidad asignada de la producci\u00f3n",
+   "no_copy": 1,
+   "read_only": 1
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-08-18 15:09:57.034055",
+ "modified": "2026-09-25 22:00:00.000000",
  "modified_by": "Administrator",
  "module": "Fabrigray ERP",
  "name": "Reporte de Faltante",

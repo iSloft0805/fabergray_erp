@@ -24,7 +24,7 @@ from erpnext.stock.get_item_details import get_bin_details
 from fabergray_erp.fulfillment.analyzer import OPEN_PICK_LIST_STATUSES_EXCLUDED, analyze_sales_order
 
 
-def _qty_already_claimed_by_open_pick_lists_for_so_item(sales_order_item):
+def _qty_already_claimed_by_open_pick_lists_for_so_item(sales_order_item, for_update=False):
     """How much of THIS Sales Order Item specifically is already sitting in
     an open (draft or submitted-but-undelivered) Pick List Item row.
 
@@ -49,7 +49,7 @@ def _qty_already_claimed_by_open_pick_lists_for_so_item(sales_order_item):
     pick_list = frappe.qb.DocType("Pick List")
     pick_list_item = frappe.qb.DocType("Pick List Item")
 
-    rows = (
+    query = (
         frappe.qb.from_(pick_list_item)
         .inner_join(pick_list)
         .on(pick_list.name == pick_list_item.parent)
@@ -67,7 +67,13 @@ def _qty_already_claimed_by_open_pick_lists_for_so_item(sales_order_item):
             & (pick_list.status.notin(OPEN_PICK_LIST_STATUSES_EXCLUDED))
             & (pick_list_item.docstatus != 2)
         )
-    ).run(as_dict=True)
+    )
+    if for_update:
+        # Fase 28.2 -- a LOCKING read returns the latest committed rows (a
+        # plain read inside REPEATABLE READ may return a snapshot taken
+        # before a concurrent remainder Pick List committed).
+        query = query.for_update()
+    rows = query.run(as_dict=True)
 
     return sum(flt(row.qty) for row in rows)
 
@@ -461,4 +467,78 @@ def create_pick_list_for_full_demand(sales_order):
     # already-authorized submit -- frappe.session.user is never touched.
     pick_list.insert(ignore_permissions=True)
 
+    return pick_list
+
+
+def create_pick_list_for_remaining_demand(sales_order, sales_order_items):
+    """Fase 28.2 -- the REMAINDER of specific Sales Order lines, as one new
+    Pick List (or None when nothing is left). Used by
+    fulfillment.remainder_service.ensure_remaining_pick_list() once a
+    Reporte de Faltante is really resolved but its original Pick List was
+    already submitted with fewer units (pedido 10, alistado 6 -> 4 pending).
+
+    Same building blocks as create_pick_list_for_full_demand() (unchanged):
+    analyze_sales_order() for qty_remaining (ordered - delivered), minus what
+    open Pick Lists already claim for the line (submitted: picked -
+    delivered; draft: its full stock_qty) -- here with a LOCKING read, since
+    the caller holds the Sales Order row lock and two resolutions may race.
+    So the 6 already picked are never offered again, and a line still
+    sitting in an open draft Pick List (e.g. its complement row) yields 0.
+
+    Only `sales_order_items` are included: resolving line A never pulls
+    line B's still-unresolved shortage back into Bodega. Native location
+    rows are capped to the need (_cap_rows_for_so_item), and a genuinely
+    zero-stock remainder gets the same plain top-up row the full-demand
+    builder uses. `sales_order` may be a name or a loaded document (pass
+    one with flags.ignore_permissions when the caller is a service)."""
+    targets = set(sales_order_items or [])
+    if not targets:
+        return None
+    so_name = sales_order.name if hasattr(sales_order, "doctype") else sales_order
+    analysis = analyze_sales_order(sales_order)
+
+    needed = {}
+    for line in analysis["lines"]:
+        if line["sales_order_item"] not in targets:
+            continue
+        claimed = _qty_already_claimed_by_open_pick_lists_for_so_item(line["sales_order_item"], for_update=True)
+        qty_needed = max(flt(line["qty_remaining"]) - claimed, 0.0)
+        if qty_needed > 0:
+            needed[line["sales_order_item"]] = (qty_needed, line)
+    if not needed:
+        return None
+
+    pick_list = _create_pick_list_ignoring_permissions(so_name)
+    pick_list.pick_manually = 1
+    for row in list(pick_list.get("locations")):
+        if row.sales_order_item not in needed:
+            pick_list.remove(row)
+    for sales_order_item, (qty_needed, line) in needed.items():
+        _cap_rows_for_so_item(pick_list, sales_order_item, qty_needed)
+        existing = sum(
+            flt(row.stock_qty) for row in pick_list.get("locations") if row.sales_order_item == sales_order_item
+        )
+        shortfall = qty_needed - existing
+        if shortfall <= 0:
+            continue
+        stock_uom = frappe.get_cached_value("Item", line["item_code"], "stock_uom")
+        pick_list.append(
+            "locations",
+            {
+                "item_code": line["item_code"],
+                "warehouse": line["warehouse"],
+                "sales_order": so_name,
+                "sales_order_item": sales_order_item,
+                "qty": shortfall,
+                "stock_qty": shortfall,
+                "conversion_factor": 1,
+                "uom": stock_uom,
+                "picked_qty": 0,
+            },
+        )
+    if not pick_list.get("locations"):
+        return None
+    for idx, row in enumerate(pick_list.get("locations"), start=1):
+        row.idx = idx
+    pick_list.insert(ignore_permissions=True)  # system action, same reasoning as the full-demand builder
     return pick_list

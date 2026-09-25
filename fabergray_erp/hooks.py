@@ -223,6 +223,11 @@ doc_events = {
 	"Purchase Receipt": {
 		"on_submit": "fabergray_erp.fulfillment.purchase_receipt_hooks.on_submit",
 	},
+	# Fase 28.2 -- a cancelled Work Order releases the shortages routed to it
+	# (never left "En Proceso" forever); see production_service.
+	"Work Order": {
+		"on_cancel": "fabergray_erp.production_service.on_work_order_cancel",
+	},
 	# Commit 25.14 audit fix -- Facturación's Quotation Custom DocPerm
 	# grants `create: 1` (unavoidable: needed for apply_quotation_price_
 	# mode()'s own controlled cancel+amend insert, see api/cotizaciones.py
@@ -315,7 +320,17 @@ fixtures = [
 			[
 				"name",
 				"in",
-				["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes", "Recorrido", "Cartera"],
+				[
+					"Bodega",
+					"Jefe de Bodega",
+					"Vendedora",
+					"Facturación",
+					"Gestión de Clientes",
+					"Recorrido",
+					"Cartera",
+					"Producción",
+					"Jefe de Producción",
+				],
 			]
 		],
 	},
@@ -325,7 +340,17 @@ fixtures = [
 			[
 				"role",
 				"in",
-				["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes", "Recorrido", "Cartera"],
+				[
+					"Bodega",
+					"Jefe de Bodega",
+					"Vendedora",
+					"Facturación",
+					"Gestión de Clientes",
+					"Recorrido",
+					"Cartera",
+					"Producción",
+					"Jefe de Producción",
+				],
 			]
 		],
 	},

@@ -16,7 +16,8 @@ Item rows for the same item+warehouse. No Stock Reservation Entry, no new
 Custom Field (`fg_allocated_qty` was explicitly rejected).
 
 This module:
-- reads Sales Order / Sales Order Item / Bin / Pick List Item / Item / BOM;
+- reads Sales Order / Sales Order Item / Bin / Pick List Item / Item / BOM
+  (the make/buy rule itself: fabergray_erp.manufacturing, Fase 28.1);
 - never writes anything, anywhere;
 - never creates Reporte de Faltante, Pick List, Material Request, Work
   Order or Purchase Order;
@@ -32,7 +33,8 @@ from frappe.query_builder import Case
 from frappe.utils import flt
 
 from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
-from erpnext.stock.get_item_details import get_default_bom
+
+from fabergray_erp.manufacturing import get_manufacturing_route
 
 OPEN_PICK_LIST_STATUSES_EXCLUDED = ("Completed", "Cancelled")
 
@@ -102,33 +104,19 @@ def _qty_available_for_pick(item_code, warehouse):
 	return max(actual_qty - committed, 0.0)
 
 
-def _procurement_route_for_item(item_code):
-	"""Item.default_material_request_type (already native -- no
-	fg_procurement_policy) decides Purchase vs Manufacture. Manufacture
-	without a resolvable BOM is never silently downgraded to Purchase -- it
-	comes back Blocked, with the reason, so a future engine (or a human)
-	must fix the master data instead of ordering the wrong thing. Any other
-	native option (Material Transfer, Material Issue, Customer Provided) is
-	out of this V1's scope -- also surfaced as Blocked rather than guessed
-	at, for the same reason.
-
-	get_default_bom() (erpnext.stock.get_item_details) is ERPNext's own
-	standard helper for resolving the BOM to use for an item (is_active,
-	is_default, with template/variant fallback) -- reused as-is, not
-	reimplemented.
-	"""
-	policy = frappe.get_cached_value("Item", item_code, "default_material_request_type")
-
-	if policy == "Manufacture":
-		bom_no = get_default_bom(item_code)
-		if bom_no:
-			return "Manufacture", bom_no, None
-		return "Blocked", None, "Missing BOM"
-
-	if policy == "Purchase":
-		return "Purchase", None, None
-
-	return "Blocked", None, f"Unsupported procurement policy: {policy}"
+def _procurement_route_for_item(item_code, company=None):
+	"""(route, bom_no, blocking_reason) -- Purchase vs Manufacture vs
+	Blocked. Fase 28.1: the rule itself now lives in ONE place,
+	fabergray_erp.manufacturing.get_manufacturing_route() (native
+	Item.default_material_request_type + a default BOM that
+	validate_bom_for_production() accepts for this company); this is only
+	the analyzer's tuple adapter, so there are never two implementations
+	of the same rule. Unchanged contract: Manufacture without a resolvable
+	BOM is never silently downgraded to Purchase -- it comes back Blocked
+	("Missing BOM"), and any other native policy is Blocked
+	("Unsupported procurement policy: ...")."""
+	result = get_manufacturing_route(item_code, company=company)
+	return result["route"], result["bom"], result["reason"]
 
 
 def analyze_sales_order(sales_order):
@@ -171,7 +159,7 @@ def analyze_sales_order(sales_order):
 		if qty_shortage <= 0:
 			procurement_route, bom_no, blocking_reason = "Ready", None, None
 		else:
-			procurement_route, bom_no, blocking_reason = _procurement_route_for_item(item.item_code)
+			procurement_route, bom_no, blocking_reason = _procurement_route_for_item(item.item_code, so.company)
 
 		lines.append(
 			{
