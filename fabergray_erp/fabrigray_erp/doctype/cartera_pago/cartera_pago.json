@@ -1,0 +1,220 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "CPAG-.YYYY.-.#####",
+ "creation": "2026-09-24 14:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "cartera_obligacion",
+  "company",
+  "customer",
+  "column_break_amount",
+  "amount",
+  "currency",
+  "payment_date",
+  "section_break_method",
+  "payment_method",
+  "reference",
+  "column_break_proof",
+  "payment_proof",
+  "notes",
+  "section_break_audit",
+  "source",
+  "recorded_by",
+  "recorded_on",
+  "client_request_id",
+  "section_break_accounting",
+  "accounting_status",
+  "payment_entry",
+  "amended_from"
+ ],
+ "fields": [
+  {
+   "fieldname": "cartera_obligacion",
+   "fieldtype": "Link",
+   "label": "Obligación de cartera",
+   "options": "Cartera Obligacion",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Empresa",
+   "options": "Company",
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Cliente",
+   "options": "Customer",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_amount",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "Valor recibido",
+   "options": "currency",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Moneda",
+   "options": "Currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "payment_date",
+   "fieldtype": "Date",
+   "label": "Fecha del pago",
+   "reqd": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "section_break_method",
+   "fieldtype": "Section Break",
+   "label": "Medio de pago"
+  },
+  {
+   "fieldname": "payment_method",
+   "fieldtype": "Select",
+   "label": "Medio de pago",
+   "options": "\nTransferencia\nEfectivo\nConsignación\nOtro"
+  },
+  {
+   "fieldname": "reference",
+   "fieldtype": "Data",
+   "label": "Referencia"
+  },
+  {
+   "fieldname": "column_break_proof",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "payment_proof",
+   "fieldtype": "Attach Image",
+   "label": "Comprobante",
+   "description": "File privado adjunto a este pago. Los pagos reportados por el conductor NO copian su comprobante: está en la obligación."
+  },
+  {
+   "fieldname": "notes",
+   "fieldtype": "Small Text",
+   "label": "Observación"
+  },
+  {
+   "fieldname": "section_break_audit",
+   "fieldtype": "Section Break",
+   "label": "Registro"
+  },
+  {
+   "fieldname": "source",
+   "fieldtype": "Select",
+   "label": "Origen",
+   "options": "Cartera\nConductor",
+   "default": "Cartera",
+   "reqd": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "recorded_by",
+   "fieldtype": "Link",
+   "label": "Registrado por",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "recorded_on",
+   "fieldtype": "Datetime",
+   "label": "Registrado el",
+   "read_only": 1
+  },
+  {
+   "fieldname": "client_request_id",
+   "fieldtype": "Data",
+   "label": "Id de solicitud",
+   "unique": 1,
+   "read_only": 1,
+   "description": "Idempotencia: un doble envío del mismo cobro nunca crea dos pagos."
+  },
+  {
+   "fieldname": "section_break_accounting",
+   "fieldtype": "Section Break",
+   "label": "Contabilidad (futuro)",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "accounting_status",
+   "fieldtype": "Select",
+   "label": "Estado contable",
+   "options": "Sin contabilizar\nContabilizado",
+   "default": "Sin contabilizar",
+   "read_only": 1
+  },
+  {
+   "fieldname": "payment_entry",
+   "fieldtype": "Link",
+   "label": "Payment Entry",
+   "options": "Payment Entry",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amended_from",
+   "fieldtype": "Link",
+   "label": "Amended From",
+   "options": "Cartera Pago",
+   "no_copy": 1,
+   "print_hide": 1,
+   "read_only": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-24 14:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Fabrigray ERP",
+ "name": "Cartera Pago",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1,
+   "cancel": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1
+  },
+  {
+   "role": "Cartera",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "submit": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1,
+ "is_submittable": 1
+}

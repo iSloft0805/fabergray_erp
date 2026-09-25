@@ -101,7 +101,7 @@ from PIL import Image, ImageOps
 
 from erpnext import get_default_company
 
-from fabergray_erp import geocoding
+from fabergray_erp import cartera_service, geocoding
 from fabergray_erp.api.bodega import _require_login
 from fabergray_erp.api.clientes import _primary_address_name
 from fabergray_erp.api.facturacion import FG_INVOICING_FACTURADO, _sales_order_of
@@ -1616,6 +1616,11 @@ def _deliver_stop(
 	stop.delivered_on = now_datetime()
 	stop.status = "Entregado"
 	stop.save()
+
+	# Fase 27.1 -- the stop's receivable (Cartera Obligacion), in this same
+	# transaction but inside a savepoint: a Cartera failure is rolled back
+	# and logged, never undoing the delivery (the reconciler retries later).
+	cartera_service.ensure_obligation_after_delivery(stop.name)
 
 	detail = get_route_detail(route.name)
 	detail["already_completed"] = False

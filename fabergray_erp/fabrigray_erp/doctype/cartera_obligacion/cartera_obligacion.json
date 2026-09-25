@@ -1,0 +1,334 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "CART-.YYYY.-.#####",
+ "creation": "2026-09-24 14:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "recorrido_parada",
+  "recorrido",
+  "pick_list",
+  "sales_order",
+  "commercial_name",
+  "column_break_origin",
+  "company",
+  "customer",
+  "customer_name",
+  "invoice_issuer",
+  "section_break_amount",
+  "invoice_amount",
+  "currency",
+  "amount_source",
+  "column_break_balance",
+  "paid_amount",
+  "outstanding_amount",
+  "paid_on",
+  "section_break_status",
+  "status",
+  "payment_verification",
+  "column_break_credit",
+  "credit_days",
+  "due_date",
+  "section_break_delivery",
+  "delivered_on",
+  "delivery_date",
+  "delivered_by",
+  "column_break_driver",
+  "driver_payment_status",
+  "driver_payment_note",
+  "driver_payment_proof",
+  "section_break_issues",
+  "has_delivery_issues",
+  "delivery_issues",
+  "section_break_accounting",
+  "sales_invoice"
+ ],
+ "fields": [
+  {
+   "fieldname": "recorrido_parada",
+   "fieldtype": "Link",
+   "label": "Parada entregada",
+   "options": "Recorrido Parada",
+   "reqd": 1,
+   "unique": 1,
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "Fase 27.1 -- origen único de la obligación (índice único en BD: una parada entregada = una obligación)."
+  },
+  {
+   "fieldname": "recorrido",
+   "fieldtype": "Link",
+   "label": "Recorrido",
+   "options": "Recorrido",
+   "read_only": 1
+  },
+  {
+   "fieldname": "pick_list",
+   "fieldtype": "Link",
+   "label": "Pick List",
+   "options": "Pick List",
+   "read_only": 1
+  },
+  {
+   "fieldname": "sales_order",
+   "fieldtype": "Link",
+   "label": "Pedido (Sales Order)",
+   "options": "Sales Order",
+   "read_only": 1
+  },
+  {
+   "fieldname": "commercial_name",
+   "fieldtype": "Data",
+   "label": "Pedido",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_origin",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Empresa",
+   "options": "Company",
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Cliente",
+   "options": "Customer",
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "label": "Nombre del cliente",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "invoice_issuer",
+   "fieldtype": "Data",
+   "label": "Empresa emisora de la factura",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_amount",
+   "fieldtype": "Section Break",
+   "label": "Valor"
+  },
+  {
+   "fieldname": "invoice_amount",
+   "fieldtype": "Currency",
+   "label": "Valor facturado",
+   "options": "currency",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Moneda",
+   "options": "Currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amount_source",
+   "fieldtype": "Select",
+   "label": "Origen del valor",
+   "options": "\nFactura comercial\nSin valor calculable",
+   "read_only": 1,
+   "description": "Cómo se calculó invoice_amount: el mismo total del PDF comercial de Facturación, congelado al crear la obligación."
+  },
+  {
+   "fieldname": "column_break_balance",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "paid_amount",
+   "fieldtype": "Currency",
+   "label": "Pagado",
+   "options": "currency",
+   "read_only": 1
+  },
+  {
+   "fieldname": "outstanding_amount",
+   "fieldtype": "Currency",
+   "label": "Saldo pendiente",
+   "options": "currency",
+   "in_list_view": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "paid_on",
+   "fieldtype": "Date",
+   "label": "Pagado el",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_status",
+   "fieldtype": "Section Break",
+   "label": "Estado"
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Estado",
+   "options": "Por Validar\nPendiente\nPagado\nAnulada",
+   "reqd": 1,
+   "default": "Pendiente",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "payment_verification",
+   "fieldtype": "Select",
+   "label": "Verificación del pago",
+   "options": "\nSin confirmar\nConfirmado",
+   "read_only": 1,
+   "description": "Pago REPORTADO por el conductor: 'Sin confirmar' hasta que Cartera lo confirme."
+  },
+  {
+   "fieldname": "column_break_credit",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "credit_days",
+   "fieldtype": "Int",
+   "label": "Días de crédito",
+   "read_only": 1
+  },
+  {
+   "fieldname": "due_date",
+   "fieldtype": "Date",
+   "label": "Vence el",
+   "in_standard_filter": 1,
+   "search_index": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_delivery",
+   "fieldtype": "Section Break",
+   "label": "Entrega y reporte del conductor"
+  },
+  {
+   "fieldname": "delivered_on",
+   "fieldtype": "Datetime",
+   "label": "Entregado el",
+   "read_only": 1
+  },
+  {
+   "fieldname": "delivery_date",
+   "fieldtype": "Date",
+   "label": "Fecha de entrega",
+   "read_only": 1
+  },
+  {
+   "fieldname": "delivered_by",
+   "fieldtype": "Link",
+   "label": "Entregado por",
+   "options": "User",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_driver",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "driver_payment_status",
+   "fieldtype": "Select",
+   "label": "Pago reportado por el conductor",
+   "options": "\nPagado\nPendiente por Pago\nCrédito",
+   "read_only": 1
+  },
+  {
+   "fieldname": "driver_payment_note",
+   "fieldtype": "Small Text",
+   "label": "Observación del pago (conductor)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "driver_payment_proof",
+   "fieldtype": "Data",
+   "label": "Comprobante del conductor (referencia)",
+   "read_only": 1,
+   "description": "URL privada del File adjunto a la parada. No se copia el archivo; se sirve por un endpoint controlado."
+  },
+  {
+   "fieldname": "section_break_issues",
+   "fieldtype": "Section Break",
+   "label": "Faltantes / cambios"
+  },
+  {
+   "fieldname": "has_delivery_issues",
+   "fieldtype": "Check",
+   "label": "Entrega con faltantes / cambios",
+   "default": "0",
+   "read_only": 1
+  },
+  {
+   "fieldname": "delivery_issues",
+   "fieldtype": "Small Text",
+   "label": "Detalle de faltantes / cambios",
+   "depends_on": "has_delivery_issues",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_accounting",
+   "fieldtype": "Section Break",
+   "label": "Contabilidad (futuro)",
+   "collapsible": 1
+  },
+  {
+   "fieldname": "sales_invoice",
+   "fieldtype": "Link",
+   "label": "Sales Invoice",
+   "options": "Sales Invoice",
+   "read_only": 1,
+   "description": "Vacío por ahora: Cartera no crea documentos contables. Reservado para la conciliación futura."
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-09-24 14:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Fabrigray ERP",
+ "name": "Cartera Obligacion",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1,
+   "email": 1,
+   "share": 1
+  },
+  {
+   "role": "Cartera",
+   "read": 1,
+   "write": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1,
+ "title_field": "customer_name",
+ "show_title_field_in_link": 0
+}

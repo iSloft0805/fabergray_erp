@@ -189,6 +189,16 @@ boot_session = "fabergray_erp.boot.set_home_page"
 permission_query_conditions = {
 	"Sales Order": "fabergray_erp.permission_conditions.sales_order_permission_query_conditions",
 	"Quotation": "fabergray_erp.permission_conditions.quotation_permission_query_conditions",
+	# Fase 27.1 -- Cartera: same company boundary.
+	"Cartera Obligacion": "fabergray_erp.permission_conditions.cartera_obligacion_permission_query_conditions",
+	"Cartera Pago": "fabergray_erp.permission_conditions.cartera_pago_permission_query_conditions",
+}
+
+# Fase 27.1 -- single-document company boundary for Cartera (a hook can only
+# deny; see permission_conditions.cartera_company_has_permission()).
+has_permission = {
+	"Cartera Obligacion": "fabergray_erp.permission_conditions.cartera_company_has_permission",
+	"Cartera Pago": "fabergray_erp.permission_conditions.cartera_company_has_permission",
 }
 
 # has_permission = {
@@ -265,6 +275,15 @@ doc_events = {
 # Scheduled Tasks
 # ---------------
 
+# Fase 27.1 -- Cartera reconciler: creates the obligation of any Entregado
+# stop that has none (safety net + backfill; idempotent). deliver_stop()
+# already creates it in-line; this only catches what that step could not.
+scheduler_events = {
+	"cron": {
+		"*/15 * * * *": ["fabergray_erp.cartera_service.scheduled_sync_missing_obligations"],
+	},
+}
+
 # scheduler_events = {
 # 	"all": [
 # 		"fabergray_erp.tasks.all"
@@ -296,7 +315,7 @@ fixtures = [
 			[
 				"name",
 				"in",
-				["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes", "Recorrido"],
+				["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes", "Recorrido", "Cartera"],
 			]
 		],
 	},
@@ -306,7 +325,7 @@ fixtures = [
 			[
 				"role",
 				"in",
-				["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes", "Recorrido"],
+				["Bodega", "Jefe de Bodega", "Vendedora", "Facturación", "Gestión de Clientes", "Recorrido", "Cartera"],
 			]
 		],
 	},

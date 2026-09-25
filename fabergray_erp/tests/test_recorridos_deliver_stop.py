@@ -148,6 +148,13 @@ class TestRecorridosDeliverStop(IntegrationTestCase):
 		):
 			if name not in self._evidence_file_names:
 				self._evidence_file_names.append(name)
+		# Fase 27.1 -- a delivery also creates its Cartera Obligacion (and,
+		# for "Pagado + comprobante", a submitted Cartera Pago): tracked so
+		# world.cleanup() removes them (payments first -- reverse order).
+		for obligation in frappe.get_all("Cartera Obligacion", filters={"recorrido_parada": stop_name}, pluck="name"):
+			self.world.track_existing("Cartera Obligacion", obligation)
+			for payment in frappe.get_all("Cartera Pago", filters={"cartera_obligacion": obligation}, pluck="name"):
+				self.world.track_existing("Cartera Pago", payment)
 
 	def _deliver(
 		self, route_name, stop_name, photo="default", signature="default", notes=None, user=None, payment_proof=None, **report

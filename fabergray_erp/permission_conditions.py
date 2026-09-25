@@ -139,3 +139,31 @@ def assert_same_company(doc, user=None):
             _("No tienes acceso a documentos de otra empresa."),
             frappe.PermissionError,
         )
+
+
+# ---------------------------------------------------------------------------
+# Fase 27.1 -- Cartera. Same company boundary as Sales Order/Quotation: list
+# queries are filtered by the caller's allowed companies, and single documents
+# of another company are denied through the has_permission hook.
+# ---------------------------------------------------------------------------
+
+
+def cartera_obligacion_permission_query_conditions(user=None, doctype=None):
+    return _company_permission_query_condition("Cartera Obligacion", user)
+
+
+def cartera_pago_permission_query_conditions(user=None, doctype=None):
+    return _company_permission_query_condition("Cartera Pago", user)
+
+
+def cartera_company_has_permission(doc, ptype=None, user=None, debug=False):
+    """has_permission hook for Cartera Obligacion/Cartera Pago. A hook can
+    only DENY (frappe.permissions.has_controller_permissions() treats any
+    falsy return, None included, as "denied"), so this always returns an
+    explicit bool. A document whose company is not set yet (a new Cartera
+    Pago before validate() copies it from its obligation) is not denied
+    here -- its company is always the obligation's, set server-side."""
+    companies = _allowed_companies(user)
+    if companies is None or not doc.get("company"):
+        return True
+    return doc.company in companies
