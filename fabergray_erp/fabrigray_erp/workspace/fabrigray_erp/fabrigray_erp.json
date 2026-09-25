@@ -19,7 +19,7 @@
  "label": "Fabrigray ERP",
  "link_type": "DocType",
  "links": [],
- "modified": "2026-09-25 12:00:00.000000",
+ "modified": "2026-09-25 23:00:00.000000",
  "modified_by": "Administrator",
  "name": "Fabrigray ERP",
  "number_cards": [],
@@ -44,6 +44,12 @@
   },
   {
    "role": "Cartera"
+  },
+  {
+   "role": "Producci\u00f3n"
+  },
+  {
+   "role": "Jefe de Producci\u00f3n"
   },
   {
    "role": "System Manager"

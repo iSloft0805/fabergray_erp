@@ -1,0 +1,693 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Fase 28.3 -- Page Producción (solo lectura). Everything generic (header,
+ * KPI shell, badge shell, buttons, search bar, skeletons, design tokens)
+ * comes from the shared fg_shell.css; this file only styles what is new
+ * here, reproduced (not imported) from cartera.css, same reasoning. Scoped
+ * under .fg-produccion.
+ *
+ * Mobile-first: one column of cards, KPIs in a 2x2 grid, raw materials as
+ * compact rows (never a wide table); 2 card columns from 700px; 4 KPIs in
+ * one row, 3 card columns and a two-column detail (orden / pedidos |
+ * resumen / materias primas) from 1100px. Every tappable control is
+ * >= 44px. Long names wrap (overflow-wrap: anywhere) instead of widening
+ * the page -- no horizontal overflow at 360px.
+ *
+ * Colors by meaning, always with text: pendiente -> primary, en producción
+ * -> warning, completada / disponible -> success, falta material /
+ * configuración incompleta -> danger, parcial -> warning.
+ */
+
+.fg-produccion {
+	overflow-x: hidden;
+}
+
+.fg-produccion .fg-body {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.fg-produccion .fg-body > * {
+	min-width: 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Intro + KPIs                                                         */
+/* ------------------------------------------------------------------ */
+.fg-produccion .fg-prod-intro {
+	margin-bottom: 14px;
+}
+
+.fg-produccion .fg-prod-title {
+	margin: 0;
+	font-size: 1.4rem;
+	font-weight: 800;
+	letter-spacing: 0.02em;
+	color: var(--fg-text);
+}
+
+.fg-produccion .fg-prod-subtitle {
+	margin: 2px 0 0;
+	font-size: 0.9rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-produccion.fg-shell .fg-prod-kpis,
+.fg-produccion.fg-shell .fg-prod-skeleton-kpis {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 10px;
+	margin-bottom: 18px;
+}
+
+.fg-produccion .fg-prod-kpi {
+	min-width: 0;
+	min-height: var(--fg-touch);
+	padding: 14px;
+	gap: 8px;
+	font-family: inherit;
+	color: inherit;
+}
+
+.fg-produccion .fg-prod-kpi--pendiente {
+	--fg-kpi-color: var(--fg-primary-dark);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-produccion .fg-prod-kpi--en-produccion {
+	--fg-kpi-color: var(--fg-warning-dark);
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-produccion .fg-prod-kpi--falta {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+.fg-produccion .fg-prod-kpi--completada {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+.fg-produccion .fg-prod-kpi-top {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-width: 0;
+}
+
+.fg-produccion .fg-prod-kpi .fg-kpi-icon {
+	width: 36px;
+	height: 36px;
+	flex-shrink: 0;
+}
+
+.fg-produccion .fg-prod-kpi .fg-kpi-label {
+	font-size: 0.72rem;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-kpi .fg-kpi-number {
+	font-size: 1.7rem;
+	overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------ */
+/* Search / tabs / filters                                              */
+/* ------------------------------------------------------------------ */
+.fg-produccion .fg-prod-search {
+	margin-bottom: 12px;
+}
+
+.fg-produccion .fg-prod-search .fg-search-input {
+	height: 52px;
+	font-size: 1rem;
+	font-weight: 600;
+}
+
+.fg-produccion .fg-prod-search .fg-search-clear {
+	width: 44px;
+	height: 44px;
+	right: 4px;
+}
+
+.fg-produccion .fg-prod-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 12px;
+}
+
+.fg-produccion .fg-prod-tab {
+	min-height: var(--fg-touch);
+	background: var(--fg-card);
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-pill);
+	padding: 0 16px;
+	font-size: 0.78rem;
+	font-weight: 700;
+	color: var(--fg-text-muted);
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition), color var(--fg-transition);
+}
+
+.fg-produccion .fg-prod-tab.is-active {
+	background: var(--fg-primary-tint);
+	border-color: var(--fg-primary);
+	color: var(--fg-primary-dark);
+}
+
+.fg-produccion .fg-prod-filters {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 8px;
+	margin-bottom: 16px;
+}
+
+.fg-produccion .fg-prod-select {
+	margin: 0;
+	min-width: 0;
+}
+
+.fg-produccion .fg-prod-select select {
+	width: 100%;
+	min-height: var(--fg-touch);
+	padding: 0 10px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	font-size: 0.85rem;
+	font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ */
+/* Cards                                                                */
+/* ------------------------------------------------------------------ */
+.fg-produccion .fg-prod-cards {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 12px;
+	margin-bottom: 16px;
+}
+
+.fg-produccion .fg-prod-cards > .fg-empty,
+.fg-produccion .fg-prod-cards > .fg-search-empty,
+.fg-produccion .fg-prod-cards > .fg-prod-error,
+.fg-produccion .fg-prod-cards > .fg-skeleton-cards {
+	grid-column: 1 / -1;
+}
+
+.fg-produccion .fg-prod-card {
+	min-width: 0;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-left: 4px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.fg-produccion .fg-prod-card--pendiente {
+	border-left-color: var(--fg-primary);
+}
+
+.fg-produccion .fg-prod-card--en-produccion {
+	border-left-color: var(--fg-warning);
+}
+
+.fg-produccion .fg-prod-card--completada {
+	border-left-color: var(--fg-success);
+}
+
+.fg-produccion .fg-prod-card-top,
+.fg-produccion .fg-prod-detail-top,
+.fg-produccion .fg-prod-report-top,
+.fg-produccion .fg-prod-material-top {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 10px;
+	min-width: 0;
+}
+
+.fg-produccion .fg-prod-card-product,
+.fg-produccion .fg-prod-report-customer,
+.fg-produccion .fg-prod-material-product {
+	min-width: 0;
+}
+
+.fg-produccion .fg-prod-card-name,
+.fg-produccion .fg-prod-report-name,
+.fg-produccion .fg-prod-material-name {
+	font-weight: 800;
+	font-size: 0.98rem;
+	text-transform: uppercase;
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-detail-name {
+	font-size: 1.1rem;
+}
+
+.fg-produccion .fg-prod-card-code,
+.fg-produccion .fg-prod-material-code,
+.fg-produccion .fg-prod-report-order,
+.fg-produccion .fg-prod-report-item,
+.fg-produccion .fg-prod-card-wo {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-card-wo strong {
+	color: var(--fg-text);
+}
+
+.fg-produccion .fg-prod-metrics,
+.fg-produccion .fg-prod-material-grid,
+.fg-produccion .fg-prod-summary,
+.fg-produccion .fg-prod-report-grid,
+.fg-produccion .fg-prod-detail-grid {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 8px;
+	padding: 10px 12px;
+	background: var(--fg-bg);
+	border-radius: var(--fg-radius-md);
+}
+
+.fg-produccion .fg-prod-material-grid,
+.fg-produccion .fg-prod-summary,
+.fg-produccion .fg-prod-report-grid,
+.fg-produccion .fg-prod-detail-grid {
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.fg-produccion .fg-prod-metric {
+	min-width: 0;
+}
+
+.fg-produccion .fg-prod-metric-label,
+.fg-produccion .fg-prod-detail-label {
+	font-size: 0.66rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+	color: var(--fg-text-muted);
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-metric-value,
+.fg-produccion .fg-prod-detail-value {
+	font-size: 0.95rem;
+	font-weight: 800;
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-detail-value {
+	font-size: 0.9rem;
+	font-weight: 600;
+}
+
+.fg-produccion .fg-prod-metric--danger .fg-prod-metric-value {
+	color: var(--fg-danger);
+}
+
+.fg-produccion .fg-prod-progress {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+}
+
+.fg-produccion .fg-prod-progress-row {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: space-between;
+	gap: 4px 10px;
+}
+
+.fg-produccion .fg-prod-progress-value {
+	font-weight: 800;
+	font-size: 0.92rem;
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-progress-track {
+	height: 8px;
+	border-radius: var(--fg-radius-pill);
+	background: var(--fg-border);
+	overflow: hidden;
+}
+
+.fg-produccion .fg-prod-progress-fill {
+	height: 100%;
+	border-radius: var(--fg-radius-pill);
+	background: var(--fg-success);
+}
+
+/* Semáforo de materiales: icono + texto, nunca solo color. */
+.fg-produccion .fg-prod-material {
+	display: inline-flex;
+	align-items: center;
+	align-self: flex-start;
+	gap: 6px;
+	padding: 6px 12px;
+	border-radius: var(--fg-radius-pill);
+	font-size: 0.75rem;
+	font-weight: 800;
+	letter-spacing: 0.02em;
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-material--ok {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-produccion .fg-prod-material--parcial {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-produccion .fg-prod-material--falta {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+.fg-produccion .fg-prod-card-origin {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	font-size: 0.82rem;
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-origin-label {
+	color: var(--fg-text-muted);
+}
+
+.fg-produccion .fg-prod-more {
+	font-size: 0.75rem;
+	font-weight: 700;
+	color: var(--fg-primary-dark);
+}
+
+.fg-produccion .fg-prod-card-detail {
+	width: 100%;
+	min-height: var(--fg-touch);
+}
+
+/* Badges (by meaning) */
+.fg-produccion .fg-prod-badge {
+	white-space: normal;
+	text-align: left;
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-badge--pendiente {
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+}
+
+.fg-produccion .fg-prod-badge--en-produccion,
+.fg-produccion .fg-prod-badge--parcial {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-produccion .fg-prod-badge--completada,
+.fg-produccion .fg-prod-badge--ok {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+.fg-produccion .fg-prod-badge--falta {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+.fg-produccion .fg-prod-badge--neutral {
+	background: #eef1f6;
+	color: var(--fg-text-muted);
+}
+
+/* ------------------------------------------------------------------ */
+/* Empty / error / pagination                                           */
+/* ------------------------------------------------------------------ */
+.fg-produccion .fg-prod-empty {
+	font-weight: 700;
+	padding: 36px 16px;
+}
+
+.fg-produccion .fg-prod-error {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 12px;
+	text-align: center;
+	color: var(--fg-text-muted);
+	padding: 28px 16px;
+	margin-bottom: 16px;
+	background: var(--fg-card);
+	border: 1px dashed var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+}
+
+.fg-produccion .fg-prod-pagination {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+.fg-produccion .fg-prod-pagination:empty {
+	display: none;
+}
+
+.fg-produccion .fg-prod-pagination-info {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-produccion .fg-prod-pagination-controls {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+
+.fg-produccion .fg-prod-pagination-btn {
+	appearance: none;
+	width: 44px;
+	height: 44px;
+	border-radius: var(--fg-radius-sm);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+}
+
+.fg-produccion .fg-prod-pagination-btn:disabled {
+	opacity: 0.4;
+	cursor: not-allowed;
+}
+
+.fg-produccion .fg-prod-pagination-page {
+	font-weight: 700;
+	font-size: 0.86rem;
+}
+
+/* ------------------------------------------------------------------ */
+/* Detail (in-page view)                                                */
+/* ------------------------------------------------------------------ */
+.fg-produccion .fg-np-header {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 12px;
+	margin-bottom: 16px;
+}
+
+.fg-produccion .fg-np-back {
+	appearance: none;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	height: var(--fg-touch);
+	padding: 0 16px;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 600;
+	font-size: 0.85rem;
+	color: var(--fg-text);
+	cursor: pointer;
+}
+
+.fg-produccion .fg-np-title {
+	font-size: 1.15rem;
+	font-weight: 800;
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-detail-skeleton {
+	height: 200px;
+	margin-bottom: 14px;
+}
+
+.fg-produccion .fg-prod-detail {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 0 16px;
+}
+
+.fg-produccion .fg-prod-detail-col {
+	min-width: 0;
+}
+
+.fg-produccion .fg-prod-detail-section {
+	min-width: 0;
+	background: var(--fg-card);
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius-lg);
+	box-shadow: var(--fg-shadow-sm);
+	padding: 16px;
+	margin-bottom: 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.fg-produccion .fg-prod-section-title {
+	font-size: 0.85rem;
+	font-weight: 800;
+	letter-spacing: 0.03em;
+}
+
+.fg-produccion .fg-prod-detail-field {
+	min-width: 0;
+}
+
+.fg-produccion .fg-prod-native {
+	font-weight: 500;
+	color: var(--fg-text-muted);
+}
+
+.fg-produccion .fg-prod-muted {
+	color: var(--fg-text-muted);
+	font-size: 0.82rem;
+}
+
+.fg-produccion .fg-prod-report,
+.fg-produccion .fg-prod-material-row {
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 12px;
+	border: 1px solid var(--fg-border);
+	border-left: 4px solid var(--fg-border);
+	border-radius: var(--fg-radius-md);
+}
+
+.fg-produccion .fg-prod-material-row--ok {
+	border-left-color: var(--fg-success);
+}
+
+.fg-produccion .fg-prod-material-row--parcial {
+	border-left-color: var(--fg-warning);
+}
+
+.fg-produccion .fg-prod-material-row--falta,
+.fg-produccion .fg-prod-material-row--config {
+	border-left-color: var(--fg-danger);
+}
+
+.fg-produccion .fg-prod-material-warehouse,
+.fg-produccion .fg-prod-material-note {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-warehouse-problem {
+	display: inline-flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 6px;
+	font-weight: 800;
+	color: var(--fg-danger);
+	overflow-wrap: anywhere;
+}
+
+.fg-produccion .fg-prod-total {
+	display: flex;
+	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 6px;
+	padding: 10px 12px;
+	border-radius: var(--fg-radius-md);
+	background: var(--fg-primary-tint);
+	color: var(--fg-primary-dark);
+	font-size: 0.85rem;
+	font-weight: 800;
+	overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------------------------ */
+/* Wider screens                                                        */
+/* ------------------------------------------------------------------ */
+@media (min-width: 700px) {
+	.fg-produccion .fg-prod-cards {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.fg-produccion .fg-prod-filters {
+		display: flex;
+		flex-wrap: wrap;
+	}
+
+	.fg-produccion .fg-prod-select {
+		flex: 0 1 240px;
+	}
+
+	.fg-produccion .fg-prod-material-grid,
+	.fg-produccion .fg-prod-report-grid {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+	}
+
+	.fg-produccion .fg-prod-detail-grid,
+	.fg-produccion .fg-prod-summary {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+}
+
+@media (min-width: 1100px) {
+	.fg-produccion.fg-shell .fg-prod-kpis,
+	.fg-produccion.fg-shell .fg-prod-skeleton-kpis {
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 14px;
+	}
+
+	.fg-produccion .fg-prod-cards {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+
+	.fg-produccion .fg-prod-detail {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+}
