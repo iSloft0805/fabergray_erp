@@ -16,8 +16,10 @@ its own access checks):
    never a value from the client) and store it in procurement_route:
    - Purchase  -> the existing purchase flow continues (status untouched);
    - Blocked   -> reason stored, no Work Order, status untouched (Abierto);
-   - Manufacture -> finished-goods warehouse = Company.default_fg_warehouse
-     and it must be the report's own warehouse (where Bodega picks);
+   - Manufacture -> finished-goods warehouse = manufacturing.
+     resolve_fg_warehouse(item) (Item Default -> Item Group Default ->
+     Company.default_fg_warehouse, Fase 28.4A.3) and it must be the
+     report's own warehouse (where Bodega picks);
      every component needs a valid source warehouse (native chain). Any
      problem -> Blocked with the reason, BEFORE creating anything;
 5. need = qty_faltante - what purchases already received for it;
@@ -193,7 +195,7 @@ def route_shortage(report_name, company):
 		return _response(report, problems=route["problems"])
 
 	bom_no = route["bom"]
-	fg_warehouse, problems = manufacturing.resolve_fg_warehouse(company)
+	fg_warehouse, problems = manufacturing.resolve_fg_warehouse(report.item_code, company)
 	if fg_warehouse and fg_warehouse != report.warehouse:
 		problems.append(
 			f"el faltante es de la bodega {report.warehouse} y la producción entrega en {fg_warehouse}"

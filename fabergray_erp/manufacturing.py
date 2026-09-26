@@ -155,7 +155,7 @@ def validate_bom_for_production(bom_no, item_code, company=None):
 
 
 # ---------------------------------------------------------------------------
-# Fase 28.2 -- warehouses (all native configuration, no names in code)
+# Fase 28.2 / 28.4A.3 -- warehouses (all native configuration, no names in code)
 # ---------------------------------------------------------------------------
 
 
@@ -174,13 +174,35 @@ def _warehouse_problem(warehouse, company, label):
 	return None
 
 
-def resolve_fg_warehouse(company=None):
-	"""(warehouse, problems) -- the finished-goods warehouse of `company`:
-	the native Company.default_fg_warehouse (per company in ERPNext v16;
-	Manufacturing Settings has no warehouse defaults)."""
+def resolve_fg_warehouse(item_code, company=None):
+	"""(warehouse, problems) -- where `item_code` is delivered when it is
+	manufactured for `company` (Fase 28.4A.3: one finished-goods warehouse
+	per product line, not one per company). Native configuration only, in
+	this order -- the first level that is CONFIGURED wins:
+
+	1. Item Default.default_warehouse (native get_item_defaults());
+	2. Item Group Default.default_warehouse (native get_item_group_defaults());
+	3. Company.default_fg_warehouse -- fallback for the items not classified
+	   into a product-line warehouse yet.
+
+	The winning warehouse is always validated (exists, same company,
+	enabled, not a group). An invalid one is a problem, never silently
+	skipped to the next level: producing into a warehouse the product does
+	not belong to would put the stock where Bodega never picks it."""
+	from erpnext.setup.doctype.item_group.item_group import get_item_group_defaults
+	from erpnext.stock.doctype.item.item import get_item_defaults
+
 	company = company or get_default_company()
-	warehouse = frappe.db.get_value("Company", company, "default_fg_warehouse")
-	problem = _warehouse_problem(warehouse, company, "Producto terminado (Company.default_fg_warehouse)")
+	candidates = (
+		("Item Default", lambda: get_item_defaults(item_code, company).get("default_warehouse")),
+		("Item Group Default", lambda: get_item_group_defaults(item_code, company).get("default_warehouse")),
+		("Company.default_fg_warehouse", lambda: frappe.db.get_value("Company", company, "default_fg_warehouse")),
+	)
+	for source, resolve in candidates:
+		warehouse = resolve()
+		if warehouse:
+			break
+	problem = _warehouse_problem(warehouse, company, f"Producto terminado de {item_code} ({source})")
 	return warehouse, [problem] if problem else []
 
 

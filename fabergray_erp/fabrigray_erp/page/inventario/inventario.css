@@ -45,6 +45,50 @@
 	grid-template-columns: repeat(4, 1fr);
 }
 
+/* Hotfix Inventario -- EXISTENCIAS / VALOR COMERCIAL (dos cards grandes)
+   y la línea de productos con stock / sin precio. */
+.fg-inventario .fg-kpi--inv-existencias {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-inventario .fg-kpi--inv-valor {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+.fg-inventario .fg-inv-commercial {
+	margin-bottom: 20px;
+}
+
+.fg-inventario .fg-inv-commercial-main {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 16px;
+}
+
+.fg-inventario .fg-inv-commercial-main .fg-kpi {
+	min-width: 0;
+}
+
+.fg-inventario .fg-inv-commercial-number {
+	font-size: 2.2rem;
+	overflow-wrap: anywhere;
+}
+
+.fg-inventario .fg-inv-commercial-sub {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px 24px;
+	margin-top: 10px;
+	font-size: 0.9rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-inventario .fg-inv-commercial-sub .is-warning strong {
+	color: var(--fg-warning-dark);
+}
+
 /* Stock bajo, sin reorder levels configurados todavía (Commit 22.6) --
    texto explícito, nunca un número inventado. */
 .fg-inventario .fg-kpi-number--pending {
@@ -454,6 +498,15 @@
 }
 
 @media (max-width: 640px) {
+	.fg-inventario .fg-inv-commercial-main {
+		grid-template-columns: 1fr;
+		gap: 10px;
+	}
+
+	.fg-inventario .fg-inv-commercial-number {
+		font-size: 1.6rem;
+	}
+
 	.fg-inventario.fg-shell .fg-kpis--inventario {
 		grid-template-columns: 1fr 1fr;
 		gap: 10px;

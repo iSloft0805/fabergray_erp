@@ -240,10 +240,38 @@ fabergray_erp.Inventario = class Inventario {
 
 	render_dashboard() {
 		this.$body.html(`
+			${this.render_commercial_kpis()}
 			${this.render_kpis()}
 			<div class="fg-inv-list-section">${this.render_list_section()}</div>
 		`);
 		this.bind_list_section_events();
+	}
+
+	// Hotfix Inventario -- existencias y valor comercial del stock VENDIBLE
+	// (get_inventory_summary(): solo Producto Terminado + bodegas de línea;
+	// nunca materia prima, empaque, WIP, Devoluciones ni Cuarentena;
+	// valor = unidades x precio de venta vigente de Standard Selling).
+	render_commercial_kpis() {
+		const s = this.summary || {};
+		const without_price = s.items_without_selling_price || 0;
+		return `
+			<div class="fg-inv-commercial">
+				<div class="fg-inv-commercial-main">
+					<div class="fg-kpi fg-kpi--inv-existencias">
+						<div class="fg-kpi-label">${__("EXISTENCIAS COMERCIALES")}</div>
+						<div class="fg-kpi-number fg-inv-commercial-number">${format_units(s.total_units)} ${__("UNIDADES")}</div>
+					</div>
+					<div class="fg-kpi fg-kpi--inv-valor">
+						<div class="fg-kpi-label">${__("VALOR COMERCIAL")}</div>
+						<div class="fg-kpi-number fg-inv-commercial-number">${format_cop(s.commercial_value)}</div>
+					</div>
+				</div>
+				<div class="fg-inv-commercial-sub">
+					<span>${__("Productos con stock")}: <strong>${s.items_with_stock || 0}</strong></span>
+					<span class="${without_price ? "is-warning" : ""}">${__("Sin precio")}: <strong>${without_price}</strong></span>
+				</div>
+			</div>
+		`;
 	}
 
 	// Los 4 KPI puramente informativos, sin filtro asociado al hacer clic
@@ -258,7 +286,9 @@ fabergray_erp.Inventario = class Inventario {
 		const s = this.summary || {};
 		const cards = [
 			{ key: "references", label: __("Referencias"), i: "package", mod: "inv-referencias" },
-			{ key: "total_stock", label: __("Stock total"), i: "boxes", mod: "inv-stock-total" },
+			// Todas las existencias físicas (materia prima, empaque, WIP...):
+			// no es el inventario comercial de arriba.
+			{ key: "total_stock", label: __("Stock físico total"), i: "boxes", mod: "inv-stock-total" },
 			{ key: "out_of_stock", label: __("Agotados"), i: "triangle-alert", mod: "inv-agotados" },
 			{ key: "low_stock", label: __("Stock bajo"), i: "gauge", mod: "inv-stock-bajo" },
 		];
@@ -1112,6 +1142,24 @@ function paginate(items, page, page_size) {
 	const safe_page = Math.min(Math.max(page || 1, 1), page_count);
 	const start = (safe_page - 1) * page_size;
 	return { page_items: items.slice(start, start + page_size), total, page_count, page: safe_page };
+}
+
+// Hotfix Inventario -- "$ 4.000.000" (COP: punto de miles, coma decimal
+// solo si hay centavos), mismo formato de page/cartera/cartera.js.
+function format_cop(value) {
+	const n = flt(value);
+	const cents = Math.round(Math.abs(n) * 100);
+	const int_str = String(Math.floor(cents / 100)).replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+	const body = cents % 100 ? `${int_str},${String(cents % 100).padStart(2, "0")}` : int_str;
+	return `${n < 0 && cents ? "-" : ""}$ ${body}`;
+}
+
+// "1.250" unidades (punto de miles), decimales solo si existen.
+function format_units(qty) {
+	const n = flt(qty);
+	const [int_part, dec] = (n % 1 === 0 ? String(n) : n.toFixed(2)).split(".");
+	const int_str = int_part.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+	return dec ? `${int_str},${dec}` : int_str;
 }
 
 function format_qty(qty) {

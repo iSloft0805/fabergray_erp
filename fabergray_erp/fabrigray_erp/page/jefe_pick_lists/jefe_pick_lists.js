@@ -328,7 +328,7 @@ fabergray_erp.JefePickLists = class JefePickLists {
 				</div>
 				<div class="fg-pl-card-meta">${pedido}</div>
 				<div class="fg-pl-card-meta">${__("Cliente")}: ${frappe.utils.escape_html(r.customer || "—")}</div>
-				<div class="fg-pl-card-meta">${__("Almacén")}: ${frappe.utils.escape_html(r.parent_warehouse || "—")}</div>
+				<div class="fg-pl-card-meta">${__("Almacén")}: ${frappe.utils.escape_html(warehouse_label(r))}</div>
 				<div class="fg-pl-card-qty">
 					<div class="fg-pl-card-qty-col">
 						<div class="fg-pl-card-qty-label">${__("Productos")}</div>
@@ -501,7 +501,7 @@ fabergray_erp.JefePickLists = class JefePickLists {
 						<div class="fg-pl-detail-info">
 							${row_kv(__("Pedido"), detail.sales_order ? `${detail.commercial_name || detail.sales_order}` : "—")}
 							${row_kv(__("Cliente"), detail.customer || "—")}
-							${row_kv(__("Almacén"), detail.parent_warehouse || "—")}
+							${row_kv(__("Almacén"), warehouse_label(detail))}
 							${row_kv(__("Estado nativo"), detail.status || "—")}
 							${row_kv(__("Iniciado por"), detail.fg_started_by || "—")}
 							${row_kv(__("Iniciado el"), detail.fg_started_on ? frappe.datetime.str_to_user(detail.fg_started_on) : "—")}
@@ -544,6 +544,12 @@ fabergray_erp.JefePickLists = class JefePickLists {
 		dialog.show();
 	}
 };
+
+// Fase 28.4A.3 -- a multi-warehouse Pick List has no parent_warehouse: show
+// the warehouses of its own lines instead of "—".
+function warehouse_label(pl) {
+	return pl.parent_warehouse || (pl.warehouses || []).join(", ") || "—";
+}
 
 // Hotfix 25.26.2 -- "OBSERVACIONES DEL PEDIDO" from bodega.get_pick_list()'s
 // order_observations (read-only). Same contract as bodega.js's own helper

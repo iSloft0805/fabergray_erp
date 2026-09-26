@@ -35,6 +35,7 @@ from frappe.utils import flt
 from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
 from fabergray_erp.manufacturing import get_manufacturing_route
+from fabergray_erp.warehouses import non_picking_warehouses
 
 OPEN_PICK_LIST_STATUSES_EXCLUDED = ("Completed", "Cancelled")
 
@@ -95,10 +96,14 @@ def _qty_committed_by_open_pick_lists(item_code, warehouse):
 	return sum(flt(row.qty) for row in rows)
 
 
-def _qty_available_for_pick(item_code, warehouse):
+def _qty_available_for_pick(item_code, warehouse, company=None):
 	"""Bin.actual_qty (via get_actual_qty() -- the same public helper
 	api/bodega.py already uses for qty_disponible) minus whatever other
-	open Pick Lists already claim, floored at 0."""
+	open Pick Lists already claim, floored at 0. Fase 28.4A.3: always 0 in
+	a non-picking warehouse (Devoluciones, Cuarentena -- never a picking
+	source, see pick_list_mixin.set_item_locations())."""
+	if company and warehouse in non_picking_warehouses(company):
+		return 0.0
 	actual_qty = flt(get_actual_qty(item_code, warehouse))
 	committed = _qty_committed_by_open_pick_lists(item_code, warehouse)
 	return max(actual_qty - committed, 0.0)
@@ -153,7 +158,7 @@ def analyze_sales_order(sales_order):
 		qty_picked = flt(item.picked_qty)
 		qty_remaining = max(qty_ordered - qty_delivered, 0.0)
 
-		qty_available_for_pick = _qty_available_for_pick(item.item_code, item.warehouse)
+		qty_available_for_pick = _qty_available_for_pick(item.item_code, item.warehouse, so.company)
 		qty_shortage = max(qty_remaining - qty_available_for_pick, 0.0)
 
 		if qty_shortage <= 0:

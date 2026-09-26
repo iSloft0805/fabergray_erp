@@ -57,12 +57,13 @@ threshold to compute this from that would not be invented.
 
 import frappe
 from frappe import _
-from frappe.utils import cint, flt
+from frappe.utils import cint, flt, getdate, nowdate
 
 from erpnext import get_default_company
 from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import get_difference_account
 
 from fabergray_erp.api.bodega import _require_login
+from fabergray_erp.warehouses import COMMERCIAL_WAREHOUSES, ROOT_WAREHOUSE, warehouse_name
 
 PRICE_LIST = "Standard Selling"
 PRICE_LIST_BUYING = "Standard Buying"
@@ -159,9 +160,122 @@ def _selling_rates(item_codes):
     return {r.item_code: r.price_list_rate for r in rows}
 
 
+def _commercial_warehouses(company):
+    """Hotfix Inventario -- warehouses whose stock is commercial (sellable)
+    inventory: exactly warehouses.COMMERCIAL_WAREHOUSES of `company`
+    (Producto Terminado + the product-line warehouses), each one only if
+    it is a leaf, enabled warehouse under the company's real root
+    ("Todos los almacenes - <abbr>"). Everything else -- raw material,
+    packaging, WIP, Devoluciones, Cuarentena, test warehouses (created
+    without a parent), other companies -- is physical stock, never
+    commercial, even when its Items have a selling price.
+
+    Second deliberate read of this module outside the user's permissions
+    (same reasoning as _item_creation_catalogs() below): Bodega has no
+    Warehouse DocPerm and must not get one just to see this tree; only
+    warehouse NAMES are read, never stock or money, and the stock itself
+    is still read through frappe.get_list() with the user's permissions."""
+    root = frappe.db.get_value("Warehouse", warehouse_name(ROOT_WAREHOUSE, company), ["lft", "rgt"], as_dict=True)
+    if not root:
+        return []
+    return frappe.db.get_all(
+        "Warehouse",
+        filters={
+            "name": ["in", [warehouse_name(base, company) for base in COMMERCIAL_WAREHOUSES]],
+            "company": company,
+            "is_group": 0,
+            "disabled": 0,
+            "lft": [">", root.lft],
+            "rgt": ["<", root.rgt],
+        },
+        pluck="name",
+        order_by="name asc",
+    )
+
+
+def _current_selling_prices(item_codes):
+    """{item_code: rate} -- ONE current PRICE_LIST (Standard Selling) price
+    per Item, the same list the Inventario list/detail already shows
+    (_selling_rates()). Current = no customer, valid_from empty or <= today,
+    valid_upto empty or >= today, rate > 0, UOM empty or the Item's stock UOM
+    (stock is counted in stock UOM). Several valid rows for the same Item
+    (none today) resolve to the most recent valid_from, then the most
+    recently modified -- never summed, never joined against the stock rows."""
+    if not item_codes:
+        return {}
+    stock_uoms = {
+        r.name: r.stock_uom
+        for r in frappe.get_list("Item", filters={"name": ["in", list(item_codes)]}, fields=["name", "stock_uom"], limit_page_length=0)
+    }
+    today = getdate(nowdate())
+    best = {}
+    for row in frappe.get_list(
+        "Item Price",
+        filters={"price_list": PRICE_LIST, "selling": 1, "item_code": ["in", list(item_codes)]},
+        fields=["item_code", "price_list_rate", "customer", "uom", "valid_from", "valid_upto", "modified"],
+        limit_page_length=0,
+    ):
+        if row.customer or flt(row.price_list_rate) <= 0:
+            continue
+        if row.valid_from and getdate(row.valid_from) > today:
+            continue
+        if row.valid_upto and getdate(row.valid_upto) < today:
+            continue
+        if row.uom and row.uom != stock_uoms.get(row.item_code):
+            continue
+        key = (getdate(row.valid_from) if row.valid_from else getdate("1900-01-01"), row.modified)
+        if row.item_code not in best or key > best[row.item_code][0]:
+            best[row.item_code] = (key, flt(row.price_list_rate))
+    return {code: rate for code, (_key, rate) in best.items()}
+
+
+def _commercial_summary(company):
+    """Hotfix Inventario -- commercial quantity and value of the sellable
+    stock (see _commercial_warehouses()). Per Bin row (item_code +
+    warehouse): commercial_qty = max(actual_qty, 0) (negative stock is not
+    available), value = commercial_qty x the Item's current selling price
+    (0 when it has none: the units still count). commercial_breakdown
+    shows, per warehouse, exactly where the totals come from. Read-only."""
+    warehouses = _commercial_warehouses(company)
+    bins = []
+    if warehouses:
+        bins = frappe.get_list(
+            "Bin",
+            filters={"warehouse": ["in", warehouses], "actual_qty": [">", 0]},
+            fields=["item_code", "warehouse", "actual_qty"],
+            limit_page_length=0,
+        )
+    prices = _current_selling_prices(list({b.item_code for b in bins}))
+    units_by_item = {}
+    breakdown = {wh: {"warehouse": wh, "items": set(), "commercial_qty": 0.0, "commercial_value": 0.0} for wh in warehouses}
+    for b in bins:
+        qty = max(flt(b.actual_qty), 0.0)
+        units_by_item[b.item_code] = units_by_item.get(b.item_code, 0.0) + qty
+        row = breakdown[b.warehouse]
+        row["items"].add(b.item_code)
+        row["commercial_qty"] += qty
+        row["commercial_value"] += qty * prices.get(b.item_code, 0.0)
+    return {
+        "total_units": flt(sum(units_by_item.values())),
+        "commercial_value": flt(sum(qty * prices.get(code, 0.0) for code, qty in units_by_item.items()), 2),
+        "items_with_stock": len(units_by_item),
+        "items_without_selling_price": sum(1 for code in units_by_item if code not in prices),
+        "commercial_price_list": PRICE_LIST,
+        "commercial_warehouses": warehouses,
+        "commercial_breakdown": [
+            {**row, "items": len(row["items"]), "commercial_value": flt(row["commercial_value"], 2)}
+            for row in breakdown.values()
+        ],
+    }
+
+
 @frappe.whitelist()
 def get_inventory_summary():
     """KPI counts for the future Page Inventario dashboard header.
+
+    Hotfix Inventario -- also the sellable stock's total units and
+    commercial value (_commercial_summary()); the four original keys are
+    unchanged.
 
     low_stock is null + low_stock_status="not_configured" -- approved
     explicitly: no reliable reorder level exists for any migrated Item
@@ -182,6 +296,11 @@ def get_inventory_summary():
         "out_of_stock": out_of_stock,
         "low_stock": None,
         "low_stock_status": LOW_STOCK_STATUS,
+        # Hotfix Inventario (commercial stock only): total_units, commercial_value,
+        # items_with_stock, items_without_selling_price, commercial_price_list,
+        # commercial_warehouses, commercial_breakdown. total_stock above stays
+        # the PHYSICAL total of every Bin (shown as "Stock físico total").
+        **_commercial_summary(get_default_company()),
     }
 
 

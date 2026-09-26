@@ -866,6 +866,17 @@ def _pick_lists_matching_sales_order(txt):
 	)
 
 
+def _pick_lists_in_warehouse(warehouse):
+	"""Pick Lists whose parent_warehouse is `warehouse` or that have at
+	least one line picked from it (multi-warehouse orders, Fase 28.4A.3).
+	Names only -- the caller's frappe.get_list() still applies permissions."""
+	names = set(frappe.get_all("Pick List", filters={"parent_warehouse": warehouse}, pluck="name"))
+	names.update(
+		frappe.get_all("Pick List Item", filters={"warehouse": warehouse}, pluck="parent", distinct=True)
+	)
+	return sorted(names)
+
+
 @frappe.whitelist()
 def get_pick_list_history(status=None, date_from=None, date_to=None, warehouse=None, txt=None, start=0, page_length=20):
 	"""Paginated Pick List history for Jefe de Bodega's "resumen operativo"
@@ -910,7 +921,9 @@ def get_pick_list_history(status=None, date_from=None, date_to=None, warehouse=N
 	if date_to:
 		filters.append(["creation", "<=", f"{date_to} 23:59:59"])
 	if warehouse:
-		filters.append(["parent_warehouse", "=", warehouse])
+		# Fase 28.4A.3 -- a multi-warehouse Pick List has no parent_warehouse:
+		# it belongs to every warehouse one of its own lines is picked from.
+		filters.append(["name", "in", _pick_lists_in_warehouse(warehouse) or [""]])
 
 	or_filters = None
 	if txt:
@@ -950,12 +963,15 @@ def get_pick_list_history(status=None, date_from=None, date_to=None, warehouse=N
 	names = [r.name for r in page_rows]
 
 	line_counts, qty_requerida, qty_alistada, sales_order_by_pick_list = {}, {}, {}, {}
+	warehouses_by_pick_list = {}
 	if names:
 		for row in frappe.get_all(
 			"Pick List Item",
 			filters={"parent": ["in", names]},
-			fields=["parent", "sales_order", "stock_qty", "picked_qty"],
+			fields=["parent", "sales_order", "stock_qty", "picked_qty", "warehouse"],
 		):
+			if row.warehouse:
+				warehouses_by_pick_list.setdefault(row.parent, set()).add(row.warehouse)
 			line_counts[row.parent] = line_counts.get(row.parent, 0) + 1
 			qty_requerida[row.parent] = qty_requerida.get(row.parent, 0) + flt(row.stock_qty)
 			qty_alistada[row.parent] = qty_alistada.get(row.parent, 0) + flt(row.picked_qty)
@@ -993,6 +1009,7 @@ def get_pick_list_history(status=None, date_from=None, date_to=None, warehouse=N
 				"is_completed": bucket == "listos" and pl.status == "Completed",
 				"purpose": pl.purpose,
 				"parent_warehouse": pl.parent_warehouse,
+				"warehouses": sorted(warehouses_by_pick_list.get(pl.name, ())),
 				"customer": pl.customer,
 				"sales_order": sales_order,
 				"commercial_name": _commercial_name(sales_order),

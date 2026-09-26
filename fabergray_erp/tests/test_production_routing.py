@@ -12,6 +12,11 @@ Pick List after a shortage is really resolved.
   receive_shortage_purchase(): pedido 10 / alistado 6 / faltante 4 ->
   compra -> Pick List of exactly 4, idempotent, concurrent-safe, never for
   a draft Pick List, only the resolved line.
+- Fase 28.4A.3: manufacturing.resolve_fg_warehouse(item, company) --
+  Item Default -> Item Group Default -> Company.default_fg_warehouse,
+  always validated (other company, disabled, group -> Blocked, never a
+  silent fallback); routing keeps "report warehouse == Work Order
+  fg_warehouse" with the warehouse resolved for the Item.
 - Integrity: nothing here manufactures (no Manufacture Stock Entry, no
   stock or ledger movement from routing)."""
 
@@ -23,7 +28,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, flt, nowdate
 
-from fabergray_erp import production_service
+from fabergray_erp import manufacturing, production_service
 from fabergray_erp.api import bodega, facturacion
 from fabergray_erp.api import jefe_bodega as jefe_api
 from fabergray_erp.fulfillment.remainder_service import ensure_remaining_pick_list
@@ -348,6 +353,135 @@ class TestShortageRouting(_Base):
 			for doctype in ("Item", "BOM", "Work Order", "Stock Entry", "Reporte de Faltante"):
 				for user in (self.produccion, self.jefe_produccion):
 					self.assertFalse(frappe.has_permission(doctype, "write", user=user), f"{user} {doctype}")
+
+
+class TestFgWarehouseResolution(_Base):
+	"""Fase 28.4A.3 -- one finished-goods warehouse per product line."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.wh_line = cls.world.warehouse(f"FG284 Linea {cls.tag}")
+		cls.wh_group_default = cls.world.warehouse(f"FG284 Grupo {cls.tag}")
+		cls.item_group = cls.world._track(
+			frappe.get_doc(
+				{
+					"doctype": "Item Group",
+					"item_group_name": f"FG284 Grupo {cls.tag}",
+					"parent_item_group": "All Item Groups",
+					"is_group": 0,
+					"item_group_defaults": [{"company": fx.COMPANY, "default_warehouse": cls.wh_group_default.name}],
+				}
+			).insert()
+		)
+
+	def _item(self, default_warehouse=None, item_group=None):
+		item = self.world.item(
+			self._code("FG"), default_material_request_type="Manufacture", default_warehouse=default_warehouse
+		)
+		if item_group:
+			item.item_group = item_group
+			item.save()
+		return item
+
+	def _resolve(self, item_code, fg=None):
+		with fx.company_defaults(default_fg_warehouse=self.wh_fg.name if fg is None else fg):
+			return manufacturing.resolve_fg_warehouse(item_code, fx.COMPANY)
+
+	def _without_own_item_default(self, item_code):
+		"""Native Item.validate() copies the Item Group Default into the
+		Item's own Item Default when the Item has none; drop that copy to
+		reach the Item Group level (an Item created before its group had a
+		default -- test-only)."""
+		frappe.db.delete("Item Default", {"parent": item_code, "parenttype": "Item"})
+		frappe.clear_document_cache("Item", item_code)
+
+	def _force_item_default(self, item_code, warehouse):
+		"""An Item Default the Item form would not accept (test-only)."""
+		frappe.db.set_value("Item Default", {"parent": item_code, "company": fx.COMPANY}, "default_warehouse", warehouse)
+		frappe.clear_document_cache("Item", item_code)
+
+	def test_item_default_wins_over_group_and_company(self):
+		item = self._item(default_warehouse=self.wh_line.name, item_group=self.item_group.name)
+		self.assertEqual(self._resolve(item.name), (self.wh_line.name, []))
+
+	def test_item_group_default_when_the_item_has_none(self):
+		item = self._item(item_group=self.item_group.name)
+		self._without_own_item_default(item.name)
+		self.assertEqual(self._resolve(item.name), (self.wh_group_default.name, []))
+
+	def test_company_default_is_the_fallback(self):
+		item = self._item()
+		self.assertEqual(self._resolve(item.name), (self.wh_fg.name, []))
+		warehouse, problems = self._resolve(item.name, fg="")
+		self.assertFalse(warehouse)
+		self.assertIn("sin bodega configurada", problems[0])
+
+	def test_invalid_item_default_is_a_problem_never_a_silent_fallback(self):
+		other_company = frappe.db.get_value(
+			"Warehouse", {"company": ["!=", fx.COMPANY], "is_group": 0, "disabled": 0}, "name"
+		)
+		disabled = self.world.warehouse(f"FG284 Deshabilitada {self.tag}")
+		frappe.db.set_value("Warehouse", disabled.name, "disabled", 1)
+		group = self.world._track(
+			frappe.get_doc(
+				{"doctype": "Warehouse", "warehouse_name": f"FG284 Grupo WH {self.tag}", "company": fx.COMPANY, "is_group": 1}
+			).insert()
+		)
+		cases = {
+			"otra empresa": (other_company, "es de otra empresa"),
+			"deshabilitada": (disabled.name, "está deshabilitada"),
+			"grupo": (group.name, "es un grupo"),
+			"inexistente": ("FG284 No Existe - FG", "no existe"),
+		}
+		self.assertTrue(other_company, "this site has warehouses of other companies")
+		for label, (warehouse, reason) in cases.items():
+			item = self._item(default_warehouse=self.wh_line.name)
+			self._force_item_default(item.name, warehouse)
+			resolved, problems = self._resolve(item.name)
+			self.assertEqual(resolved, warehouse, label)  # never replaced by the Company fallback
+			self.assertEqual(len(problems), 1, label)
+			self.assertIn(reason, problems[0], label)
+			self.assertIn("Item Default", problems[0], label)
+
+	def test_invalid_item_group_default_is_a_problem(self):
+		disabled = self.world.warehouse(f"FG284 Grupo Off {self.tag}")
+		group = self.world._track(
+			frappe.get_doc(
+				{
+					"doctype": "Item Group",
+					"item_group_name": f"FG284 Grupo Off {self.tag}",
+					"parent_item_group": "All Item Groups",
+					"is_group": 0,
+					"item_group_defaults": [{"company": fx.COMPANY, "default_warehouse": disabled.name}],
+				}
+			).insert()
+		)
+		frappe.db.set_value("Warehouse", disabled.name, "disabled", 1)
+		item = self._item(item_group=group.name)
+		self._without_own_item_default(item.name)
+		warehouse, problems = self._resolve(item.name)
+		self.assertEqual(warehouse, disabled.name)
+		self.assertIn("Item Group Default", problems[0])
+		self.assertIn("está deshabilitada", problems[0])
+
+	def test_route_manufactures_into_the_item_warehouse(self):
+		item = self._item(default_warehouse=self.wh_line.name)
+		self._bom(item.name, self.pack.name)
+		report = self._report(item.name, qty=4, warehouse=self.wh_line.name)
+		result = self._route(report.name)  # Company default = wh_fg: not used
+		self.assertEqual((result["route"], result["problems"]), ("Manufacture", []))
+		wo = frappe.get_doc("Work Order", result["work_order"])
+		self.assertEqual((wo.fg_warehouse, flt(wo.qty), wo.docstatus), (self.wh_line.name, 4, 1))
+
+	def test_report_in_another_warehouse_is_blocked(self):
+		item = self._item(default_warehouse=self.wh_line.name)
+		self._bom(item.name, self.pack.name)
+		report = self._report(item.name, warehouse=self.wh_fg.name)  # the Company default, not the Item's
+		result = self._route(report.name)
+		self.assertEqual(result["route"], "Blocked")
+		self.assertIn(f"la producción entrega en {self.wh_line.name}", result["reason"])
+		self.assertEqual(frappe.db.count("Work Order", {"production_item": item.name}), 0)
 
 
 class TestRemainingPickList(_Base):

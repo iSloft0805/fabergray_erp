@@ -290,6 +290,7 @@ class TestGetPickListObservations(_ObservationsBodegaWorld):
 				"status",
 				"purpose",
 				"parent_warehouse",
+				"warehouses",  # Fase 28.4A.3 -- line warehouses of a multi-warehouse order
 				"customer",
 				"sales_order",
 				"commercial_name",

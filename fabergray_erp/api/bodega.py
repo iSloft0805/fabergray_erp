@@ -279,13 +279,16 @@ def get_queue():
 	# skips the -- inapplicable -- child-table permission check) is safe.
 	line_counts = {}
 	sales_order_by_pick_list = {}
+	warehouses_by_pick_list = {}
 	if names:
 		for row in frappe.get_all(
-			"Pick List Item", filters={"parent": ["in", names]}, fields=["parent", "sales_order"]
+			"Pick List Item", filters={"parent": ["in", names]}, fields=["parent", "sales_order", "warehouse"]
 		):
 			line_counts[row.parent] = line_counts.get(row.parent, 0) + 1
 			if row.sales_order and row.parent not in sales_order_by_pick_list:
 				sales_order_by_pick_list[row.parent] = row.sales_order
+			if row.warehouse:
+				warehouses_by_pick_list.setdefault(row.parent, set()).add(row.warehouse)
 
 	# One root_commercial_name() lookup per distinct Sales Order, not per Pick
 	# List -- several Pick Lists (or none) can share the same Sales Order.
@@ -306,6 +309,9 @@ def get_queue():
 			"status": pl.status,
 			"purpose": pl.purpose,
 			"parent_warehouse": pl.parent_warehouse,
+			# Fase 28.4A.3 -- a multi-warehouse order has no parent_warehouse:
+			# the card shows the warehouses of its own lines instead.
+			"warehouses": sorted(warehouses_by_pick_list.get(pl.name, ())),
 			"customer": pl.customer,
 			# Commit 25.20 -- see the batched resolution above.
 			"customer_name": customer_names.get(pl.customer),
@@ -451,6 +457,7 @@ def get_pick_list(name):
 		"status": pl.status,
 		"purpose": pl.purpose,
 		"parent_warehouse": pl.parent_warehouse,
+		"warehouses": sorted({row.warehouse for row in pl.get("locations") if row.warehouse}),
 		"customer": pl.customer,
 		"sales_order": sales_order,
 		"commercial_name": root_commercial_name(sales_order) if sales_order else None,

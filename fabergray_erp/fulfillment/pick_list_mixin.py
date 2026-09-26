@@ -67,11 +67,34 @@ ever changes, this mixin needs its own explicit batch-aware branch added --
 never silently inherited back from ERPNext's own check, which validates
 against Bin/batch stock, not against demand, the exact thing this fix
 exists to avoid.
+
+Fase 28.4A.3 -- `set_item_locations()` below: every Sales Order line is
+picked ONLY from its own warehouse (Sales Order Item.warehouse, resolved
+natively from the Item Default when the order is created). Native
+`set_item_locations()` searches `parent_warehouse` (+ descendants) or, when
+the Pick List has none -- every order whose lines live in different
+warehouses, since native `reset_default_field_value()` clears the Sales
+Order's own `set_warehouse` -- EVERY warehouse of the company with stock,
+ordered by `Bin.creation`: a Líquidos line could consume Varios stock, and
+Devoluciones/Cuarentena were candidates too. The override does not
+reimplement the native allocation: it runs the native method once per
+line warehouse, with `parent_warehouse` set to that warehouse and only
+that warehouse's rows in the table, and merges the results. A line whose
+warehouse is a non-picking one (warehouses.non_picking_warehouses():
+Devoluciones, Cuarentena, native rejected warehouses) gets no location at
+all -- exactly like a zero-stock line (the Fulfillment Engine's own
+top-up row still carries the demand). Non-Delivery Pick Lists, Work Order
+Pick Lists and rows without a Sales Order line keep the native behaviour
+unchanged.
 """
+
+from collections import OrderedDict
 
 import frappe
 from frappe import _
 from frappe.utils import flt
+
+from fabergray_erp.warehouses import non_picking_warehouses
 
 
 class PickListPhysicalCountMixin:
@@ -106,3 +129,52 @@ class PickListPhysicalCountMixin:
                     ).format(row.idx, picked_qty, row.item_code, requested_qty),
                     title=_("Cantidad alistada inválida"),
                 )
+
+    def set_item_locations(self, save=False):
+        line_warehouses = self._fg_sales_order_line_warehouses()
+        if line_warehouses is None:
+            return super().set_item_locations(save=save)
+
+        picked = [row for row in self.get("locations") if row.picked_qty]
+        groups = OrderedDict()
+        for row in self.get("locations"):
+            if not row.picked_qty:
+                groups.setdefault(line_warehouses.get(row.sales_order_item), []).append(row)
+
+        blocked = non_picking_warehouses(self.company)
+        parent_warehouse = self.parent_warehouse
+        located = []
+        try:
+            for warehouse, rows in groups.items():
+                if warehouse in blocked:
+                    continue  # never a picking source
+                self.set("locations", [*picked, *rows])
+                # None: rows without a Sales Order line keep the native search.
+                self.parent_warehouse = warehouse or parent_warehouse
+                super().set_item_locations()
+                located += [row for row in self.get("locations") if not row.picked_qty]
+        finally:
+            self.parent_warehouse = parent_warehouse
+
+        self.set("locations", [*picked, *located])
+        for idx, row in enumerate(self.get("locations"), start=1):
+            row.idx = idx
+        if save:
+            self.save()
+
+    def _fg_sales_order_line_warehouses(self):
+        """{sales_order_item: warehouse} when this is a Delivery Pick List
+        with Sales Order lines, else None (native behaviour)."""
+        if self.purpose != "Delivery" or self.work_order:
+            return None
+        so_items = {row.sales_order_item for row in self.get("locations") if row.sales_order_item}
+        if not so_items:
+            return None
+        return dict(
+            frappe.get_all(
+                "Sales Order Item",
+                filters={"name": ["in", list(so_items)]},
+                fields=["name", "warehouse"],
+                as_list=True,
+            )
+        )

@@ -1510,7 +1510,9 @@ fabergray_erp.Bodega = class Bodega {
 
 		const subtitle_parts = [];
 		if (detail.customer) subtitle_parts.push(frappe.utils.escape_html(detail.customer));
-		if (detail.parent_warehouse) subtitle_parts.push(frappe.utils.escape_html(detail.parent_warehouse));
+		// Fase 28.4A.3 -- multi-warehouse order: no parent_warehouse, show its lines' warehouses.
+		const warehouse_label = detail.parent_warehouse || (detail.warehouses || []).join(", ");
+		if (warehouse_label) subtitle_parts.push(frappe.utils.escape_html(warehouse_label));
 
 		this.last_changed_row = null;
 
