@@ -48,12 +48,6 @@ OPERATIONAL_WAREHOUSES = (
 #: Never a picking source (physical stock that is not sellable).
 NON_PICKING_WAREHOUSES = ("Devoluciones", "Cuarentena")
 
-#: Hotfix Inventario -- warehouses whose stock is COMMERCIAL (sellable)
-#: inventory: the product-line warehouses plus Producto Terminado, kept
-#: while it still holds products not migrated to a line warehouse yet.
-#: Materia Prima/Materias Primas, Envases/Material de Empaque, Producción
-#: WIP, Devoluciones and Cuarentena are physical stock, never commercial.
-COMMERCIAL_WAREHOUSES = ("Producto Terminado", "Líquidos", "Varios", "Cafetería", "Jardinería", "Piscina")
 
 ROOT_WAREHOUSE = "Todos los almacenes"
 

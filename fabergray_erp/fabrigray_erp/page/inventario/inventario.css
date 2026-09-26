@@ -42,10 +42,10 @@
 }
 
 .fg-inventario.fg-shell .fg-kpis--inventario {
-	grid-template-columns: repeat(4, 1fr);
+	grid-template-columns: repeat(3, 1fr);
 }
 
-/* Hotfix Inventario -- EXISTENCIAS / VALOR COMERCIAL (dos cards grandes)
+/* Hotfix Inventario -- EXISTENCIAS TOTALES / VALOR COMERCIAL (dos cards grandes)
    y la línea de productos con stock / sin precio. */
 .fg-inventario .fg-kpi--inv-existencias {
 	--fg-kpi-color: var(--fg-primary);

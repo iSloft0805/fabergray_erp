@@ -1,23 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Hotfix Inventario -- total units and commercial value of the sellable
-stock, in api.inventario.get_inventory_summary().
+"""Hotfix Inventario -- EXISTENCIAS TOTALES / VALOR COMERCIAL in
+api.inventario.get_inventory_summary(), built from the SAME per-product
+numbers the product list and detail show:
 
-- per Bin row (item_code + warehouse): available = max(actual_qty, 0);
-  value = available x the Item's current Standard Selling price (0 without
-  one); one price per Item, never duplicated by several stock rows;
-- warehouses: only the commercial ones (Producto Terminado + Líquidos,
-  Varios, Cafetería, Jardinería, Piscina), enabled leaves under the
-  company's root; raw material, packaging, WIP, Devoluciones, Cuarentena,
-  test warehouses (no parent) and other companies' warehouses never count,
-  even when their Items have a price;
-- price: Standard Selling only, no customer price, currently valid, > 0,
-  stock UOM;
-- read-only.
+- stock total of a product = _bin_totals(): SUM(max(Bin.actual_qty, 0))
+  over every leaf, enabled warehouse of the company under its real root
+  (Devoluciones/Cuarentena included, as the detail always showed); test
+  warehouses (no parent) and other companies' warehouses never count;
+- price = _selling_rates(): ONE current Standard Selling price (no
+  customer, valid today, > 0, stock UOM);
+- value = stock total x price, per product (summed first, priced once);
+  a product without price adds units but $0;
+- summary == detail, product by product.
 
-Calculation tests pin the warehouse set (patch _commercial_warehouses) so
-the site's own stock never leaks into the expected numbers; the warehouse
-rules themselves are tested unpatched. Stock is Bin-only (fixtures.
-stock_up()), never a Stock Ledger Entry."""
+Calculation tests pin the warehouse set (patch _stock_warehouses) so the
+site's own stock never leaks into the expected numbers; the warehouse rules
+are tested unpatched. Stock is Bin-only (fixtures.stock_up()), never a
+Stock Ledger Entry."""
 
 from unittest.mock import patch
 
@@ -44,7 +43,6 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 		cls.tag = frappe.generate_hash(length=4).upper()
 		cls.root = warehouse_name(ROOT_WAREHOUSE, fx.COMPANY)
 		cls.wh_test = cls.world.warehouse(f"FGINV Test {cls.tag}")  # no parent: a test warehouse
-		cls.devoluciones = warehouse_name("Devoluciones", fx.COMPANY)
 		cls.other_company_wh = frappe.db.get_value(
 			"Warehouse", {"company": ["!=", fx.COMPANY], "is_group": 0, "disabled": 0}, "name"
 		)
@@ -85,10 +83,6 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 		).insert()
 		return self.world._track(doc)
 
-	def _summary(self, warehouses):
-		with patch.object(api, "_commercial_warehouses", return_value=warehouses):
-			return api._commercial_summary(fx.COMPANY)
-
 	def _numbers(self, summary):
 		return (
 			summary["total_units"],
@@ -97,13 +91,26 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 			summary["items_without_selling_price"],
 		)
 
+	def _summary(self, warehouses):
+		with patch.object(api, "_stock_warehouses", return_value=warehouses):
+			return api._inventory_value_summary(api._bin_totals())
+
+	def _delta(self, stock):
+		"""Unpatched summary numbers after `stock` [(item, warehouse, qty)] minus before."""
+		before = self._numbers(api.get_inventory_summary())
+		for item, wh, qty in stock:
+			self.world.stock_up(item.name, wh, qty)
+		after = self._numbers(api.get_inventory_summary())
+		return tuple(round(a - b, 2) for a, b in zip(after, before))
+
 	# -- Calculation ----------------------------------------------------------
 
-	def test_ten_units_at_5000_is_50000(self):
+	def test_one_unit_at_37700_is_37700(self):
+		"""Fixture equivalent of 00002 (ACEITE 2 TIEMPOS): 1 unit x $37.700."""
 		item = self._item()
-		self._price(item, 5000)
-		self.world.stock_up(item.name, self.wh_a.name, 10)
-		self.assertEqual(self._numbers(self._summary([self.wh_a.name])), (10, 50000, 1, 0))
+		self._price(item, 37700)
+		self.world.stock_up(item.name, self.wh_a.name, 1)
+		self.assertEqual(self._numbers(self._summary([self.wh_a.name])), (1, 37700, 1, 0))
 
 	def test_several_items(self):
 		a, b = self._item(), self._item()
@@ -113,12 +120,12 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 		self.world.stock_up(b.name, self.wh_a.name, 3)
 		self.assertEqual(self._numbers(self._summary([self.wh_a.name])), (13, 56000, 2, 0))
 
-	def test_same_item_in_two_warehouses_is_priced_once_per_unit(self):
+	def test_same_item_in_two_warehouses_is_summed_then_priced_once(self):
 		item = self._item()
 		self._price(item, 10000)
-		self.world.stock_up(item.name, self.wh_a.name, 5)
-		self.world.stock_up(item.name, self.wh_b.name, 3)
-		self.assertEqual(self._numbers(self._summary([self.wh_a.name, self.wh_b.name])), (8, 80000, 1, 0))
+		self.world.stock_up(item.name, self.wh_a.name, 3)
+		self.world.stock_up(item.name, self.wh_b.name, 2)
+		self.assertEqual(self._numbers(self._summary([self.wh_a.name, self.wh_b.name])), (5, 50000, 1, 0))
 
 	def test_item_without_price_counts_units_but_no_value(self):
 		priced, unpriced = self._item(), self._item()
@@ -140,6 +147,13 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 		self.world.stock_up(item.name, self.wh_a.name, 0)
 		self.assertEqual(self._numbers(self._summary([self.wh_a.name])), (0, 0, 0, 0))
 		self.assertEqual(self._numbers(self._summary([])), (0, 0, 0, 0))
+
+	def test_disabled_item_is_not_counted(self):
+		item = self._item()
+		self._price(item, 1000)
+		self.world.stock_up(item.name, self.wh_a.name, 4)
+		frappe.db.set_value("Item", item.name, "disabled", 1)
+		self.assertEqual(self._numbers(self._summary([self.wh_a.name])), (0, 0, 0, 0))
 
 	def test_only_the_current_standard_selling_price_counts(self):
 		customer = self.world.customer(f"FGINV Cliente {self.tag}")
@@ -167,68 +181,66 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 
 	# -- Warehouses (unpatched) -------------------------------------------------
 
-	COMMERCIAL = ("Producto Terminado", "Líquidos", "Varios", "Cafetería", "Jardinería", "Piscina")
-	NON_COMMERCIAL = (
-		"Materia Prima",
-		"Materias Primas",
-		"Envases",
-		"Material de Empaque",
-		"Producción WIP",
-		"Devoluciones",
-		"Cuarentena",
-	)
+	def test_stock_warehouses(self):
+		warehouses = api._stock_warehouses(fx.COMPANY)
+		for base in ("Producto Terminado", "Líquidos", "Materia Prima", "Envases", "Devoluciones", "Cuarentena"):
+			self.assertIn(warehouse_name(base, fx.COMPANY), warehouses, base)
+		self.assertIn(self.wh_a.name, warehouses)
+		for excluded in (self.wh_test.name, self.root, self.other_company_wh):
+			self.assertNotIn(excluded, warehouses)
 
-	def _delta(self, stock):
-		"""Commercial numbers after `stock` [(item, warehouse, qty)] minus before."""
-		before = self._numbers(api._commercial_summary(fx.COMPANY))
-		for item, wh, qty in stock:
-			self.world.stock_up(item.name, wh, qty)
-		after = self._numbers(api._commercial_summary(fx.COMPANY))
-		return tuple(round(a - b, 2) for a, b in zip(after, before))
-
-	def test_commercial_warehouses_are_exactly_the_sellable_ones(self):
-		self.assertEqual(
-			set(api._commercial_warehouses(fx.COMPANY)), {warehouse_name(b, fx.COMPANY) for b in self.COMMERCIAL}
-		)
-
-	def test_each_commercial_warehouse_counts(self):
-		for base in self.COMMERCIAL:
+	def test_real_warehouses_count_like_the_detail(self):
+		for wh in (self.wh_a.name, warehouse_name("Producto Terminado", fx.COMPANY), warehouse_name("Devoluciones", fx.COMPANY)):
 			item = self._item()
 			self._price(item, 1000)
-			self.assertEqual(self._delta([(item, warehouse_name(base, fx.COMPANY), 3)]), (3, 3000, 1, 0), base)
+			self.assertEqual(self._delta([(item, wh, 3)]), (3, 3000, 1, 0), wh)
 
-	def test_non_commercial_stock_never_counts_even_with_a_price(self):
-		excluded = [warehouse_name(b, fx.COMPANY) for b in self.NON_COMMERCIAL]
-		excluded += [self.wh_test.name, self.wh_a.name, self.other_company_wh]  # test / not listed / other company
+	def test_test_other_company_and_disabled_warehouses_never_count(self):
+		disabled = self._real_warehouse(f"FGINV Off {self.tag} {self._seq}")
+		frappe.db.set_value("Warehouse", disabled.name, "disabled", 1)
 		self.assertTrue(self.other_company_wh)
-		for wh in excluded:
+		for wh in (self.wh_test.name, self.other_company_wh, disabled.name):
 			item = self._item()
 			self._price(item, 1000)
 			self.assertEqual(self._delta([(item, wh, 50)]), (0, 0, 0, 0), wh)
 
-	def test_commercial_item_without_price_counts_units_at_zero_value(self):
-		item = self._item()
-		self.assertEqual(self._delta([(item, warehouse_name("Varios", fx.COMPANY), 7)]), (7, 0, 1, 1))
+	# -- Summary == detail ------------------------------------------------------
 
-	def test_commercial_negative_stock_does_not_count(self):
+	def test_summary_matches_the_product_detail(self):
 		item = self._item()
-		self._price(item, 1000)
-		stock = [(item, warehouse_name("Líquidos", fx.COMPANY), -4), (item, warehouse_name("Piscina", fx.COMPANY), 6)]
-		self.assertEqual(self._delta(stock), (6, 6000, 1, 0))
+		self._price(item, 37700)
+		self.world.stock_up(item.name, self.wh_a.name, 1)
+		self.world.stock_up(item.name, self.wh_test.name, 9)  # test warehouse: neither side counts it
+		detail = api.get_inventory_item_detail(item.name)
+		self.assertEqual((detail["total_stock"], detail["selling_rate"]), (1, 37700))
+		self.assertEqual([b["warehouse"] for b in detail["stock_by_warehouse"]], [self.wh_a.name])
+		row = next(r for r in api.get_inventory_items(txt=item.name)["items"] if r["item_code"] == item.name)
+		self.assertEqual((row["total_actual_qty"], row["selling_rate"]), (1, 37700))
+		# Its whole contribution to the KPIs is 1 x 37.700.
+		frappe.db.set_value("Bin", {"item_code": item.name, "warehouse": self.wh_a.name}, "actual_qty", 0)
+		self.assertEqual(self._delta([(item, self.wh_a.name, 1)]), (1, 37700, 1, 0))
 
-	def test_breakdown_adds_up_to_the_totals(self):
-		item = self._item()
-		self._price(item, 1000)
-		self.world.stock_up(item.name, warehouse_name("Jardinería", fx.COMPANY), 2)
-		summary = api._commercial_summary(fx.COMPANY)
-		rows = summary["commercial_breakdown"]
-		self.assertEqual([r["warehouse"] for r in rows], summary["commercial_warehouses"])
-		self.assertEqual(round(sum(r["commercial_qty"] for r in rows), 2), summary["total_units"])
-		self.assertEqual(round(sum(r["commercial_value"] for r in rows), 2), summary["commercial_value"])
+	def test_every_product_with_stock_matches_its_detail(self):
+		"""Real site data, read-only: the KPIs are exactly the sum of what
+		each product's detail shows (00002 included when it has stock)."""
+		summary = api.get_inventory_summary()
+		totals = {code: qty for code, qty in api._bin_totals().items() if qty > 0}
+		units = value = 0.0
+		for code, qty in totals.items():
+			if frappe.db.get_value("Item", code, "disabled"):
+				continue
+			detail = api.get_inventory_item_detail(code)
+			self.assertEqual(detail["total_stock"], qty, code)
+			units += detail["total_stock"]
+			value += detail["total_stock"] * flt(detail["selling_rate"])
+		self.assertEqual(summary["total_units"], units)
+		self.assertEqual(summary["commercial_value"], flt(value, 2))
+		# total_stock (legacy key) also counts disabled Items; the KPI does not.
+		self.assertGreaterEqual(summary["total_stock"], summary["total_units"])
 
 	# -- Endpoint ---------------------------------------------------------------
 
-	def test_summary_endpoint_keeps_its_keys_and_adds_the_commercial_ones(self):
+	def test_summary_endpoint_keeps_its_keys_and_adds_the_value_ones(self):
 		with fx.as_user(self.bodega_user):
 			summary = api.get_inventory_summary()
 		self.assertTrue(
@@ -237,8 +249,6 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 		for key in ("total_units", "commercial_value", "items_with_stock", "items_without_selling_price"):
 			self.assertIn(key, summary)
 		self.assertEqual(summary["commercial_price_list"], SELLING)
-		self.assertNotIn(self.devoluciones, summary["commercial_warehouses"])
-		self.assertIn("commercial_breakdown", summary)
 
 	def test_summary_is_read_only(self):
 		item = self._item()
@@ -248,6 +258,7 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 		modified = frappe.db.get_value("Bin", {"item_code": item.name}, "modified")
 		before = counts()
 		api.get_inventory_summary()
+		api.get_inventory_item_detail(item.name)
 		self.assertEqual(counts(), before)
 		self.assertEqual(frappe.db.get_value("Bin", {"item_code": item.name}, "modified"), modified)
 		self.assertEqual(flt(frappe.db.get_value("Bin", {"item_code": item.name}, "actual_qty")), 3)

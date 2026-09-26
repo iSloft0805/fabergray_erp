@@ -247,10 +247,9 @@ fabergray_erp.Inventario = class Inventario {
 		this.bind_list_section_events();
 	}
 
-	// Hotfix Inventario -- existencias y valor comercial del stock VENDIBLE
-	// (get_inventory_summary(): solo Producto Terminado + bodegas de línea;
-	// nunca materia prima, empaque, WIP, Devoluciones ni Cuarentena;
-	// valor = unidades x precio de venta vigente de Standard Selling).
+	// Hotfix Inventario -- existencias y valor comercial con el MISMO stock
+	// total y precio Standard Selling que muestran la lista y el detalle de
+	// cada producto (get_inventory_summary(): stock total x precio vigente).
 	render_commercial_kpis() {
 		const s = this.summary || {};
 		const without_price = s.items_without_selling_price || 0;
@@ -258,7 +257,7 @@ fabergray_erp.Inventario = class Inventario {
 			<div class="fg-inv-commercial">
 				<div class="fg-inv-commercial-main">
 					<div class="fg-kpi fg-kpi--inv-existencias">
-						<div class="fg-kpi-label">${__("EXISTENCIAS COMERCIALES")}</div>
+						<div class="fg-kpi-label">${__("EXISTENCIAS TOTALES")}</div>
 						<div class="fg-kpi-number fg-inv-commercial-number">${format_units(s.total_units)} ${__("UNIDADES")}</div>
 					</div>
 					<div class="fg-kpi fg-kpi--inv-valor">
@@ -274,7 +273,7 @@ fabergray_erp.Inventario = class Inventario {
 		`;
 	}
 
-	// Los 4 KPI puramente informativos, sin filtro asociado al hacer clic
+	// Los 3 KPI puramente informativos, sin filtro asociado al hacer clic
 	// (mismo patrón que page/facturacion/facturacion.js y
 	// page/clientes/clientes.js) -- el filtrado de la lista pasa
 	// exclusivamente por las Tabs de abajo. "Stock bajo" muestra el texto
@@ -286,9 +285,8 @@ fabergray_erp.Inventario = class Inventario {
 		const s = this.summary || {};
 		const cards = [
 			{ key: "references", label: __("Referencias"), i: "package", mod: "inv-referencias" },
-			// Todas las existencias físicas (materia prima, empaque, WIP...):
-			// no es el inventario comercial de arriba.
-			{ key: "total_stock", label: __("Stock físico total"), i: "boxes", mod: "inv-stock-total" },
+			// "Stock total" ya no se muestra aquí: es el mismo número que
+			// EXISTENCIAS TOTALES de arriba (Hotfix Inventario).
 			{ key: "out_of_stock", label: __("Agotados"), i: "triangle-alert", mod: "inv-agotados" },
 			{ key: "low_stock", label: __("Stock bajo"), i: "gauge", mod: "inv-stock-bajo" },
 		];

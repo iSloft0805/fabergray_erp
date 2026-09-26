@@ -188,8 +188,18 @@ class TestInventarioApi(IntegrationTestCase):
 
     # -- Funcional: stock ---------------------------------------------------------
 
+    def _inventory_warehouse(self, name):
+        """Hotfix Inventario -- a warehouse whose stock counts as the
+        product's stock (_bin_totals()): under the company's real root.
+        TestWorld.warehouse() creates root-less warehouses, which the
+        inventory now treats as test warehouses and never counts."""
+        doc = frappe.get_doc(
+            {"doctype": "Warehouse", "warehouse_name": name, "company": fx.COMPANY, "parent_warehouse": "Todos los almacenes - FG"}
+        ).insert()
+        return self.world._track(doc)
+
     def test_item_with_stock(self):
-        wh = self.world.warehouse("FG2204 WithStock")
+        wh = self._inventory_warehouse("FG2204 WithStock")
         item = self.world.item("FG2204-WITHSTOCK-ITEM")
         self.world.stock_up(item.name, wh.name, 12)
 
@@ -208,8 +218,8 @@ class TestInventarioApi(IntegrationTestCase):
         self.assertIn(item.name, [r["item_code"] for r in out_of_stock["items"]])
 
     def test_sum_across_multiple_warehouses(self):
-        wh_a = self.world.warehouse("FG2204 MultiA")
-        wh_b = self.world.warehouse("FG2204 MultiB")
+        wh_a = self._inventory_warehouse("FG2204 MultiA")
+        wh_b = self._inventory_warehouse("FG2204 MultiB")
         item = self.world.item("FG2204-MULTIWH-ITEM")
         self.world.stock_up(item.name, wh_a.name, 7)
         self.world.stock_up(item.name, wh_b.name, 5)
@@ -260,7 +270,7 @@ class TestInventarioApi(IntegrationTestCase):
     # -- Funcional: detalle -----------------------------------------------------------
 
     def test_detail_by_warehouse(self):
-        wh = self.world.warehouse("FG2204 DetailWh")
+        wh = self._inventory_warehouse("FG2204 DetailWh")
         item = self.world.item("FG2204-DETAILWH-ITEM")
         self.world.stock_up(item.name, wh.name, 30)
 

@@ -63,7 +63,7 @@ from erpnext import get_default_company
 from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import get_difference_account
 
 from fabergray_erp.api.bodega import _require_login
-from fabergray_erp.warehouses import COMMERCIAL_WAREHOUSES, ROOT_WAREHOUSE, warehouse_name
+from fabergray_erp.warehouses import ROOT_WAREHOUSE, warehouse_name
 
 PRICE_LIST = "Standard Selling"
 PRICE_LIST_BUYING = "Standard Buying"
@@ -134,12 +134,45 @@ class ItemHasDependenciesError(frappe.ValidationError):
     pass
 
 
-def _bin_totals():
-    """One grouped query -- {item_code: total_actual_qty} across every
-    warehouse for every item that has at least one Bin row. Never one
-    query per Item."""
+def _stock_warehouses(company):
+    """Warehouses whose stock is the product's stock (Hotfix Inventario):
+    leaf, enabled warehouses of `company` under its real root ("Todos los
+    almacenes - <abbr>") -- every one of them, Devoluciones/Cuarentena
+    included, exactly what the product detail has always shown. Test
+    warehouses (created without a parent) and other companies' warehouses
+    never fall under the root.
+
+    Deliberate read outside the user's permissions (same reasoning as
+    _item_creation_catalogs() below): Bodega has no Warehouse DocPerm and
+    must not get one just to know this tree; only warehouse NAMES are read,
+    never stock or money -- the stock itself is still read through
+    frappe.get_list() with the user's permissions."""
+    root = frappe.db.get_value("Warehouse", warehouse_name(ROOT_WAREHOUSE, company), ["lft", "rgt"], as_dict=True)
+    if not root:
+        return []
+    return frappe.db.get_all(
+        "Warehouse",
+        filters={"company": company, "is_group": 0, "disabled": 0, "lft": [">", root.lft], "rgt": ["<", root.rgt]},
+        pluck="name",
+        order_by="name asc",
+    )
+
+
+def _bin_totals(item_codes=None):
+    """THE stock total of a product -- the one definition the list
+    (total_actual_qty), the detail (total_stock) and the summary KPIs all
+    use, so they can never disagree: {item_code: SUM(max(Bin.actual_qty, 0))}
+    over _stock_warehouses() (negative stock is not available). One grouped
+    query, never one per Item; `item_codes` narrows it (the detail)."""
+    warehouses = _stock_warehouses(get_default_company())
+    if not warehouses or (item_codes is not None and not item_codes):
+        return {}
+    filters = {"warehouse": ["in", warehouses], "actual_qty": [">", 0]}
+    if item_codes is not None:
+        filters["item_code"] = ["in", list(item_codes)]
     rows = frappe.get_list(
         "Bin",
+        filters=filters,
         fields=["item_code", {"SUM": "actual_qty", "as": "total_qty"}],
         group_by="item_code",
         limit_page_length=0,
@@ -148,64 +181,20 @@ def _bin_totals():
 
 
 def _selling_rates(item_codes):
-    """One bulk query for exactly the item_codes on the current page --
-    never one Item Price lookup per row."""
-    if not item_codes:
-        return {}
-    rows = frappe.get_list(
-        "Item Price",
-        filters={"price_list": PRICE_LIST, "item_code": ["in", item_codes]},
-        fields=["item_code", "price_list_rate"],
-    )
-    return {r.item_code: r.price_list_rate for r in rows}
-
-
-def _commercial_warehouses(company):
-    """Hotfix Inventario -- warehouses whose stock is commercial (sellable)
-    inventory: exactly warehouses.COMMERCIAL_WAREHOUSES of `company`
-    (Producto Terminado + the product-line warehouses), each one only if
-    it is a leaf, enabled warehouse under the company's real root
-    ("Todos los almacenes - <abbr>"). Everything else -- raw material,
-    packaging, WIP, Devoluciones, Cuarentena, test warehouses (created
-    without a parent), other companies -- is physical stock, never
-    commercial, even when its Items have a selling price.
-
-    Second deliberate read of this module outside the user's permissions
-    (same reasoning as _item_creation_catalogs() below): Bodega has no
-    Warehouse DocPerm and must not get one just to see this tree; only
-    warehouse NAMES are read, never stock or money, and the stock itself
-    is still read through frappe.get_list() with the user's permissions."""
-    root = frappe.db.get_value("Warehouse", warehouse_name(ROOT_WAREHOUSE, company), ["lft", "rgt"], as_dict=True)
-    if not root:
-        return []
-    return frappe.db.get_all(
-        "Warehouse",
-        filters={
-            "name": ["in", [warehouse_name(base, company) for base in COMMERCIAL_WAREHOUSES]],
-            "company": company,
-            "is_group": 0,
-            "disabled": 0,
-            "lft": [">", root.lft],
-            "rgt": ["<", root.rgt],
-        },
-        pluck="name",
-        order_by="name asc",
-    )
-
-
-def _current_selling_prices(item_codes):
-    """{item_code: rate} -- ONE current PRICE_LIST (Standard Selling) price
-    per Item, the same list the Inventario list/detail already shows
-    (_selling_rates()). Current = no customer, valid_from empty or <= today,
-    valid_upto empty or >= today, rate > 0, UOM empty or the Item's stock UOM
-    (stock is counted in stock UOM). Several valid rows for the same Item
-    (none today) resolve to the most recent valid_from, then the most
-    recently modified -- never summed, never joined against the stock rows."""
+    """THE selling price of a product -- ONE current PRICE_LIST (Standard
+    Selling) price per Item, shared by the list, the detail and the
+    summary. Current = no customer, valid_from empty or <= today,
+    valid_upto empty or >= today, rate > 0, UOM empty or the Item's stock
+    UOM (stock is counted in stock UOM). Several valid rows for the same
+    Item (none today) resolve to the most recent valid_from, then the most
+    recently modified -- never summed. Two bulk queries, never one per Item."""
     if not item_codes:
         return {}
     stock_uoms = {
         r.name: r.stock_uom
-        for r in frappe.get_list("Item", filters={"name": ["in", list(item_codes)]}, fields=["name", "stock_uom"], limit_page_length=0)
+        for r in frappe.get_list(
+            "Item", filters={"name": ["in", list(item_codes)]}, fields=["name", "stock_uom"], limit_page_length=0
+        )
     }
     today = getdate(nowdate())
     best = {}
@@ -229,43 +218,32 @@ def _current_selling_prices(item_codes):
     return {code: rate for code, (_key, rate) in best.items()}
 
 
-def _commercial_summary(company):
-    """Hotfix Inventario -- commercial quantity and value of the sellable
-    stock (see _commercial_warehouses()). Per Bin row (item_code +
-    warehouse): commercial_qty = max(actual_qty, 0) (negative stock is not
-    available), value = commercial_qty x the Item's current selling price
-    (0 when it has none: the units still count). commercial_breakdown
-    shows, per warehouse, exactly where the totals come from. Read-only."""
-    warehouses = _commercial_warehouses(company)
-    bins = []
-    if warehouses:
-        bins = frappe.get_list(
-            "Bin",
-            filters={"warehouse": ["in", warehouses], "actual_qty": [">", 0]},
-            fields=["item_code", "warehouse", "actual_qty"],
+def _inventory_value_summary(totals):
+    """Hotfix Inventario -- the summary KPIs from the SAME per-product
+    stock total (_bin_totals()) and price (_selling_rates()) the list and
+    the detail show: for each active stock Item with stock > 0, value =
+    stock_total x its price (0 without one -- the units still count). The
+    stock is summed per Item first, then multiplied by ONE price, so a
+    product in several warehouses is never priced per Bin."""
+    with_stock = {code: qty for code, qty in totals.items() if qty > 0}
+    active = set(
+        frappe.get_list(
+            "Item",
+            filters={"name": ["in", list(with_stock)], "disabled": 0, "is_stock_item": 1},
+            pluck="name",
             limit_page_length=0,
         )
-    prices = _current_selling_prices(list({b.item_code for b in bins}))
-    units_by_item = {}
-    breakdown = {wh: {"warehouse": wh, "items": set(), "commercial_qty": 0.0, "commercial_value": 0.0} for wh in warehouses}
-    for b in bins:
-        qty = max(flt(b.actual_qty), 0.0)
-        units_by_item[b.item_code] = units_by_item.get(b.item_code, 0.0) + qty
-        row = breakdown[b.warehouse]
-        row["items"].add(b.item_code)
-        row["commercial_qty"] += qty
-        row["commercial_value"] += qty * prices.get(b.item_code, 0.0)
+        if with_stock
+        else []
+    )
+    stock = {code: qty for code, qty in with_stock.items() if code in active}
+    prices = _selling_rates(list(stock))
     return {
-        "total_units": flt(sum(units_by_item.values())),
-        "commercial_value": flt(sum(qty * prices.get(code, 0.0) for code, qty in units_by_item.items()), 2),
-        "items_with_stock": len(units_by_item),
-        "items_without_selling_price": sum(1 for code in units_by_item if code not in prices),
+        "total_units": flt(sum(stock.values())),
+        "commercial_value": flt(sum(qty * prices.get(code, 0.0) for code, qty in stock.items()), 2),
+        "items_with_stock": len(stock),
+        "items_without_selling_price": sum(1 for code in stock if code not in prices),
         "commercial_price_list": PRICE_LIST,
-        "commercial_warehouses": warehouses,
-        "commercial_breakdown": [
-            {**row, "items": len(row["items"]), "commercial_value": flt(row["commercial_value"], 2)}
-            for row in breakdown.values()
-        ],
     }
 
 
@@ -273,13 +251,14 @@ def _commercial_summary(company):
 def get_inventory_summary():
     """KPI counts for the future Page Inventario dashboard header.
 
-    Hotfix Inventario -- also the sellable stock's total units and
-    commercial value (_commercial_summary()); the four original keys are
-    unchanged.
-
     low_stock is null + low_stock_status="not_configured" -- approved
     explicitly: no reliable reorder level exists for any migrated Item
-    yet, and no threshold is invented here to fill that gap."""
+    yet, and no threshold is invented here to fill that gap.
+
+    Hotfix Inventario -- total_units / commercial_value / items_with_stock
+    / items_without_selling_price (_inventory_value_summary()), from the
+    same stock total and price as the product list and detail. total_stock
+    is kept for compatibility (sum of every product's stock total)."""
     _require_login()
     frappe.has_permission("Item", "read", throw=True)
 
@@ -296,11 +275,7 @@ def get_inventory_summary():
         "out_of_stock": out_of_stock,
         "low_stock": None,
         "low_stock_status": LOW_STOCK_STATUS,
-        # Hotfix Inventario (commercial stock only): total_units, commercial_value,
-        # items_with_stock, items_without_selling_price, commercial_price_list,
-        # commercial_warehouses, commercial_breakdown. total_stock above stays
-        # the PHYSICAL total of every Bin (shown as "Stock físico total").
-        **_commercial_summary(get_default_company()),
+        **_inventory_value_summary(totals),
     }
 
 
@@ -399,22 +374,23 @@ def get_inventory_item_detail(item_code, warehouse=None):
     doc = frappe.get_doc("Item", item_code)
     doc.check_permission("read")
 
+    # Hotfix Inventario -- the same warehouses, stock total (_bin_totals())
+    # and price (_selling_rates()) as the list and the summary KPIs.
     bin_rows = frappe.get_list(
         "Bin",
-        filters={"item_code": item_code},
+        filters={"item_code": item_code, "warehouse": ["in", _stock_warehouses(get_default_company()) or [""]]},
         fields=["warehouse", "actual_qty", "reserved_qty", "projected_qty"],
         order_by="warehouse asc",
     )
-    total_stock = sum(flt(r.actual_qty) for r in bin_rows)
+    total_stock = _bin_totals([item_code]).get(item_code, 0.0)
 
-    price_rows = frappe.get_list(
-        "Item Price",
-        filters={"item_code": item_code, "price_list": PRICE_LIST},
-        fields=["price_list_rate", "currency"],
-        limit_page_length=1,
-    )
-    selling_rate = price_rows[0].price_list_rate if price_rows else None
-    currency = price_rows[0].currency if price_rows else None
+    selling_rate = _selling_rates([item_code]).get(item_code)
+    currency = None
+    if selling_rate is not None:
+        currencies = frappe.get_list(
+            "Item Price", filters={"item_code": item_code, "price_list": PRICE_LIST}, pluck="currency", limit_page_length=1
+        )
+        currency = currencies[0] if currencies else None
 
     recent_movements = frappe.get_list(
         "Stock Ledger Entry",
