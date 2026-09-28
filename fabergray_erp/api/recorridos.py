@@ -140,6 +140,18 @@ LISTABLE_ROUTE_STATUSES = ("Borrador", "Planificado", "En Ruta", "Completado", "
 #: frozen.
 GEO_REFRESHABLE_ROUTE_STATUSES = ("Borrador", "Planificado")
 
+#: Hotfix cierre automático -- Recorrido Parada statuses. A stop is
+#: "processed" once it leaves Pendiente. Entregado is the only one that
+#: means the order reached the customer; No Entregado exists in the Select
+#: but no code path can set it yet (RecorridoParada.validate() rejects it).
+STOP_STATUS_PENDING = "Pendiente"
+STOP_STATUS_DELIVERED = "Entregado"
+STOP_STATUS_NOT_DELIVERED = "No Entregado"
+TERMINAL_STOP_STATUSES = (STOP_STATUS_DELIVERED, STOP_STATUS_NOT_DELIVERED)
+
+ROUTE_STATUS_EN_ROUTE = "En Ruta"
+ROUTE_STATUS_COMPLETED = "Completado"
+
 
 class PickListNotEligibleError(frappe.ValidationError):
 	pass
@@ -191,6 +203,30 @@ def _pick_lists_in_active_routes(exclude_route=None):
 	)
 
 
+def _pick_lists_already_delivered():
+	"""Hotfix cierre automático -- the "was this ever delivered" rule the
+	ACTIVE_ROUTE_STATUSES note above reserved for this moment: now that a
+	route really reaches Completado, its Pick Lists leave
+	_pick_lists_in_active_routes(), and one whose stop is Entregado must
+	never become available for a new route again. Independent of the
+	route's status on purpose (a delivery is a fact about the Pick List)."""
+	return set(
+		frappe.get_list(
+			"Recorrido Parada",
+			filters={"status": STOP_STATUS_DELIVERED},
+			pluck="pick_list",
+			distinct=True,
+		)
+	)
+
+
+def _unavailable_pick_lists():
+	"""Pick Lists a NEW route may not take: claimed by an active route, or
+	already delivered. The plain-read counterpart of
+	_locked_assigned_pick_lists() for the listing/detail endpoints."""
+	return _pick_lists_in_active_routes() | _pick_lists_already_delivered()
+
+
 def _lock_pick_lists(names):
 	"""The double-assignment race guard (brief section 9), part 1 of 2:
 	acquires a real row-level lock on every Pick List in `names`, held for
@@ -240,13 +276,18 @@ def _locked_assigned_pick_lists(pick_list_names, exclude_route=None):
 	parameter (confirmed: not present in frappe.model.qb_query), so this
 	is the raw-SQL exception brief section 9 itself anticipates ("no
 	escribir SQL directo... salvo locks ... justificadas") -- a single,
-	narrow, parameterized query, not a general-purpose helper."""
+	narrow, parameterized query, not a general-purpose helper.
+
+	Hotfix cierre automático -- also returns a Pick List whose stop is
+	Entregado in another route, whatever that route's status (see
+	_pick_lists_already_delivered()): once a route closes as Completado its
+	delivered Pick Lists must stay unassignable."""
 	if not pick_list_names:
 		return set()
 	names = list(set(pick_list_names))
 	name_placeholders = ", ".join(["%s"] * len(names))
 	status_placeholders = ", ".join(["%s"] * len(ACTIVE_ROUTE_STATUSES))
-	params = [*names, *ACTIVE_ROUTE_STATUSES]
+	params = [*names, *ACTIVE_ROUTE_STATUSES, STOP_STATUS_DELIVERED]
 	exclude_clause = ""
 	if exclude_route:
 		exclude_clause = "AND r.name != %s"
@@ -257,7 +298,7 @@ def _locked_assigned_pick_lists(pick_list_names, exclude_route=None):
 		FROM `tabRecorrido Parada` rp
 		INNER JOIN `tabRecorrido` r ON r.name = rp.recorrido
 		WHERE rp.pick_list IN ({name_placeholders})
-		  AND r.status IN ({status_placeholders})
+		  AND (r.status IN ({status_placeholders}) OR rp.status = %s)
 		  {exclude_clause}
 		FOR UPDATE
 		""",
@@ -443,7 +484,7 @@ def _validate_pick_list_eligible(pl, company, already_assigned):
 		frappe.throw(_("El Pick List {0} pertenece a otra empresa.").format(pl.name), PickListNotEligibleError)
 	if pl.name in already_assigned:
 		frappe.throw(
-			_("El pedido {0} ya está asignado a otro recorrido activo.").format(pl.name),
+			_("El pedido {0} ya está asignado a otro recorrido activo o ya fue entregado.").format(pl.name),
 			PickListAlreadyAssignedError,
 		)
 
@@ -552,7 +593,7 @@ def get_available_orders(txt=None, start=0, page_length=20):
 	page_length = min(max(cint(page_length) or 20, 1), 100)
 	txt = (txt or "").strip()
 
-	assigned = _pick_lists_in_active_routes()
+	assigned = _unavailable_pick_lists()
 
 	filters = _eligible_pick_list_filters(company)
 	if assigned:
@@ -631,7 +672,7 @@ def get_available_order_detail(pick_list):
 	pl.check_permission("read")
 
 	company = get_default_company()
-	assigned = _pick_lists_in_active_routes()
+	assigned = _unavailable_pick_lists()
 	_validate_pick_list_eligible(pl, company, assigned)
 
 	snapshot = _resolve_pick_list_snapshot(pl)
@@ -705,6 +746,7 @@ def get_route_detail(route_name):
 		"notes": route.notes,
 		"created_by_user": route.created_by_user,
 		"started_on": route.started_on,
+		"completed_on": route.completed_on,
 		"total_stops": len(stops),
 		"stops": stops,
 	}
@@ -894,7 +936,7 @@ def get_routes_summary():
 
 	company = get_default_company()
 
-	assigned = _pick_lists_in_active_routes()
+	assigned = _unavailable_pick_lists()
 	filters = _eligible_pick_list_filters(company)
 	if assigned:
 		filters = filters + [["name", "not in", list(assigned)]]
@@ -1558,7 +1600,15 @@ def _deliver_stop(
 	payment_proof_jpeg = _normalize_payment_proof(payment_proof_content) if payment_proof_content else None
 
 	route_status = frappe.db.get_value("Recorrido", route.name, "status", for_update=True)
-	if route_status != "En Ruta":
+	if route_status != ROUTE_STATUS_EN_ROUTE:
+		# Hotfix cierre automático -- delivering the LAST stop now closes the
+		# route (reconcile_recorrido_status()), so a double tap / mobile retry
+		# of that same last stop finds the route Completado. It must still
+		# get the idempotent answer, not an error.
+		if route_status == ROUTE_STATUS_COMPLETED:
+			delivered = _locked_delivered_stop(route.name, stop_name)
+			if delivered:
+				return _already_delivered_detail(route.name, delivered, route_status)
 		frappe.throw(_("Solo se pueden entregar paradas de un recorrido En Ruta."), RouteNotEditableError)
 
 	locked_stop = frappe.db.get_value(
@@ -1571,16 +1621,8 @@ def _deliver_stop(
 	if not locked_stop or locked_stop.recorrido != route.name:
 		frappe.throw(_("La parada no pertenece a este recorrido."), StopNotDeliverableError)
 
-	if locked_stop.status == "Entregado":
-		detail = get_route_detail(route.name)
-		for s in detail["stops"]:
-			if s["name"] == locked_stop.name:
-				s["status"] = locked_stop.status
-				s["delivered_on"] = locked_stop.delivered_on
-				s["delivered_by"] = locked_stop.delivered_by
-		detail["already_completed"] = True
-		detail["delivered_stop"] = locked_stop.name
-		return detail
+	if locked_stop.status == STOP_STATUS_DELIVERED:
+		return _already_delivered_detail(route.name, locked_stop, route_status)
 
 	if locked_stop.status != "Pendiente":
 		frappe.throw(
@@ -1617,6 +1659,11 @@ def _deliver_stop(
 	stop.status = "Entregado"
 	stop.save()
 
+	# Hotfix cierre automático -- stop.save() above already ran
+	# RecorridoParada.on_update() -> reconcile_recorrido_status(), under the
+	# Recorrido row lock this transaction holds: if this was the last
+	# pending stop, the route is Completado now, atomically with the delivery.
+
 	# Fase 27.1 -- the stop's receivable (Cartera Obligacion), in this same
 	# transaction but inside a savepoint: a Cartera failure is rolled back
 	# and logged, never undoing the delivery (the reconciler retries later).
@@ -1626,6 +1673,184 @@ def _deliver_stop(
 	detail["already_completed"] = False
 	detail["delivered_stop"] = stop.name
 	return detail
+
+
+def _locked_delivered_stop(route_name, stop_name):
+	"""The stop, read under a row lock, only if it belongs to `route_name`
+	and is already Entregado -- else None."""
+	stop = frappe.db.get_value(
+		"Recorrido Parada",
+		stop_name,
+		["name", "recorrido", "status", "delivered_on", "delivered_by"],
+		as_dict=True,
+		for_update=True,
+	)
+	if stop and stop.recorrido == route_name and stop.status == STOP_STATUS_DELIVERED:
+		return stop
+	return None
+
+
+def _already_delivered_detail(route_name, locked_stop, locked_route_status):
+	"""deliver_stop()'s idempotent answer: nothing is created or changed.
+	The values read under lock override get_route_detail()'s plain read,
+	which may still see this transaction's older snapshot."""
+	detail = get_route_detail(route_name)
+	detail["status"] = locked_route_status
+	for s in detail["stops"]:
+		if s["name"] == locked_stop.name:
+			s["status"] = locked_stop.status
+			s["delivered_on"] = locked_stop.delivered_on
+			s["delivered_by"] = locked_stop.delivered_by
+	detail["already_completed"] = True
+	detail["delivered_stop"] = locked_stop.name
+	return detail
+
+
+# ---------------------------------------------------------------------------
+# Hotfix -- cierre automático del Recorrido al procesar la última parada
+# ---------------------------------------------------------------------------
+
+
+def _expected_route_status(current_status, stop_statuses):
+	"""The one rule for "what status should this route have, given its
+	stops". Pure. Returns (status, needs_review).
+
+	Only an En Ruta route is ever moved -- Borrador/Planificado/Cancelado/
+	Completado are left alone (Completado is never reopened here):
+
+	- no stops, or any stop still Pendiente -> stays En Ruta;
+	- every stop Entregado -> Completado;
+	- nothing pending but at least one No Entregado -> stays En Ruta with
+	  needs_review=True. The model has no final status for "processed with
+	  failed deliveries", and Completado must not mean "delivered" when one
+	  was not. No code path can produce No Entregado today, so this branch is
+	  unreachable in practice; it is reported instead of inventing a status."""
+	if current_status != ROUTE_STATUS_EN_ROUTE or not stop_statuses:
+		return current_status, False
+	if any(s not in TERMINAL_STOP_STATUSES for s in stop_statuses):
+		return current_status, False
+	if all(s == STOP_STATUS_DELIVERED for s in stop_statuses):
+		return ROUTE_STATUS_COMPLETED, False
+	return current_status, True
+
+
+def _locked_stop_statuses(route_name):
+	"""{stop_name: status} for every stop of the route, each read with a
+	row lock by primary key. Locking reads are what make this correct under
+	concurrency: under REPEATABLE READ a plain read here could still return
+	this transaction's older snapshot and miss a stop another request
+	delivered and committed while this one waited on the Recorrido lock
+	(see _locked_assigned_pick_lists()). By primary key, so only this
+	route's stop rows are locked -- never a scan. The stop SET is stable
+	(stops can only be added/removed while Borrador), so listing the names
+	with a plain read is safe."""
+	names = frappe.get_list(
+		"Recorrido Parada", filters={"recorrido": route_name}, pluck="name", order_by="name asc"
+	)
+	return {name: frappe.db.get_value("Recorrido Parada", name, "status", for_update=True) for name in names}
+
+
+def _assert_route_ready_to_complete(route):
+	"""Recorrido.validate() calls this on any transition into Completado, so
+	a Desk save / frappe.client.set_value() cannot close a route whose stops
+	are not all delivered."""
+	statuses = list(_locked_stop_statuses(route.name).values())
+	if not statuses or any(s != STOP_STATUS_DELIVERED for s in statuses):
+		frappe.throw(
+			_("Solo se puede completar un recorrido cuando todas sus paradas están entregadas."),
+			RouteValidationError,
+		)
+
+
+def reconcile_recorrido_status(recorrido_name):
+	"""Recomputes a Recorrido's status from its stops, server-side, and
+	persists it only when a transition is needed. Idempotent: a second call
+	finds nothing to change and writes nothing.
+
+	Called by RecorridoParada.on_update() whenever a stop reaches a terminal
+	status (deliver_stop() and any other save path), and usable as the
+	controlled repair helper for routes left inconsistent before this
+	hotfix, e.g. from `bench --site <site> console`:
+
+	    reconcile_recorrido_status("REC-2026-00007")
+
+	Not whitelisted: no client can call it.
+
+	Concurrency: 1. the Recorrido row is locked (for_update) and its status
+	read from that locked row; 2. every stop status is read with a locking
+	read (_locked_stop_statuses()). Same lock order as deliver_stop()
+	(route, then stop), so two simultaneous "last" deliveries serialize on
+	the route row and the second one sees the first one's stop. The save
+	goes through the ORM -- Recorrido.validate() re-checks the transition,
+	the all-delivered rule and completed_on. No commit here: the caller's
+	transaction (the request) commits or rolls back everything together."""
+	locked = frappe.db.get_value(
+		"Recorrido", recorrido_name, ["name", "status", "completed_on"], as_dict=True, for_update=True
+	)
+	if not locked:
+		frappe.throw(_("El recorrido {0} no existe.").format(recorrido_name), frappe.DoesNotExistError)
+
+	stop_statuses = _locked_stop_statuses(locked.name) if locked.status == ROUTE_STATUS_EN_ROUTE else {}
+	target, needs_review = _expected_route_status(locked.status, list(stop_statuses.values()))
+
+	result = {
+		"recorrido": locked.name,
+		"previous_status": locked.status,
+		"status": locked.status,
+		"changed": False,
+		"needs_review": needs_review,
+		"completed_on": locked.completed_on,
+		**_stop_counts(stop_statuses.values()),
+	}
+	if target == locked.status:
+		return result
+
+	route = frappe.get_doc("Recorrido", locked.name, for_update=True)
+	route.status = target
+	route.save()
+
+	result.update(status=route.status, changed=True, completed_on=route.completed_on)
+	return result
+
+
+def _stop_counts(statuses):
+	statuses = list(statuses)
+	delivered = sum(1 for s in statuses if s == STOP_STATUS_DELIVERED)
+	pending = sum(1 for s in statuses if s not in TERMINAL_STOP_STATUSES)
+	return {
+		"total_stops": len(statuses),
+		"pending": pending,
+		"delivered": delivered,
+		"other_terminal": len(statuses) - delivered - pending,
+	}
+
+
+def audit_route_statuses(statuses=(ROUTE_STATUS_EN_ROUTE,)):
+	"""Read-only report of routes whose persisted status disagrees with
+	their stops -- never writes. One row per route in `statuses`: stop
+	counts, persisted status and the status _expected_route_status() says
+	it should have. Run before reconcile_recorrido_status() to see what a
+	repair would change, e.g. `bench --site <site> execute
+	fabergray_erp.api.recorridos.audit_route_statuses`. Not whitelisted."""
+	routes = frappe.get_list(
+		"Recorrido", filters={"status": ["in", list(statuses)]}, pluck="name", order_by="name asc"
+	)
+	rows = []
+	for name in routes:
+		persisted = frappe.db.get_value("Recorrido", name, "status")
+		stop_statuses = frappe.get_list("Recorrido Parada", filters={"recorrido": name}, pluck="status")
+		expected, needs_review = _expected_route_status(persisted, stop_statuses)
+		rows.append(
+			{
+				"recorrido": name,
+				**_stop_counts(stop_statuses),
+				"persisted_status": persisted,
+				"expected_status": expected,
+				"inconsistent": expected != persisted,
+				"needs_review": needs_review,
+			}
+		)
+	return rows
 
 
 @frappe.whitelist()

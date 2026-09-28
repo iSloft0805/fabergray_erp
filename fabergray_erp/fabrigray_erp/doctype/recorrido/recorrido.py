@@ -8,13 +8,14 @@ from frappe.utils import get_datetime
 
 #: Fase 26.2 -- every status change a Recorrido may make through ANY save
 #: path (api.recorridos endpoints, Desk, frappe.client.set_value/save).
-#: Staying in the same status is always allowed. En Ruta has no exit yet
-#: (Completado arrives with "Finalizar recorrido"); there is deliberately no
+#: Staying in the same status is always allowed. There is deliberately no
 #: En Ruta -> Planificado rollback and no cancellation from En Ruta.
+#: Hotfix cierre automático -- En Ruta -> Completado, only once every stop
+#: is Entregado (api.recorridos.reconcile_recorrido_status()).
 ALLOWED_STATUS_TRANSITIONS = {
 	"Borrador": {"Borrador", "Planificado", "Cancelado"},
 	"Planificado": {"Planificado", "En Ruta", "Cancelado"},
-	"En Ruta": {"En Ruta"},
+	"En Ruta": {"En Ruta", "Completado"},
 	"Cancelado": {"Cancelado"},
 	"Completado": {"Completado"},
 }
@@ -40,6 +41,8 @@ class Recorrido(Document):
 	  api.recorridos._assert_route_ready_to_start() start_route() uses),
 	  and sets started_on if the caller didn't;
 	- started_on is empty before En Ruta and immutable once set;
+	- entering Completado requires every stop Entregado and sets
+	  completed_on; completed_on is empty before and immutable once set;
 	- company is immutable after insert.
 
 	`_doc_before_save` is loaded by Frappe with for_update=True (check_if_
@@ -65,12 +68,15 @@ class Recorrido(Document):
 		self._validate_company_unchanged(before)
 		self._validate_status_transition(before)
 		self._validate_started_on(before)
+		self._validate_completed_on(before)
 
 	def _validate_new(self):
 		if (self.status or "Borrador") != "Borrador":
 			frappe.throw(_("Un recorrido nuevo siempre inicia en Borrador."), frappe.ValidationError)
 		if self.started_on:
 			frappe.throw(_("Un recorrido nuevo no puede tener fecha de inicio."), frappe.ValidationError)
+		if self.completed_on:
+			frappe.throw(_("Un recorrido nuevo no puede tener fecha de finalización."), frappe.ValidationError)
 
 	def _validate_company_unchanged(self, before):
 		if before.company and self.company != before.company:
@@ -93,6 +99,26 @@ class Recorrido(Document):
 			_assert_route_ready_to_start(self)
 			if not self.started_on:
 				self.started_on = frappe.utils.now_datetime()
+
+		if previous != "Completado" and self.status == "Completado":
+			from fabergray_erp.api.recorridos import _assert_route_ready_to_complete
+
+			_assert_route_ready_to_complete(self)
+			if not self.completed_on:
+				self.completed_on = frappe.utils.now_datetime()
+
+	def _validate_completed_on(self, before):
+		if before.completed_on:
+			if not self.completed_on or get_datetime(self.completed_on) != get_datetime(before.completed_on):
+				frappe.throw(
+					_("La fecha de finalización del recorrido no se puede modificar."), frappe.ValidationError
+				)
+			return
+
+		if self.completed_on and self.status != "Completado":
+			frappe.throw(
+				_("La fecha de finalización solo se registra al completar el recorrido."), frappe.ValidationError
+			)
 
 	def _validate_started_on(self, before):
 		if before.started_on:

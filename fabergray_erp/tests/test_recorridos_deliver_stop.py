@@ -187,7 +187,9 @@ class TestRecorridosDeliverStop(IntegrationTestCase):
 	# =====================================================================
 
 	def test_deliver_stop_marks_entregado(self):
-		route = self._en_ruta()
+		# Two stops: with one still pending, the route must stay En Ruta
+		# (closing on the LAST stop is covered by test_recorridos_auto_close).
+		route = self._en_ruta(n_stops=2)
 		stop_name = route["stops"][0]["name"]
 		result = self._deliver(route["name"], stop_name, notes="  Recibió <b>portería</b>  ")
 
@@ -910,12 +912,13 @@ class TestRecorridosDeliverStop(IntegrationTestCase):
 		self.assertEqual(current(route), first["name"])
 		after_first = self._deliver(route["name"], first["name"])
 		self.assertEqual(current(after_first), second["name"])
+		self.assertEqual(after_first["status"], "En Ruta")
 
 		after_second = self._deliver(route["name"], second["name"])
 		self.assertIsNone(current(after_second))
-		# Last stop processed: the route stays En Ruta, no completed_on yet.
-		self.assertEqual(after_second["status"], "En Ruta")
-		self.assertIsNone(frappe.db.get_value("Recorrido", route["name"], "completed_on"))
+		# Hotfix cierre automático -- last stop delivered: the route closes.
+		self.assertEqual(after_second["status"], "Completado")
+		self.assertIsNotNone(frappe.db.get_value("Recorrido", route["name"], "completed_on"))
 
 	def test_ventas_shows_delivered_with_delivery_date(self):
 		route = self._en_ruta()

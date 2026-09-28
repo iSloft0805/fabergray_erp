@@ -1696,13 +1696,23 @@ fabergray_erp.Recorridos = class Recorridos {
 			.map((m) => `<span>${m}</span>`)
 			.join("");
 
+		// Hotfix cierre automático -- the server closes the route as
+		// Completado when its last stop is delivered; this only words the
+		// final panel after the persisted status, it decides nothing.
+		const is_completed = d.status === "Completado";
 		const current_html = current
 			? this.render_active_stop_html(current, current_idx + 1, total)
 			: `
 				<div class="fg-active-route-done">
 					${icon("circle-check")}
-					<div class="fg-active-route-done-title">${__("TODAS LAS PARADAS FUERON PROCESADAS")}</div>
-					<div class="fg-active-route-done-sub">${__("Este recorrido ya no tiene entregas pendientes.")}</div>
+					<div class="fg-active-route-done-title">${
+						is_completed ? __("RECORRIDO COMPLETADO") : __("TODAS LAS PARADAS FUERON PROCESADAS")
+					}</div>
+					<div class="fg-active-route-done-sub">${
+						is_completed
+							? __("Todas las paradas fueron entregadas.")
+							: __("Este recorrido ya no tiene entregas pendientes.")
+					}</div>
 				</div>
 			`;
 

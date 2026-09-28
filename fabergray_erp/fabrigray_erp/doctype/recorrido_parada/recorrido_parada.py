@@ -176,6 +176,16 @@ class RecorridoParada(Document):
 					frappe.ValidationError,
 				)
 
+	def on_update(self):
+		# Hotfix cierre automático -- after ANY save that moves a stop to a
+		# terminal status, recompute the route's status server-side
+		# (deliver_stop() and every other save path alike). Idempotent.
+		if self.has_value_changed("status") and self.status in ("Entregado", "No Entregado"):
+			# Lazy import, same reason as Recorrido.validate(): no import cycle.
+			from fabergray_erp.api.recorridos import reconcile_recorrido_status
+
+			reconcile_recorrido_status(self.recorrido)
+
 	def on_trash(self):
 		if not self.recorrido:
 			frappe.throw(
