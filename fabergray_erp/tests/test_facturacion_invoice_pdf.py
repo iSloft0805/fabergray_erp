@@ -68,6 +68,7 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 		super().setUpClass()
 		cls.world = fx.TestWorld()
 		cls.addClassCleanup(cls.world.cleanup)
+		cls.invoice_numbering = cls.world.invoice_numbering
 
 		sfx = frappe.generate_hash(length=5)
 		cls.wh = cls.world.warehouse(f"FG2523 {sfx} WH")
@@ -102,18 +103,30 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 			bodega.finish_picking(pl.name)
 		return so, pl.name
 
-	def _invoiced_pick_list(self, **kwargs):
+	def _invoiced_pick_list(self, issuer="integrandoMAS", **kwargs):
+		"""FACTURAR with `issuer`: the real flow, which also assigns the
+		invoice number (test-isolated series, see fixtures.TestWorld)."""
 		so, pl_name = self._picked_pick_list(**kwargs)
 		with fx.as_user(self.facturacion_user):
 			for item in facturacion.get_invoicing_detail(pl_name)["items"]:
 				facturacion.set_invoicing_item_checked(pl_name, item["row_name"], 1)
-			facturacion.mark_as_invoiced(pl_name)
+			facturacion.mark_as_invoiced(pl_name, issuer)
 		return so, pl_name
 
 	def _with_issuer(self, issuer="integrandoMAS", **kwargs):
+		return self._invoiced_pick_list(issuer=issuer, **kwargs)
+
+	def _historical_invoiced_pick_list(self, **kwargs):
+		"""A Pick List Facturado BEFORE per-issuer numbering existed: no
+		issuer, no number (the 5 real ones on this site look like this).
+		Test setup only -- written at db level on purpose."""
 		so, pl_name = self._invoiced_pick_list(**kwargs)
-		with fx.as_user(self.facturacion_user):
-			facturacion.set_invoice_issuer(pl_name, issuer)
+		frappe.db.set_value(
+			"Pick List",
+			pl_name,
+			{"fg_invoice_issuer": None, "fg_invoice_number": 0, "fg_invoice_number_key": None},
+			update_modified=False,
+		)
 		return so, pl_name
 
 	def _html(self, pl_name, user=None, print_format=INVOICE_FORMAT):
@@ -140,7 +153,7 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 	# -- 1/2. emisores aceptados ----------------------------------------------
 
 	def test_01_integrandomas_accepted(self):
-		_, pl_name = self._invoiced_pick_list()
+		_, pl_name = self._historical_invoiced_pick_list()
 		with fx.as_user(self.facturacion_user):
 			result = facturacion.set_invoice_issuer(pl_name, "integrandoMAS")
 		self.assertEqual(result["fg_invoice_issuer"], "integrandoMAS")
@@ -148,7 +161,7 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 		self.assertIn("INTEGRANDO MAS BGA", self._html(pl_name))
 
 	def test_02_ecoluminar_accepted(self):
-		_, pl_name = self._invoiced_pick_list()
+		_, pl_name = self._historical_invoiced_pick_list()
 		with fx.as_user(self.facturacion_user):
 			facturacion.set_invoice_issuer(pl_name, "ecoluminar")
 		self.assertEqual(frappe.db.get_value("Pick List", pl_name, "fg_invoice_issuer"), "ecoluminar")
@@ -157,7 +170,7 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 	# -- 3/4. emisores rechazados ----------------------------------------------
 
 	def test_03_other_issuer_rejected(self):
-		_, pl_name = self._invoiced_pick_list()
+		_, pl_name = self._historical_invoiced_pick_list()
 		for bad in ("fabrigraySAS", "IVA", "amore", "INTEGRANDOMAS", "<script>x</script>"):
 			with fx.as_user(self.facturacion_user):
 				with self.assertRaises(facturacion.InvalidInvoiceIssuerError, msg=bad):
@@ -165,7 +178,7 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 		self.assertFalse(frappe.db.get_value("Pick List", pl_name, "fg_invoice_issuer"))
 
 	def test_04_empty_issuer_rejected(self):
-		_, pl_name = self._invoiced_pick_list()
+		_, pl_name = self._historical_invoiced_pick_list()
 		for empty in (None, ""):
 			with fx.as_user(self.facturacion_user):
 				with self.assertRaises(facturacion.InvoiceIssuerRequiredError):
@@ -173,7 +186,7 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 
 	def test_04b_pdf_without_saved_issuer_rejected_everywhere(self):
 		"""Facturado pero sin emisor persistido -- ningún camino genera PDF."""
-		_, pl_name = self._invoiced_pick_list()
+		_, pl_name = self._historical_invoiced_pick_list()
 		for path in self._all_pdf_paths(pl_name):
 			with self.assertRaises(facturacion.InvoiceIssuerRequiredError):
 				path()
@@ -215,11 +228,12 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 
 	def test_07_not_invoiced_rejected(self):
 		_, pl_name = self._picked_pick_list()
+		# Ajuste numeración por empresa -- elegir el emisor ANTES de facturar
+		# está permitido (no consume numeración); el PDF sigue exigiendo
+		# Facturado en los tres caminos.
 		with fx.as_user(self.facturacion_user):
-			with self.assertRaises(facturacion.InvoicePdfNotEligibleError):
-				facturacion.set_invoice_issuer(pl_name, "integrandoMAS")
-		# aunque alguien forzara el campo, los tres caminos siguen rechazando
-		frappe.db.set_value("Pick List", pl_name, "fg_invoice_issuer", "integrandoMAS")
+			facturacion.set_invoice_issuer(pl_name, "integrandoMAS")
+		self.assertFalse(frappe.db.get_value("Pick List", pl_name, "fg_invoice_number"))
 		for path in self._all_pdf_paths(pl_name):
 			with self.assertRaises(facturacion.InvoicePdfNotEligibleError):
 				path()
@@ -271,20 +285,24 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 		self._download(pl_name)
 		self.assertEqual(frappe.local.response.filename, f"Factura-ecoluminar-{pl_name}.pdf")
 
-	def test_10_issuer_change_is_persisted(self):
+	def test_10_issuer_is_persisted_and_locked_once_numbered(self):
+		# Ajuste numeración por empresa -- guardar el emisor asigna el número;
+		# desde ahí el emisor ya no puede cambiarse.
 		_, pl_name = self._with_issuer("integrandoMAS")
 		with fx.as_user(self.facturacion_user):
-			facturacion.set_invoice_issuer(pl_name, "ecoluminar")
-		self.assertEqual(frappe.db.get_value("Pick List", pl_name, "fg_invoice_issuer"), "ecoluminar")
+			with self.assertRaises(facturacion.InvoiceIssuerLockedError):
+				facturacion.set_invoice_issuer(pl_name, "ecoluminar")
+		self.assertEqual(frappe.db.get_value("Pick List", pl_name, "fg_invoice_issuer"), "integrandoMAS")
 		html = self._html(pl_name)
-		self.assertIn("ECOLUMINAR", html)
-		self.assertNotIn("INTEGRANDO MAS BGA", html)
+		self.assertIn("INTEGRANDO MAS BGA", html)
+		self.assertNotIn("ECOLUMINAR", html)
 
-		# y la cola de Facturación lo devuelve para pintar el select
+		# y la cola de Facturación lo devuelve (con su número) para pintar el select
 		with fx.as_user(self.facturacion_user):
 			queue = facturacion.get_invoicing_queue(status="Facturado", txt=pl_name)
 		row = next(r for r in queue["pick_lists"] if r["name"] == pl_name)
-		self.assertEqual(row["fg_invoice_issuer"], "ecoluminar")
+		self.assertEqual(row["fg_invoice_issuer"], "integrandoMAS")
+		self.assertEqual(row["fg_invoice_number"], frappe.db.get_value("Pick List", pl_name, "fg_invoice_number"))
 
 	def test_10b_same_issuer_twice_is_a_noop(self):
 		_, pl_name = self._with_issuer("integrandoMAS")
@@ -314,8 +332,9 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 
 		self.assertIn(self.customer.customer_name, html)
 		self.assertIn("900000001-1", html)
-		# nunca el PEDIDO como número de factura
-		self.assertIn("SIN NUMERAR", html)
+		# el número es el interno del emisor -- nunca el PEDIDO
+		number = frappe.db.get_value("Pick List", pl_name, "fg_invoice_number")
+		self.assertIn(f"No. {number}", html)
 		self.assertNotIn(f"No. {so.name}", html)
 		self.assertIn(f"Ref. interna: {pl_name}", html)
 		# sin datos reales del emisor -> marcado como borrador
@@ -481,27 +500,33 @@ class TestFacturacionInvoicePdfIssuerData(TestFacturacionInvoicePdf):
 		self.assertIn("Adeudo a ECODLUMINAR el monto neto indicado", html)
 		self.assertNotIn("INTEGRANDO MAS BGA", html)
 
-	def test_17_both_still_unnumbered_and_marked_draft(self):
+	def test_17_both_numbered_but_still_marked_draft(self):
+		# Numeradas con su serie interna, pero BORRADOR mientras no exista
+		# resolución de facturación DIAN (se mantiene en esta fase).
 		for issuer in ("integrandoMAS", "ecoluminar"):
 			pl_name, html = self._issuer_html(issuer)
-			self.assertIn("No. SIN NUMERAR", html)
+			number = frappe.db.get_value("Pick List", pl_name, "fg_invoice_number")
+			self.assertTrue(number)
+			self.assertIn(f"No. {number}", html)
+			self.assertNotIn("SIN NUMERAR", html)
 			self.assertIn(f"Ref. interna: {pl_name}", html)
 			self.assertIn("BORRADOR — NO VÁLIDO COMO FACTURA DE VENTA", html)
-			self.assertIn("sin numeración de factura autorizada", html)
+			self.assertIn("numeración interna, sin resolución de facturación DIAN", html)
+			self.assertNotIn("sin numeración de factura autorizada", html)
 
-	def test_18_switching_issuer_swaps_all_data_and_persists(self):
+	def test_18_numbered_issuer_cannot_be_switched_and_pdf_never_changes_it(self):
 		_, pl_name = self._with_issuer("integrandoMAS")
 		self.assertIn("79600011630", self._html(pl_name))
 		with fx.as_user(self.facturacion_user):
-			facturacion.set_invoice_issuer(pl_name, "ecoluminar")
+			with self.assertRaises(facturacion.InvoiceIssuerLockedError):
+				facturacion.set_invoice_issuer(pl_name, "ecoluminar")
 		html = self._html(pl_name)
-		self.assertIn("09036542699", html)
-		self.assertNotIn("79600011630", html)
-		self.assertEqual(frappe.db.get_value("Pick List", pl_name, "fg_invoice_issuer"), "ecoluminar")
+		self.assertIn("79600011630", html)
+		self.assertNotIn("09036542699", html)
 		# generar el PDF nunca cambia el emisor guardado
 		self._html(pl_name)
 		self._download(pl_name)
-		self.assertEqual(frappe.db.get_value("Pick List", pl_name, "fg_invoice_issuer"), "ecoluminar")
+		self.assertEqual(frappe.db.get_value("Pick List", pl_name, "fg_invoice_issuer"), "integrandoMAS")
 
 	def test_19_quotation_print_format_carries_no_issuer_data(self):
 		html = frappe.db.get_value("Print Format", cotizaciones.PDF_PRINT_FORMAT_NAME, "html")
@@ -565,9 +590,9 @@ class TestFacturacionInvoicePdfIssuerData(TestFacturacionInvoicePdf):
 			self.assertIn(f'src="{frappe.utils.get_url(own_url)}"', html)
 			self.assertNotIn(other_url, html)
 			self.assertNotIn('<div class="fg-inv-logo-placeholder">', html)
-			# el logo no hace válida la factura: sigue sin numeración
+			# el logo no hace válida la factura: sigue siendo borrador (sin DIAN)
 			self.assertIn("BORRADOR — NO VÁLIDO COMO FACTURA DE VENTA", html)
-			self.assertIn("No. SIN NUMERAR", html)
+			self.assertNotIn("SIN NUMERAR", html)
 			self.assertNotIn("faltan datos del emisor", html)
 
 	# -- imprenta -----------------------------------------------------------
@@ -589,7 +614,7 @@ class TestFacturacionInvoicePdfIssuerData(TestFacturacionInvoicePdf):
 			]
 			self.assertEqual(positions, sorted(positions), issuer)
 			self.assertIn("BORRADOR — NO VÁLIDO COMO FACTURA DE VENTA", html)
-			self.assertIn("No. SIN NUMERAR", html)
+			self.assertIn(f"No. {frappe.db.get_value('Pick List', pl_name, 'fg_invoice_number')}", html)
 			self.assertIn(f"Ref. interna: {pl_name}", html)
 
 	def test_25_print_provider_is_configured_once_and_outside_the_issuers(self):

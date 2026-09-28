@@ -104,6 +104,7 @@ reviewed. get_invoicing_detail() below returns one entry per child row,
 verbatim, never grouped.
 """
 
+import functools
 from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 
@@ -122,6 +123,7 @@ from fabergray_erp.api.cotizaciones import (
 )
 from fabergray_erp.invoice_issuers import (
 	INVOICE_ISSUERS,
+	INVOICE_NUMBERING,
 	get_issuer_config,
 	get_print_provider,
 	missing_issuer_fields,
@@ -776,6 +778,7 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 			"fg_invoiced_on",
 			"fg_invoiced_by",
 			"fg_invoice_issuer",
+			"fg_invoice_number",
 			"modified",
 			"creation",
 		],
@@ -840,6 +843,7 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 					frappe.utils.get_fullname(pl.fg_invoiced_by) if pl.fg_invoiced_by else None
 				),
 				"fg_invoice_issuer": pl.fg_invoice_issuer or None,
+				"fg_invoice_number": cint(pl.fg_invoice_number) or None,
 			}
 		)
 
@@ -891,6 +895,8 @@ def get_invoicing_detail(pick_list):
 		"customer_name": pl.customer_name,
 		"fg_customer_company_type": _customer_company_type(pl.customer),
 		"fg_invoicing_status": pl.fg_invoicing_status or FG_INVOICING_PENDIENTE,
+		"fg_invoice_issuer": pl.fg_invoice_issuer or None,
+		"fg_invoice_number": cint(pl.fg_invoice_number) or None,
 		# Hotfix 25.26.1 -- read-only; "" when the order has none.
 		"order_observations": _order_observations(sales_order),
 		"total_items": total_items,
@@ -970,8 +976,34 @@ def set_invoicing_item_checked(pick_list, pick_list_item, checked):
 	}
 
 
+def _retrying_on_deadlock(fn):
+	"""Same mechanism as api.recorridos._retrying_on_deadlock() (not imported:
+	api.recorridos already imports this module). Confirmed with two real
+	concurrent requests (test_facturacion_invoice_numbering): the request
+	that waits on the Pick List / tabSeries row lock wakes up with MariaDB's
+	1020 "Record has changed since last read" (snapshot isolation), which
+	Frappe raises as QueryDeadlockError. Never a wrong or duplicated number
+	-- but the request would fail. Rolling back and re-running the WHOLE
+	function starts from a fresh snapshot: it takes the next number, or the
+	idempotent branch if the same Pick List was numbered meanwhile."""
+
+	@functools.wraps(fn)
+	def wrapper(*args, **kwargs):
+		last_error = None
+		for _attempt in range(3):
+			try:
+				return fn(*args, **kwargs)
+			except frappe.QueryDeadlockError as e:
+				last_error = e
+				frappe.db.rollback()
+		raise last_error
+
+	return wrapper
+
+
 @frappe.whitelist()
-def mark_as_invoiced(pick_list_name):
+@_retrying_on_deadlock
+def mark_as_invoiced(pick_list_name, issuer=None):
 	"""The one write in the new flow: marks a Pick List as operationally
 	"Facturado" -- fg_invoicing_status/fg_invoiced_on/fg_invoiced_by only,
 	via a plain `.save()` (real permission, no ignore_permissions). Never
@@ -1008,7 +1040,23 @@ def mark_as_invoiced(pick_list_name):
 	Atomicity: the only write is this one `.save()`; no
 	frappe.db.commit() anywhere in this function or reachable from it --
 	an exception at any point above rolls back the whole request exactly
-	like every other write endpoint in this app."""
+	like every other write endpoint in this app.
+
+	Ajuste numeración por empresa -- FACTURAR is where the internal invoice
+	number is assigned (never when the issuer is merely selected, never when
+	the PDF is rendered). In this same transaction and single `.save()`:
+	1. the issuer (`issuer`, or the one already saved with
+	   set_invoice_issuer()) is required and validated;
+	2. the Pick List row is re-read under a lock (for_update) and every
+	   decision below uses that locked state -- a double click serializes
+	   here and the second one gets AlreadyInvoicedError, never a second
+	   number;
+	3. _next_invoice_number() takes the next number of THAT issuer's own
+	   series; fg_invoice_number/fg_invoice_number_key are saved with the
+	   Facturado status. A Pick List that somehow already has a number keeps
+	   it (never renumbered, never moved to another series).
+	The MariaDB 1020 wake-up error of a request that waited on those locks
+	is retried by @_retrying_on_deadlock (see its docstring)."""
 	_require_login()
 	frappe.has_permission("Pick List", "write", throw=True)
 
@@ -1021,8 +1069,17 @@ def mark_as_invoiced(pick_list_name):
 			PickListNotReadyForInvoicingError,
 		)
 
-	if pl.fg_invoicing_status == FG_INVOICING_FACTURADO:
+	locked = frappe.db.get_value(
+		"Pick List",
+		pl.name,
+		["fg_invoicing_status", "fg_invoice_issuer", "fg_invoice_number"],
+		as_dict=True,
+		for_update=True,
+	)
+	if locked.fg_invoicing_status == FG_INVOICING_FACTURADO:
 		frappe.throw(_("Este pedido ya fue marcado como facturado."), AlreadyInvoicedError)
+	# Locking read: every field saved below starts from the latest committed row.
+	pl = frappe.get_doc("Pick List", pl.name, for_update=True)
 
 	total_items, checked_items, _progress = _checklist_counts(pl)
 	if total_items == 0 or checked_items != total_items:
@@ -1032,6 +1089,15 @@ def mark_as_invoiced(pick_list_name):
 		)
 
 	sales_order = _sales_order_of(pl)
+
+	issuer = _validate_invoice_issuer(issuer or locked.fg_invoice_issuer)
+	if cint(locked.fg_invoice_number) and locked.fg_invoice_issuer != issuer:
+		frappe.throw(
+			_("Esta factura ya tiene el número {0} de {1}; su empresa emisora no puede cambiarse.").format(
+				locked.fg_invoice_number, locked.fg_invoice_issuer
+			),
+			InvoiceIssuerLockedError,
+		)
 
 	# Commit 25.25 -- congela el precio final de CADA línea (el precio de
 	# Facturación si existe; si no, el rate actual del Sales Order) antes de
@@ -1043,7 +1109,12 @@ def mark_as_invoiced(pick_list_name):
 	pl.fg_invoicing_status = FG_INVOICING_FACTURADO
 	pl.fg_invoiced_on = frappe.utils.now_datetime()
 	pl.fg_invoiced_by = frappe.session.user
-	with _invoice_pricing_write():
+	with _invoice_pricing_write(), _invoice_numbering_write():
+		pl.fg_invoice_issuer = issuer
+		if not cint(pl.fg_invoice_number):
+			number = _next_invoice_number(issuer)
+			pl.fg_invoice_number = number
+			pl.fg_invoice_number_key = _invoice_number_key(issuer, number)
 		pl.save()  # real permission, no ignore_permissions
 
 	return {
@@ -1056,6 +1127,8 @@ def mark_as_invoiced(pick_list_name):
 		"fg_invoiced_on": pl.fg_invoiced_on,
 		"fg_invoiced_by": pl.fg_invoiced_by,
 		"fg_invoiced_by_fullname": frappe.utils.get_fullname(pl.fg_invoiced_by),
+		"fg_invoice_issuer": pl.fg_invoice_issuer,
+		"fg_invoice_number": cint(pl.fg_invoice_number),
 	}
 
 
@@ -1090,11 +1163,23 @@ def mark_as_invoiced(pick_list_name):
 #   - si es parcial y el pedido SÍ tiene impuestos/descuento global, se
 #     rechaza: prorratearlos sería inventar un cálculo contable.
 #
-# Numeración: no existe un número de factura real en este flujo (no hay Sales
-# Invoice y nunca se diseñó una serie). `_resolve_invoice_number()` devuelve
-# None a propósito -- ni el PEDIDO ni el Pick List se usan como número. El PDF
-# muestra "SIN NUMERAR" + la referencia interna del Pick List, y se marca
-# BORRADOR mientras falte numeración o datos del emisor (invoice_issuers.py).
+# Numeración (ajuste "numeración por empresa"): número INTERNO de factura,
+# independiente por emisor -- no es numeración DIAN. Las dos "empresas" son
+# emisores (Pick List.fg_invoice_issuer), no Companies de ERPNext (auditado:
+# solo existe la Company fabrigraysas) y el flujo no crea Sales Invoice, así
+# que el número vive en el Pick List:
+#   - fg_invoice_number: el número comercial que imprime el PDF (6886, 2263...);
+#   - fg_invoice_number_key: "<emisor>-<número>", UNIQUE -- la BD garantiza
+#     que un número nunca se repite dentro de un emisor, y el mismo número en
+#     emisores distintos no choca.
+# Pick List.name no cambia (links y trazabilidad intactos). El número se
+# asigna UNA vez, al FACTURAR (mark_as_invoiced(), que exige el emisor) --
+# elegir el emisor (set_invoice_issuer()) nunca consume la serie, y renderizar
+# el PDF tampoco; desde que hay número, emisor y número quedan fijos. Los
+# Pick Lists Facturados antes de este ajuste nunca se numeran. La serie es la nativa de Frappe
+# (tabSeries, una fila por emisor, invoice_issuers.INVOICE_NUMBERING) y nunca
+# retrocede: un Pick List cancelado conserva su número y no se reutiliza.
+# El PDF sigue marcado BORRADOR en esta fase (sin resolución DIAN).
 # =============================================================================
 
 INVOICE_PDF_PRINT_FORMAT_NAME = "Fabrigray Factura Comercial"
@@ -1112,6 +1197,16 @@ class InvalidInvoiceIssuerError(frappe.ValidationError):
 
 class InvoicePdfNotEligibleError(frappe.ValidationError):
 	pass
+
+
+class InvoiceIssuerLockedError(frappe.ValidationError):
+	pass
+
+
+#: Autoriza, solo dentro de _invoice_numbering_write(), escribir
+#: fg_invoice_number/fg_invoice_number_key y cambiar un emisor ya numerado.
+_INVOICE_NUMBERING_FLAG = "fg_invoice_numbering_write"
+INVOICE_NUMBER_FIELDS = ("fg_invoice_number", "fg_invoice_number_key")
 
 
 def _validate_invoice_issuer(issuer):
@@ -1144,6 +1239,20 @@ def _assert_invoiced_pick_list(pl, ptype="read"):
 	if pl.fg_invoicing_status != FG_INVOICING_FACTURADO:
 		frappe.throw(
 			_("El pedido debe estar marcado como facturado antes de generar la factura."),
+			InvoicePdfNotEligibleError,
+		)
+
+
+def _assert_issuer_selectable(pl):
+	"""Rol + permiso de escritura + Company + Pick List sometido: lo necesario
+	para elegir el emisor, antes o después de FACTURAR (el PDF sí exige
+	Facturado, ver _assert_invoiced_pick_list())."""
+	_require_facturacion_role()
+	pl.check_permission("write")
+	assert_same_company(pl)
+	if pl.docstatus != 1:
+		frappe.throw(
+			_("Este Pick List no está sometido; no puede elegirse su empresa emisora todavía."),
 			InvoicePdfNotEligibleError,
 		)
 
@@ -1189,11 +1298,79 @@ def _assert_invoice_pdf_eligible(pl):
 
 
 def _resolve_invoice_number(pl):
-	"""Número de factura a imprimir. None a propósito: el flujo actual no
-	crea Sales Invoice ni existe una serie de facturación autorizada, y el
-	PEDIDO/Pick List no deben usarse como número sin autorización. Este es
-	el único punto a cambiar cuando se defina la numeración real."""
-	return None
+	"""Número de factura a imprimir: el número interno ya asignado al Pick
+	List (set_invoice_issuer()), o None si todavía no tiene -- nunca se
+	asigna uno al imprimir, y nunca se usa el PEDIDO/Pick List como número."""
+	return cint(pl.get("fg_invoice_number")) or None
+
+
+@contextmanager
+def _invoice_numbering_write():
+	"""Misma bandera interna que _invoice_pricing_write(): nunca viene del
+	navegador y se restaura aunque el bloque lance."""
+	previous = frappe.flags.get(_INVOICE_NUMBERING_FLAG)
+	frappe.flags[_INVOICE_NUMBERING_FLAG] = True
+	try:
+		yield
+	finally:
+		frappe.flags[_INVOICE_NUMBERING_FLAG] = previous
+
+
+def _invoice_number_key(issuer, number):
+	return f"{issuer}-{number}"
+
+
+def _next_invoice_number(issuer):
+	"""Siguiente número de la serie de `issuer`, seguro frente a concurrencia.
+
+	1. La fila de tabSeries se crea UNA sola vez con current = start - 1
+	   (INSERT IGNORE: atómico; si ya existe -- con cualquier valor -- no se
+	   toca, así que la serie nunca se reinicia ni retrocede).
+	2. frappe.model.naming.getseries() -- el contador nativo de Frappe -- lee
+	   la fila con SELECT ... FOR UPDATE e incrementa: dos requests del mismo
+	   emisor se serializan en esa fila y obtienen números distintos y
+	   consecutivos; emisores distintos usan filas distintas y no se bloquean.
+	Nada de MAX(name)+1 ni contadores en el navegador. Sin commit propio: la
+	transacción del request confirma número y Pick List juntos, o ninguno."""
+	from frappe.model.naming import getseries
+
+	config = INVOICE_NUMBERING[issuer]
+	frappe.db.sql(
+		"INSERT IGNORE INTO `tabSeries` (`name`, `current`) VALUES (%s, %s)",
+		(config["series"], cint(config["start"]) - 1),
+	)
+	number = cint(getseries(config["series"], 1))
+	if number < cint(config["start"]):
+		# Defensa: una fila preexistente con un valor menor al inicio pactado
+		# no debe emitir números por debajo de él (p. ej. 1, 2, 3...).
+		frappe.throw(
+			_("La serie de facturación de {0} está por debajo de su número inicial ({1}).").format(
+				issuer, config["start"]
+			)
+		)
+	return number
+
+
+def guard_invoice_number_fields(doc, method=None):
+	"""Pick List `validate` + `before_update_after_submit` (hooks.py): el
+	número de factura (y el emisor, una vez numerado) solo cambian dentro de
+	_invoice_numbering_write() -- Bodega/Facturación tienen write sobre Pick
+	List y, sin esto, podrían reescribirlos por API/Desk."""
+	if frappe.flags.get(_INVOICE_NUMBERING_FLAG):
+		return
+	before = doc.get_doc_before_save()
+	for fieldname in INVOICE_NUMBER_FIELDS:
+		old_value = (before.get(fieldname) if before else None) or None
+		if (doc.get(fieldname) or None) != old_value:
+			frappe.throw(
+				_("El número de factura solo lo asigna Facturación al guardar la empresa emisora."),
+				frappe.PermissionError,
+			)
+	if before and cint(before.get("fg_invoice_number")) and doc.fg_invoice_issuer != before.fg_invoice_issuer:
+		frappe.throw(
+			_("Esta factura ya tiene número; su empresa emisora no puede cambiarse."),
+			InvoiceIssuerLockedError,
+		)
 
 
 def _format_money_co(value):
@@ -1389,7 +1566,9 @@ def _build_invoice_pdf_context(pl, so):
 	pl.fg_pdf_number = number
 	pl.fg_pdf_internal_reference = pl.name
 
-	draft_reasons = []
+	# Fase actual: el PDF SIEMPRE es borrador -- la numeración es interna y
+	# no existe resolución de facturación DIAN. No quitar hasta integrarla.
+	draft_reasons = [_("numeración interna, sin resolución de facturación DIAN")]
 	if not number:
 		draft_reasons.append(_("sin numeración de factura autorizada"))
 	missing = missing_issuer_fields(issuer_key)
@@ -1435,21 +1614,42 @@ def prepare_and_guard_invoice_pdf(pl, method=None, print_settings=None):
 @frappe.whitelist()
 def set_invoice_issuer(pick_list_name, issuer):
 	"""Guarda/cambia la empresa emisora de la factura de un Pick List
-	Facturado. Persistida en el documento (no en el navegador) para que
-	VER/DESCARGAR/regenerar produzcan siempre el mismo emisor. Un `.save()`
-	real, sin ignore_permissions -- el campo es allow_on_submit=1, igual que
-	fg_invoicing_status (ver mark_as_invoiced()). Mismo valor -> no escribe."""
+	sometido, ANTES o después de FACTURAR. Nunca asigna ni consume un número:
+	el número interno se asigna solo al facturar (mark_as_invoiced()), con la
+	serie del emisor guardado aquí. Persistido en el documento (no en el
+	navegador) para que VER/DESCARGAR/regenerar usen siempre el mismo emisor.
+
+	- Sin número: el emisor puede elegirse y cambiarse libremente. Un Pick
+	  List Facturado antes de este ajuste (histórico, sin número) puede
+	  recibir emisor para su PDF y sigue SIN NUMERAR -- nunca se numera
+	  retroactivamente.
+	- Con número: mismo emisor -> no-op; otro emisor ->
+	  InvoiceIssuerLockedError (un número nunca se mueve de serie).
+	Mismo valor -> no escribe. Un `.save()` real, sin ignore_permissions --
+	el campo es allow_on_submit=1, igual que fg_invoicing_status."""
 	_require_login()
 	_validate_invoice_issuer(issuer)
 
 	pl = frappe.get_doc("Pick List", pick_list_name)
-	_assert_invoiced_pick_list(pl, ptype="write")
+	_assert_issuer_selectable(pl)
+
+	if cint(pl.fg_invoice_number) and pl.fg_invoice_issuer != issuer:
+		frappe.throw(
+			_("Esta factura ya tiene el número {0} de {1}; su empresa emisora no puede cambiarse.").format(
+				pl.fg_invoice_number, pl.fg_invoice_issuer
+			),
+			InvoiceIssuerLockedError,
+		)
 
 	if pl.fg_invoice_issuer != issuer:
 		pl.fg_invoice_issuer = issuer
-		pl.save()  # real permission, no ignore_permissions
+		pl.save()  # real permission, no ignore_permissions; guard_invoice_number_fields() re-checks the lock
 
-	return {"pick_list": pl.name, "fg_invoice_issuer": pl.fg_invoice_issuer}
+	return {
+		"pick_list": pl.name,
+		"fg_invoice_issuer": pl.fg_invoice_issuer,
+		"fg_invoice_number": cint(pl.fg_invoice_number) or None,
+	}
 
 
 @frappe.whitelist()

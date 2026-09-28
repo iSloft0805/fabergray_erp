@@ -72,6 +72,36 @@ class TestWorld:
 	def __init__(self):
 		self._created = []  # [(doctype, name), ...] in creation order
 		self._shared_group_docs_created = False
+		self._isolate_invoice_numbering()
+
+	def _isolate_invoice_numbering(self):
+		"""Ajuste numeración por empresa -- facturacion.mark_as_invoiced()
+		assigns an invoice number from the issuer's series, so ANY test class
+		that invoices (Facturación, Recorridos, Cartera, Ventas...) would
+		otherwise consume the REAL per-issuer series (FG-FACT-INTEGRANDOMAS-/
+		FG-FACT-ECOLUMINAR-) of the site it runs on. Every TestWorld swaps
+		invoice_issuers.INVOICE_NUMBERING to series keys unique to itself --
+		same `start` numbers, so a test can still assert 6886/2263 -- and
+		cleanup() restores it and deletes those tabSeries rows."""
+		from unittest.mock import patch
+
+		from fabergray_erp import invoice_issuers
+
+		sfx = frappe.generate_hash(length=8).upper()
+		self.invoice_numbering = {
+			issuer: {"series": f"FG-FACT-TEST-{sfx}-{issuer.upper()}-", "start": config["start"]}
+			for issuer, config in invoice_issuers.INVOICE_NUMBERING.items()
+		}
+		self._invoice_numbering_patch = patch.dict(invoice_issuers.INVOICE_NUMBERING, self.invoice_numbering)
+		self._invoice_numbering_patch.start()
+
+	def _restore_invoice_numbering(self):
+		if not self._invoice_numbering_patch:
+			return
+		self._invoice_numbering_patch.stop()
+		self._invoice_numbering_patch = None
+		for config in self.invoice_numbering.values():
+			frappe.db.delete("Series", {"name": config["series"]})
 
 	def _track(self, doc):
 		self._created.append((doc.doctype, doc.name))
@@ -473,6 +503,7 @@ class TestWorld:
 				# handles for Warehouse/Stock Ledger Entry).
 				frappe.db.delete("GL Entry", {"account": name})
 			frappe.delete_doc(doctype, name, ignore_permissions=True, force=True, ignore_on_trash=True)
+		self._restore_invoice_numbering()
 		frappe.db.commit()
 
 	@staticmethod

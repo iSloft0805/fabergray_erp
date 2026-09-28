@@ -180,7 +180,7 @@ class TestRecorridosApi(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for it in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		return so, frappe.get_doc("Pick List", pl.name)
 
 	def _submitted_not_facturado_pick_list(self, qty=5, rate=100):
@@ -220,7 +220,7 @@ class TestRecorridosApi(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for it in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		return so, frappe.get_doc("Pick List", pl.name)
 
 	def _set_customer_primary_address(self, customer, address_line1="Calle 10 # 5-20", city="Bogotá"):
@@ -399,7 +399,7 @@ class TestRecorridosApi(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for it in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		return so, frappe.get_doc("Pick List", pl.name)
 
 	def test_other_company_pick_list_excluded(self):

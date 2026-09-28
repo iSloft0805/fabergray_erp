@@ -146,14 +146,14 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		_, pl = self._submitted_pick_list()
 		self._check_all_items(pl.name)
 		with fx.as_user(self.facturacion_user):
-			result = facturacion.mark_as_invoiced(pl.name)
+			result = facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		self.assertEqual(result["fg_invoicing_status"], "Facturado")
 
 	def test_persists_fg_invoicing_status(self):
 		_, pl = self._submitted_pick_list()
 		self._check_all_items(pl.name)
 		with fx.as_user(self.facturacion_user):
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		pl.reload()
 		self.assertEqual(pl.fg_invoicing_status, "Facturado")
 
@@ -162,7 +162,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		self._check_all_items(pl.name)
 		before = frappe.utils.now_datetime()
 		with fx.as_user(self.facturacion_user):
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		pl.reload()
 		self.assertIsNotNone(pl.fg_invoiced_on)
 		self.assertGreaterEqual(pl.fg_invoiced_on, frappe.utils.add_to_date(before, seconds=-5))
@@ -171,7 +171,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		_, pl = self._submitted_pick_list()
 		self._check_all_items(pl.name)
 		with fx.as_user(self.facturacion_user):
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		pl.reload()
 		self.assertEqual(pl.fg_invoiced_by, self.facturacion_user)
 
@@ -181,9 +181,9 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		_, pl = self._submitted_pick_list()
 		self._check_all_items(pl.name)
 		with fx.as_user(self.facturacion_user):
-			first = facturacion.mark_as_invoiced(pl.name)
+			first = facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 			with self.assertRaises(facturacion.AlreadyInvoicedError):
-				facturacion.mark_as_invoiced(pl.name)
+				facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 
 		pl.reload()
 		self.assertEqual(pl.fg_invoiced_on, first["fg_invoiced_on"])  # never overwritten by the rejected 2nd call
@@ -196,7 +196,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		with fx.as_user(self.vendedora_user):
 			self.assertFalse(frappe.has_permission("Pick List", "write"))
 			with self.assertRaises(frappe.PermissionError):
-				facturacion.mark_as_invoiced(pl.name)
+				facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		pl.reload()
 		self.assertEqual(pl.fg_invoicing_status, "Pendiente")
 
@@ -207,7 +207,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		self._check_all_items(pl.name)
 		before = frappe.db.count("Sales Invoice")
 		with fx.as_user(self.facturacion_user):
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		self.assertEqual(frappe.db.count("Sales Invoice"), before)
 		self.assertEqual(frappe.get_list("Sales Invoice Item", filters={"against_pick_list": pl.name}), [])
 
@@ -216,7 +216,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		self._check_all_items(pl.name)
 		before = frappe.db.count("GL Entry")
 		with fx.as_user(self.facturacion_user):
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		self.assertEqual(frappe.db.count("GL Entry"), before)
 
 	def test_no_payment_entry_created(self):
@@ -224,7 +224,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		self._check_all_items(pl.name)
 		before = frappe.db.count("Payment Entry")
 		with fx.as_user(self.facturacion_user):
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		self.assertEqual(frappe.db.count("Payment Entry"), before)
 
 	# -- 10/11. Estado nativo contable/de entrega intacto --------------------------
@@ -239,7 +239,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 			"Sales Order", so.name, ["per_billed", "billing_status"]
 		)
 		with fx.as_user(self.facturacion_user):
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		per_billed_after, billing_status_after = frappe.db.get_value(
 			"Sales Order", so.name, ["per_billed", "billing_status"]
 		)
@@ -252,7 +252,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		delivery_status_before = pl.delivery_status
 		per_delivered_before = pl.per_delivered
 		with fx.as_user(self.facturacion_user):
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		pl.reload()
 		self.assertEqual(pl.delivery_status, delivery_status_before)
 		self.assertEqual(pl.per_delivered, per_delivered_before)
@@ -263,7 +263,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		_, pl = self._submitted_pick_list()
 		self._check_all_items(pl.name)
 		with fx.as_user(self.facturacion_user):
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 			pendientes = facturacion.get_invoicing_queue(status="Pendiente", page_length=200)
 		self.assertNotIn(pl.name, [r["name"] for r in pendientes["pick_lists"]])
 
@@ -271,7 +271,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		_, pl = self._submitted_pick_list()
 		self._check_all_items(pl.name)
 		with fx.as_user(self.facturacion_user):
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 			facturados = facturacion.get_invoicing_queue(status="Facturado", page_length=200)
 		self.assertIn(pl.name, [r["name"] for r in facturados["pick_lists"]])
 
@@ -280,7 +280,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		self._check_all_items(pl.name)
 		with fx.as_user(self.facturacion_user):
 			before = facturacion.get_invoicing_summary()
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 			after = facturacion.get_invoicing_summary()
 		self.assertEqual(after["facturados_hoy"], before["facturados_hoy"] + 1)
 		self.assertEqual(after["facturados"], before["facturados"] + 1)
@@ -292,7 +292,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		_, pl = self._submitted_pick_list()
 		self._check_all_items(pl.name)
 		with fx.as_user(self.facturacion_user):
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 			facturados = facturacion.get_invoicing_queue(status="Facturado", page_length=200)
 		row = next(r for r in facturados["pick_lists"] if r["name"] == pl.name)
 		self.assertEqual(row["fg_invoiced_by"], self.facturacion_user)
@@ -328,7 +328,7 @@ class TestFacturacionInvoicingStatus(IntegrationTestCase):
 		with fx.as_user(self.facturacion_user):
 			with frappe_monkeypatch(frappe, "get_doc", stale_get_doc):
 				with self.assertRaises(frappe.exceptions.TimestampMismatchError):
-					facturacion.mark_as_invoiced(pl.name)
+					facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 
 		pl.reload()
 		self.assertEqual(pl.fg_invoicing_status, "Pendiente")
@@ -558,7 +558,7 @@ class TestFacturacionInvoicingChecklist(IntegrationTestCase):
 				facturacion.ChecklistIncompleteError,
 				"Debes revisar todos los productos antes de marcar el pedido como facturado.",
 			):
-				facturacion.mark_as_invoiced(pl.name)
+				facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		pl.reload()
 		self.assertEqual(pl.fg_invoicing_status, "Pendiente")
 
@@ -566,7 +566,7 @@ class TestFacturacionInvoicingChecklist(IntegrationTestCase):
 		_, pl = self._two_line_pick_list()
 		with fx.as_user(self.facturacion_user):
 			with self.assertRaises(facturacion.ChecklistIncompleteError):
-				facturacion.mark_as_invoiced(pl.name)
+				facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 
 	# -- 14. mark_as_invoiced funciona con checklist 100% ------------------------------
 
@@ -576,7 +576,7 @@ class TestFacturacionInvoicingChecklist(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for item in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, item["row_name"], 1)
-			result = facturacion.mark_as_invoiced(pl.name)
+			result = facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		self.assertEqual(result["fg_invoicing_status"], "Facturado")
 
 	# -- 15. después de Facturado no permite editar checklist ---------------------------
@@ -587,7 +587,7 @@ class TestFacturacionInvoicingChecklist(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for item in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, item["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 
 			with self.assertRaises(facturacion.ChecklistReadOnlyError):
 				facturacion.set_invoicing_item_checked(pl.name, detail["items"][0]["row_name"], 0)
@@ -600,9 +600,9 @@ class TestFacturacionInvoicingChecklist(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for item in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, item["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 			with self.assertRaises(facturacion.AlreadyInvoicedError):
-				facturacion.mark_as_invoiced(pl.name)
+				facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 
 	# -- 17. lista Pendientes muestra progreso -------------------------------------------
 
@@ -625,7 +625,7 @@ class TestFacturacionInvoicingChecklist(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for item in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, item["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 			queue = facturacion.get_invoicing_queue(status="Facturado", page_length=200)
 			row = next(r for r in queue["pick_lists"] if r["name"] == pl.name)
 			self.assertEqual(row["checked_items"], 2)

@@ -516,8 +516,14 @@ fabergray_erp.Facturacion = class Facturacion {
 	// El select refleja r.fg_invoice_issuer (persistido en el Pick List por
 	// set_invoice_issuer()); VER/DESCARGAR siempre usan ese valor guardado,
 	// nunca el estado del navegador.
+	// Ajuste numeración por empresa -- el número se asigna al FACTURAR
+	// (mark_as_invoiced(), con el emisor elegido en Revisar pedido); desde
+	// ahí el emisor queda fijo: el select se deshabilita y se muestra el
+	// número. Un Facturado histórico sin número conserva el select editable
+	// (SIN NUMERAR) -- elegir emisor nunca consume la serie.
 	render_invoice_pdf_html(r) {
 		const current = r.fg_invoice_issuer || "";
+		const number = r.fg_invoice_number || null;
 		const options = [`<option value="" ${current ? "" : "selected"}>${__("Selecciona...")}</option>`]
 			.concat(
 				INVOICE_ISSUERS.map(
@@ -530,8 +536,9 @@ fabergray_erp.Facturacion = class Facturacion {
 			<div class="fg-fact-invoice-pdf">
 				<label class="fg-fact-invoice-pdf-field">
 					<span class="fg-fact-invoice-pdf-label">${__("EMPRESA EMISORA")}</span>
-					<select class="fg-fact-invoice-issuer">${options}</select>
+					<select class="fg-fact-invoice-issuer" ${number ? "disabled" : ""}>${options}</select>
 				</label>
+				${invoice_number_badge_html(number)}
 				<div class="fg-fact-invoice-pdf-actions">
 					<button type="button" class="fg-btn fg-fact-invoice-view">${icon("file-text", "fg-icon-sm")} ${__("VER PDF")}</button>
 					<button type="button" class="fg-btn fg-btn--solid-primary fg-fact-invoice-download">${icon(
@@ -559,11 +566,18 @@ fabergray_erp.Facturacion = class Facturacion {
 		$controls.prop("disabled", true);
 		this.call("set_invoice_issuer", { pick_list_name: pick_list_name, issuer: issuer })
 			.then((result) => {
-				if (row) row.fg_invoice_issuer = result.fg_invoice_issuer;
+				if (row) {
+					row.fg_invoice_issuer = result.fg_invoice_issuer;
+					row.fg_invoice_number = result.fg_invoice_number;
+				}
 				frappe.show_alert({ message: __("Empresa emisora guardada: {0}", [result.fg_invoice_issuer]), indicator: "green" }, 4);
 			})
 			.catch(() => revert())
-			.finally(() => $controls.prop("disabled", false));
+			.finally(() => {
+				$controls.prop("disabled", false);
+				// Numerada: el emisor ya no puede cambiarse (el servidor también lo rechaza).
+				if (row && row.fg_invoice_number) $card.find(".fg-fact-invoice-issuer").prop("disabled", true);
+			});
 	}
 
 	invoice_issuer_of(pick_list_name) {
@@ -664,6 +678,7 @@ fabergray_erp.Facturacion = class Facturacion {
 
 		this._review_pick_list = pick_list_name;
 		this._review_detail = null;
+		this._review_issuer = null;
 		this._review_pricing = null;
 		this._review_saving_rows = new Set();
 
@@ -694,6 +709,7 @@ fabergray_erp.Facturacion = class Facturacion {
 				if (this._review_pick_list !== pick_list_name) return; // dialog closed/reopened meanwhile
 				this._review_detail = detail;
 				this._review_pricing = pricing;
+				this._review_issuer = detail.fg_invoice_issuer || null;
 				this.render_review_dialog_body();
 			})
 			.catch(() => dialog.hide());
@@ -768,6 +784,10 @@ fabergray_erp.Facturacion = class Facturacion {
 								<div class="fg-fact-review-info-label">${__("Empresa / Tipo")}</div>
 								<div class="fg-fact-review-info-value">${render_company_type_badge(d.fg_customer_company_type)}</div>
 								${company_type_warning_html}
+							</div>
+							<div class="fg-fact-review-info-item">
+								<div class="fg-fact-review-info-label">${__("EMPRESA EMISORA")}</div>
+								<div class="fg-fact-review-info-value">${this.render_review_issuer_html(d, is_facturado)}</div>
 							</div>
 							<div class="fg-fact-review-info-item">
 								<div class="fg-fact-review-info-label">${__("Pick List")}</div>
@@ -1116,6 +1136,13 @@ fabergray_erp.Facturacion = class Facturacion {
 		$wrap.off("click", ".fg-fact-review-copy-btn").on("click", ".fg-fact-review-copy-btn", () => {
 			frappe.utils.copy_to_clipboard(this._review_detail.pick_list);
 		});
+
+		// Ajuste numeración por empresa -- dialog state only; sent with
+		// mark_as_invoiced(). Nothing is saved and no number is consumed here.
+		$wrap.off("change", ".fg-fact-review-issuer").on("change", ".fg-fact-review-issuer", (e) => {
+			this._review_issuer = $(e.currentTarget).val() || null;
+			this.refresh_review_primary_action();
+		});
 	}
 
 	// One row, one immediate server call -- "guardado inmediato" per the
@@ -1213,6 +1240,28 @@ fabergray_erp.Facturacion = class Facturacion {
 		this.refresh_review_primary_action();
 	}
 
+	// Ajuste numeración por empresa -- the issuer is chosen HERE, before
+	// CONFIRMAR FACTURACIÓN: mark_as_invoiced() receives it and assigns the
+	// invoice number from that issuer's series in the same transaction.
+	// Choosing it only updates this dialog's state (nothing is saved, no
+	// number is consumed); once the Pick List is Facturado it is read-only.
+	render_review_issuer_html(d, is_facturado) {
+		if (is_facturado || d.fg_invoice_number) {
+			return `${frappe.utils.escape_html(d.fg_invoice_issuer || "—")}${
+				d.fg_invoice_number ? ` · ${__("FACTURA No.")} <strong>${frappe.utils.escape_html(String(d.fg_invoice_number))}</strong>` : ""
+			}`;
+		}
+		const current = this._review_issuer || "";
+		const options = [`<option value="" ${current ? "" : "selected"}>${__("Selecciona...")}</option>`]
+			.concat(
+				INVOICE_ISSUERS.map(
+					(issuer) => `<option value="${issuer}" ${issuer === current ? "selected" : ""}>${issuer}</option>`
+				)
+			)
+			.join("");
+		return `<select class="fg-fact-review-issuer">${options}</select>`;
+	}
+
 	// Server-side is the real gate (mark_as_invoiced() throws
 	// ChecklistIncompleteError otherwise) -- this only mirrors that in the
 	// UI so the user isn't told "listo" until it actually is.
@@ -1225,7 +1274,11 @@ fabergray_erp.Facturacion = class Facturacion {
 		const p = this._review_pricing;
 		const prices_ok = !!p && !(p.missing_price_items || []).length && !this._review_pricing_busy;
 		const complete =
-			d.total_items > 0 && d.checked_items === d.total_items && d.fg_invoicing_status !== "Facturado" && prices_ok;
+			d.total_items > 0 &&
+			d.checked_items === d.total_items &&
+			d.fg_invoicing_status !== "Facturado" &&
+			prices_ok &&
+			!!this._review_issuer;
 		if (complete) {
 			dialog.enable_primary_action();
 		} else {
@@ -1238,7 +1291,11 @@ fabergray_erp.Facturacion = class Facturacion {
 		if (!d || d.total_items === 0 || d.checked_items !== d.total_items || d.fg_invoicing_status === "Facturado") {
 			return;
 		}
-		this.submit_mark_as_invoiced(this._review_pick_list);
+		if (!this._review_issuer) {
+			frappe.msgprint(__("Selecciona la empresa emisora de la factura."));
+			return;
+		}
+		this.submit_mark_as_invoiced(this._review_pick_list, this._review_issuer);
 	}
 
 	// The one write that actually flips fg_invoicing_status -- pick_list_name
@@ -1247,12 +1304,12 @@ fabergray_erp.Facturacion = class Facturacion {
 	// refreshes the KPI/tab counts from the server, and shows the exact
 	// toast text the brief asks for. Stays on this Page throughout -- no
 	// Sales Invoice form, no Desk contable.
-	submit_mark_as_invoiced(pick_list_name) {
+	submit_mark_as_invoiced(pick_list_name, issuer) {
 		if (this.busy) return;
 		this.set_busy(true);
 		if (this._review_dialog) this._review_dialog.disable_primary_action();
 
-		this.call("mark_as_invoiced", { pick_list_name: pick_list_name })
+		this.call("mark_as_invoiced", { pick_list_name: pick_list_name, issuer: issuer })
 			.then((result) => {
 				if (this._review_dialog) this._review_dialog.hide();
 
@@ -1262,11 +1319,22 @@ fabergray_erp.Facturacion = class Facturacion {
 					row.fg_invoiced_on = result.fg_invoiced_on;
 					row.fg_invoiced_by = result.fg_invoiced_by;
 					row.fg_invoiced_by_fullname = result.fg_invoiced_by_fullname;
+					row.fg_invoice_issuer = result.fg_invoice_issuer;
+					row.fg_invoice_number = result.fg_invoice_number;
 					this.$body
 						.find(`.fg-fact-queue-card[data-name="${frappe.utils.escape_html(pick_list_name)}"]`)
 						.replaceWith(this.render_queue_card(row));
 				}
-				frappe.show_alert({ message: "✓ " + __("Pedido marcado como facturado correctamente."), indicator: "green" }, 5);
+				frappe.show_alert(
+					{
+						message:
+							"✓ " +
+							__("Pedido marcado como facturado correctamente.") +
+							(result.fg_invoice_number ? " " + __("Factura No. {0}", [result.fg_invoice_number]) : ""),
+						indicator: "green",
+					},
+					5
+				);
 				return this.refresh_summary();
 			})
 			.catch(() => {
@@ -1953,6 +2021,12 @@ function open_fabrigray_quotation_pdf(name) {
 // (fabergray_erp/invoice_issuers.py::INVOICE_ISSUERS) es la fuente de verdad
 // y rechaza cualquier otro valor; esta copia solo pinta las opciones.
 const INVOICE_ISSUERS = ["integrandoMAS", "ecoluminar"];
+
+// Ajuste numeración por empresa -- número interno ya asignado (o nada).
+function invoice_number_badge_html(number) {
+	if (!number) return "";
+	return `<div class="fg-fact-invoice-number">${__("FACTURA No.")} <strong>${frappe.utils.escape_html(String(number))}</strong></div>`;
+}
 
 // Mismo patrón anti-popup-blocker que open_fabrigray_quotation_pdf():
 // pestaña en blanco abierta sincrónicamente en el click, validación

@@ -269,6 +269,23 @@
 	font-size: 0.84rem;
 }
 
+.fg-facturacion .fg-fact-invoice-issuer:disabled {
+	background: var(--fg-bg);
+	cursor: not-allowed;
+}
+
+.fg-facturacion .fg-fact-invoice-number {
+	align-self: center;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	letter-spacing: 0.03em;
+}
+
+.fg-facturacion .fg-fact-invoice-number strong {
+	font-size: 0.95rem;
+	color: var(--fg-text);
+}
+
 .fg-facturacion .fg-fact-invoice-pdf-actions {
 	display: flex;
 	flex-wrap: wrap;
@@ -611,6 +628,19 @@ both review dialogs (never on the queue cards, to keep them compact). */
 	font-size: 0.95rem;
 	font-weight: 700;
 	color: var(--fg-text, #101828);
+}
+
+/* Ajuste numeración por empresa -- emisor elegido antes de facturar. The
+   dialog renders outside .fg-facturacion, so this is not scoped under it. */
+.fg-fact-review-issuer {
+	min-height: 34px;
+	min-width: 170px;
+	padding: 0 8px;
+	border: 1.5px solid var(--fg-border, #d0d5dd);
+	border-radius: 8px;
+	background: #ffffff;
+	font-size: 0.85rem;
+	font-weight: 600;
 }
 
 .fg-fact-review-info-value--link {

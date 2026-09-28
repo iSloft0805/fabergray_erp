@@ -184,7 +184,7 @@ class TestInvoicingQueueDateSearch(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for it in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 			pendientes = facturacion.get_invoicing_queue(status="Pendiente", txt="XYZ")
 			facturados = facturacion.get_invoicing_queue(status="Facturado", txt="XYZ")
 		self.assertNotIn(pl.name, [r["name"] for r in pendientes["pick_lists"]])
@@ -240,7 +240,7 @@ class TestRoutesSearch(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for it in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		return pl
 
 	def _route_with_stops(self, pick_lists):

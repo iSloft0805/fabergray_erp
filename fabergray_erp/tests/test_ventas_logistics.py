@@ -76,7 +76,7 @@ class TestSalesOrderLogisticsStatus(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for it in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		return so, frappe.get_doc("Pick List", pl.name)
 
 	def _route_with_stop(self, pl, driver=None):
@@ -283,7 +283,7 @@ class TestSalesOrderLogisticsStatus(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for it in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name)
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
 		route = self._route_with_stop(frappe.get_doc("Pick List", pl.name))
 		self._force_route_status(route["name"], "En Ruta")
 

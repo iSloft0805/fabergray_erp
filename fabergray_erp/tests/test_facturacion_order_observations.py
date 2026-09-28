@@ -67,6 +67,7 @@ class _ObservationsWorld(IntegrationTestCase):
 		super().setUpClass()
 		cls.world = fx.TestWorld()
 		cls.addClassCleanup(cls.world.cleanup)
+		cls.invoice_numbering = cls.world.invoice_numbering
 
 		sfx = frappe.generate_hash(length=5)
 		cls.sfx = sfx
@@ -128,8 +129,7 @@ class _ObservationsWorld(IntegrationTestCase):
 		with fx.as_user(self.facturacion_user):
 			for item in facturacion.get_invoicing_detail(pl_name)["items"]:
 				facturacion.set_invoicing_item_checked(pl_name, item["row_name"], 1)
-			facturacion.mark_as_invoiced(pl_name)
-			facturacion.set_invoice_issuer(pl_name, issuer)
+			facturacion.mark_as_invoiced(pl_name, issuer)
 		return so, pl_name
 
 	def _detail(self, pl_name):
@@ -228,11 +228,11 @@ class TestInvoicePdfObservation(_ObservationsWorld):
 		self.assertNotIn(HEADING, self._html(pl_name))
 
 	def test_11_both_issuers_show_the_same_observation(self):
-		_, pl_name = self._invoiced_pick_list(MULTILINE, issuer="integrandoMAS")
-		html_integrando = self._html(pl_name)
-		with fx.as_user(self.facturacion_user):
-			facturacion.set_invoice_issuer(pl_name, "ecoluminar")
-		html_eco = self._html(pl_name)
+		# A numbered invoice's issuer is locked, so one Pick List per issuer.
+		_, pl_integrando = self._invoiced_pick_list(MULTILINE, issuer="integrandoMAS")
+		_, pl_eco = self._invoiced_pick_list(MULTILINE, issuer="ecoluminar")
+		html_integrando = self._html(pl_integrando)
+		html_eco = self._html(pl_eco)
 		for html in (html_integrando, html_eco):
 			self.assertEqual(html.count(HEADING), 1)
 			self.assertIn("Confirmar con recepción antes de descargar.", html)

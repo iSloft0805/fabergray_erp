@@ -108,6 +108,18 @@ ISSUER_CONFIG = {
 	},
 }
 
+#: Numeración INTERNA de factura, independiente por emisor (no es numeración
+#: DIAN: no existe resolución de facturación todavía). `series` es la clave
+#: nativa de Frappe en tabSeries (frappe.model.naming.getseries(), que
+#: incrementa bajo row lock) -- una fila por emisor, así que numerar para un
+#: emisor nunca avanza la serie del otro. `start` es el PRIMER número que
+#: emite la serie la primera vez que se usa; si la fila ya existe nunca se
+#: reinicia ni retrocede. Ver api/facturacion.py::_next_invoice_number().
+INVOICE_NUMBERING = {
+	INVOICE_ISSUER_INTEGRANDOMAS: {"series": "FG-FACT-INTEGRANDOMAS-", "start": 6886},
+	INVOICE_ISSUER_ECOLUMINAR: {"series": "FG-FACT-ECOLUMINAR-", "start": 2263},
+}
+
 #: Sin estos datos el PDF sale marcado como BORRADOR (además de la falta de
 #: numeración, que api/facturacion.py evalúa por separado y hoy siempre aplica).
 REQUIRED_ISSUER_FIELDS = (

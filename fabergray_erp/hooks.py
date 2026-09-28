@@ -266,8 +266,16 @@ doc_events = {
 		# endpoints de Facturación: Bodega también tiene write/submit sobre
 		# Pick List y, sin esto, podría reescribirlos por API. `validate`
 		# cubre borradores; `before_update_after_submit` el Pick List sometido.
-		"validate": "fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
-		"before_update_after_submit": "fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
+		# Ajuste numeración por empresa -- fg_invoice_number/_key (y el emisor
+		# ya numerado) solo cambian vía set_invoice_issuer().
+		"validate": [
+			"fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
+			"fabergray_erp.api.facturacion.guard_invoice_number_fields",
+		],
+		"before_update_after_submit": [
+			"fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
+			"fabergray_erp.api.facturacion.guard_invoice_number_fields",
+		],
 	},
 	# Home Fabrigray -- Desk-navigation profile only (never a Doctype
 	# permission). See fabergray_erp/user_hooks.py's own module docstring
@@ -540,6 +548,10 @@ fixtures = [
 					# factura (integrandoMAS | ecoluminar). See
 					# set_invoice_issuer() in api/facturacion.py.
 					"fg_invoice_issuer",
+					# Ajuste numeración por empresa -- número interno de factura
+					# por emisor. See set_invoice_issuer() in api/facturacion.py.
+					"fg_invoice_number",
+					"fg_invoice_number_key",
 					# Commit 25.12 -- mandatory cancellation reason (+ optional
 					# free-text detail) captured by cancel_sales_order().
 					"fg_cancellation_reason",
