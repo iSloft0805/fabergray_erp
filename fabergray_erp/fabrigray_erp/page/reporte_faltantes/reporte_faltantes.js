@@ -29,6 +29,7 @@ fabergray_erp.ReporteFaltantes = class ReporteFaltantes {
 		this.from_date = "";
 		this.to_date = "";
 		this.report = null;
+		this.generating = false;
 
 		this.$app = $('<div class="fg-shell fg-reporte-faltantes">').appendTo(this.page.body);
 		this.render_shell();
@@ -36,14 +37,37 @@ fabergray_erp.ReporteFaltantes = class ReporteFaltantes {
 		this.load();
 	}
 
+	// frappe.call() returns a jQuery promise (jQuery 3.7): it has
+	// .then/.catch but NO .finally -- chaining .finally() on it threw a
+	// TypeError, so set_busy(false) never ran and VISTA PREVIA / GENERAR PDF
+	// stayed disabled after a successful load. Wrapped in a native Promise
+	// (same idiom as page/recorridos/recorridos.js::_frappe_call()).
 	call(method, args) {
-		return frappe.call({ method: this.method_prefix + method, args: args || {} }).then((r) => r.message);
+		return new Promise((resolve, reject) => {
+			frappe.call({
+				method: this.method_prefix + method,
+				args: args || {},
+				callback: (r) => resolve(r.message),
+				error: (r) => reject(r),
+			});
+		});
 	}
 
 	set_busy(is_busy) {
 		this.busy = !!is_busy;
-		this.$app.find(".fg-refresh-btn, .fg-rf-generate, .fg-rf-preview").prop("disabled", this.busy);
+		this.$app.find(".fg-refresh-btn").prop("disabled", this.busy);
 		this.$app.toggleClass("fg-loading", !!is_busy);
+		this.update_actions();
+	}
+
+	// VISTA PREVIA / GENERAR PDF: enabled once a valid report for the
+	// current filters is loaded -- any status, any number of rows (an empty
+	// period still yields a valid "sin faltantes" PDF) -- and disabled only
+	// while loading/generating or without a valid report (incomplete custom
+	// range, or the last query failed).
+	update_actions() {
+		const enabled = !this.busy && !this.generating && !!this.report;
+		this.$app.find(".fg-rf-generate, .fg-rf-preview").prop("disabled", !enabled);
 	}
 
 	render_shell() {
@@ -95,13 +119,17 @@ fabergray_erp.ReporteFaltantes = class ReporteFaltantes {
 		return this.call("get_shortage_report", args)
 			.then((report) => {
 				this.report = report;
-				this.render_results();
 			})
 			.catch(() => {
 				// The server's own message (invalid range, permissions...) was
-				// already shown by frappe.call; keep the last good results.
+				// already shown by frappe.call. No valid report for these
+				// filters -> nothing to print.
+				this.report = null;
 			})
-			.finally(() => this.set_busy(false));
+			.finally(() => {
+				this.set_busy(false);
+				this.render_results();
+			});
 	}
 
 	render_body() {
@@ -158,11 +186,13 @@ fabergray_erp.ReporteFaltantes = class ReporteFaltantes {
 	render_results() {
 		const $r = this.$body.find(".fg-rf-results");
 		if (!this.report) {
-			$r.html(
-				`<div class="fg-empty">${
-					this.period === "rango" ? __("Elige la fecha desde y la fecha hasta.") : __("Cargando...")
-				}</div>`
-			);
+			const message = this.busy
+				? __("Cargando...")
+				: this.period === "rango" && !this.query_args()
+				? __("Elige la fecha desde y la fecha hasta.")
+				: __("No se pudo cargar el reporte para este período.");
+			$r.html(`<div class="fg-empty">${message}</div>`);
+			this.update_actions();
 			return;
 		}
 		const r = this.report;
@@ -192,7 +222,7 @@ fabergray_erp.ReporteFaltantes = class ReporteFaltantes {
 			<div class="fg-kpis fg-kpis--rf">${kpis}</div>
 			<div class="fg-rf-cards">${cards}</div>
 		`);
-		this.$body.find(".fg-rf-generate, .fg-rf-preview").prop("disabled", this.busy);
+		this.update_actions();
 	}
 
 	render_card(row) {
@@ -234,28 +264,74 @@ fabergray_erp.ReporteFaltantes = class ReporteFaltantes {
 			this.to_date = this.$body.find(".fg-rf-to").val() || "";
 			this.load();
 		});
-		this.$body.find(".fg-rf-preview").on("click", () => this.open_pdf(true));
-		this.$body.find(".fg-rf-generate").on("click", () => this.open_pdf(false));
+		this.$body.find(".fg-rf-preview").on("click", () => this.generate_pdf(true));
+		this.$body.find(".fg-rf-generate").on("click", () => this.generate_pdf(false));
 	}
 
 	// The server validates everything again and builds the PDF; the client
-	// only passes the same period/status it already queried.
-	open_pdf(preview) {
+	// only passes the same period/status it already queried. fetch() + Blob
+	// (never frappe.call(), which would parse the body as JSON): the PDF bytes
+	// are never turned into text. A failure shows a clear message instead of
+	// opening a tab with raw JSON.
+	generate_pdf(preview) {
 		const args = this.query_args();
-		if (!args) {
-			frappe.msgprint(__("Elige la fecha desde y la fecha hasta."));
-			return;
-		}
+		if (!args || !this.report || this.generating) return;
+
 		const params = new URLSearchParams();
 		Object.entries(args).forEach(([k, v]) => {
 			if (v) params.set(k, v);
 		});
 		if (preview) params.set("preview", "1");
-		window.open(
-			frappe.urllib.get_full_url(
-				"/api/method/fabergray_erp.api.reporte_faltantes.download_shortage_report_pdf?" + params.toString()
-			)
-		);
+		const url = "/api/method/fabergray_erp.api.reporte_faltantes.download_shortage_report_pdf?" + params.toString();
+
+		// VISTA PREVIA: the tab is opened NOW, inside the click, or the
+		// browser's popup blocker would stop a window.open() made after the
+		// await (same reason as facturacion.js::open_fabrigray_invoice_pdf()).
+		const tab = preview ? window.open("about:blank") : null;
+
+		this.generating = true;
+		this.update_actions();
+		return fetch(url, { method: "GET", credentials: "same-origin", headers: { Accept: "application/pdf" } })
+			.then((response) => {
+				const type = response.headers.get("Content-Type") || "";
+				if (!response.ok || !type.includes("application/pdf")) {
+					return response.text().then((body) => {
+						throw new Error(`HTTP ${response.status} ${type}: ${body.slice(0, 500)}`);
+					});
+				}
+				const filename =
+					filename_from_disposition(response.headers.get("Content-Disposition")) ||
+					`Reporte-Faltantes-${this.report.from_date}-a-${this.report.to_date}.pdf`;
+				return response.blob().then((blob) => ({ blob, filename }));
+			})
+			.then(({ blob, filename }) => {
+				const blob_url = URL.createObjectURL(new Blob([blob], { type: "application/pdf" }));
+				if (preview) {
+					if (tab) tab.location = blob_url;
+					else window.open(blob_url);
+				} else {
+					const a = document.createElement("a");
+					a.href = blob_url;
+					a.download = filename;
+					document.body.appendChild(a);
+					a.click();
+					a.remove();
+				}
+				setTimeout(() => URL.revokeObjectURL(blob_url), 60000);
+			})
+			.catch((error) => {
+				if (tab) tab.close();
+				console.error("Reporte de Faltantes: PDF generation failed", error);
+				frappe.msgprint({
+					title: __("Reporte de Faltantes"),
+					indicator: "red",
+					message: __("No pudimos generar el PDF."),
+				});
+			})
+			.finally(() => {
+				this.generating = false;
+				this.update_actions();
+			});
 	}
 };
 
@@ -268,6 +344,16 @@ const STATUS_META = {
 	"En Proceso": { label: __("EN PROCESO"), mod: "rf-proceso" },
 	Resuelto: { label: __("RESUELTO"), mod: "rf-resuelto" },
 };
+
+// filename="..." (or RFC 5987 filename*=UTF-8''...) from the server's
+// Content-Disposition header; null when absent.
+function filename_from_disposition(header) {
+	if (!header) return null;
+	const star = /filename\*=UTF-8''([^;]+)/i.exec(header);
+	if (star) return decodeURIComponent(star[1]);
+	const plain = /filename="?([^";]+)"?/i.exec(header);
+	return plain ? plain[1] : null;
+}
 
 function format_d(value) {
 	return value ? frappe.datetime.str_to_user(String(value).split(" ")[0]) : "—";

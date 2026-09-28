@@ -319,6 +319,14 @@ def download_shortage_report_pdf(period, from_date=None, to_date=None, status=No
 
 	report = _build_report(period, from_date, to_date, status)
 	html = render_shortage_report_html(report)
+	# Generate FIRST: if the PDF engine fails (e.g. wkhtmltopdf missing) the
+	# error propagates untouched and no half-built file response is left on
+	# frappe.local.response. Never silenced.
+	pdf = get_pdf(html, dict(PDF_OPTIONS))
 	frappe.local.response.filename = shortage_report_filename(report)
-	frappe.local.response.filecontent = get_pdf(html, dict(PDF_OPTIONS))
+	frappe.local.response.filecontent = pdf
+	frappe.local.response.content_type = "application/pdf"
+	# "pdf" -> Content-Disposition: inline (VISTA PREVIA); "download" ->
+	# attachment (GENERAR PDF). Both application/pdf, built by Frappe's own
+	# frappe.utils.response.
 	frappe.local.response.type = "pdf" if cint(preview) else "download"

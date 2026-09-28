@@ -12,6 +12,9 @@ names, and the summary is checked for consistency with the returned rows.
 wkhtmltopdf is not installed here: get_pdf() is replaced by a capturer, the
 HTML it receives is asserted directly."""
 
+import re
+import shutil
+import unittest
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -331,6 +334,50 @@ class TestReporteFaltantes(IntegrationTestCase):
 			rf.download_shortage_report_pdf("7_dias", preview=1)
 		self.assertEqual(frappe.local.response.type, "pdf")
 
+	def _http_response(self, user, **kwargs):
+		"""The REAL HTTP response Frappe builds for this endpoint
+		(frappe.utils.response.build_response), with get_pdf captured."""
+		from frappe.utils.response import build_response
+
+		frappe.local.response = frappe._dict()
+		with fx.as_user(user), _captured_pdf():
+			rf.download_shortage_report_pdf(**kwargs)
+		return build_response(frappe.local.response.type)
+
+	def test_http_download_is_attachment_pdf(self):
+		for user in (self.jefe, self.sysmanager):
+			response = self._http_response(user, period="hoy")
+			self.assertEqual(response.status_code, 200)
+			self.assertEqual(response.mimetype, "application/pdf")
+			self.assertTrue(response.get_data().startswith(b"%PDF"))
+			self.assertEqual(
+				response.headers["Content-Disposition"],
+				f"attachment; filename=Reporte-Faltantes-{self.today}-a-{self.today}.pdf",
+			)
+
+	def test_http_preview_is_inline_pdf(self):
+		response = self._http_response(self.jefe, period="7_dias", status="Abierto", preview=1)
+		self.assertEqual(response.mimetype, "application/pdf")
+		self.assertTrue(response.headers["Content-Disposition"].startswith("inline; filename=Reporte-Faltantes-"))
+		self.assertTrue(response.get_data().startswith(b"%PDF"))
+
+	def test_pdf_engine_failure_is_raised_not_silenced(self):
+		frappe.local.response = frappe._dict()
+		with fx.as_user(self.jefe), patch("frappe.utils.pdf.get_pdf", side_effect=OSError("No wkhtmltopdf executable found")):
+			with self.assertRaises(OSError):
+				rf.download_shortage_report_pdf("hoy")
+		# no half-built file response left behind
+		self.assertIsNone(frappe.local.response.get("filename"))
+		self.assertIsNone(frappe.local.response.get("filecontent"))
+
+	@unittest.skipUnless(shutil.which("wkhtmltopdf"), "wkhtmltopdf not installed on this machine")
+	def test_real_pdf_engine_produces_a_pdf(self):
+		"""Runs wherever Frappe's PDF engine exists (production / CI)."""
+		frappe.local.response = frappe._dict()
+		with fx.as_user(self.jefe):
+			rf.download_shortage_report_pdf("hoy")
+		self.assertTrue(frappe.local.response.filecontent.startswith(b"%PDF"))
+
 	def test_pdf_for_empty_period_says_so(self):
 		with fx.as_user(self.jefe), _captured_pdf() as calls:
 			rf.download_shortage_report_pdf("rango", from_date="2020-01-01", to_date="2020-01-02")
@@ -381,3 +428,46 @@ class TestReporteFaltantes(IntegrationTestCase):
 		for text in ("GENERAR PDF", "VISTA PREVIA", "RANGO PERSONALIZADO", "EN PROCESO", "download_shortage_report_pdf", "get_shortage_report"):
 			self.assertIn(text, js)
 		self.assertNotIn("company:", js)  # never sent by the client
+
+	def _js(self):
+		base = frappe.get_app_path("fabergray_erp", "fabrigray_erp", "page")
+		with open(f"{base}/reporte_faltantes/reporte_faltantes.js", encoding="utf-8") as f:
+			return f.read()
+
+	@staticmethod
+	def _method(js, name):
+		start = js.index(f"\n\t{name}(")
+		end = re.search(r"\n\t[a-z_]+\([^)]*\) \{", js[start + 2 :])
+		return js[start : start + 2 + (end.start() if end else len(js))]
+
+	def test_ui_call_returns_a_native_promise(self):
+		"""Regression: frappe.call() returns a jQuery promise with NO .finally;
+		chaining one threw a TypeError, set_busy(false) never ran and both PDF
+		buttons stayed disabled. call() must wrap it in a native Promise."""
+		call = self._method(self._js(), "call")
+		self.assertIn("new Promise(", call)
+		self.assertIn("callback: (r) => resolve(r.message)", call)
+		self.assertIn("error: (r) => reject(r)", call)
+		self.assertNotRegex(self._js(), r"frappe\.call\([^;]*\)\s*\.then\([^;]*\.finally\(")
+
+	def test_ui_buttons_enabled_once_a_valid_report_is_loaded(self):
+		js = self._js()
+		update = self._method(js, "update_actions")
+		self.assertIn("!this.busy && !this.generating && !!this.report", update)
+		self.assertIn('.fg-rf-generate, .fg-rf-preview").prop("disabled", !enabled)', update)
+		# not tied to statuses or to "all resolved"
+		self.assertNotIn("Resuelto", update)
+		self.assertNotIn("items.length", update)
+		self.assertIn("this.update_actions()", self._method(js, "set_busy"))
+
+	def test_ui_pdf_is_fetched_as_a_blob_with_a_clear_error(self):
+		gen = self._method(self._js(), "generate_pdf")
+		self.assertIn("fetch(url", gen)
+		self.assertIn("response.blob()", gen)
+		self.assertIn('includes("application/pdf")', gen)
+		self.assertIn("a.download = filename", gen)
+		self.assertIn('window.open("about:blank")', gen)  # opened inside the click (popup blocker)
+		self.assertIn('__("No pudimos generar el PDF.")', gen)
+		self.assertIn("console.error(", gen)
+		self.assertNotIn("response.json()", gen)
+		self.assertNotIn("frappe.call", gen)
