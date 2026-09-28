@@ -1,0 +1,139 @@
+{#- Hotfix "Reporte PDF de faltantes" -- rendered by
+    api/reporte_faltantes.py::render_shortage_report_html() and printed with
+    frappe.utils.pdf.get_pdf() in A4 LANDSCAPE. Table-based layout only (no
+    flex/grid/position:fixed) for wkhtmltopdf, same rule as the Facturación
+    Print Format. Status always as TEXT (colour is only a reinforcement, so a
+    black-and-white print stays readable). Pure presentation: every value
+    comes from `report`, nothing is computed here. -#}
+{%- set s = report.summary -%}
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<style>
+	@page { size: A4 landscape; margin: 10mm; }
+	body { font-family: "Helvetica Neue", Arial, sans-serif; color: #1f2933; font-size: 8pt; margin: 0; }
+	table { border-collapse: collapse; width: 100%; }
+	.fg-sr-head td { vertical-align: bottom; }
+	.fg-sr-brand { font-size: 16pt; font-weight: bold; color: #102a43; letter-spacing: 1px; }
+	.fg-sr-title { font-size: 12pt; font-weight: bold; color: #102a43; margin-top: 1px; }
+	.fg-sr-meta { text-align: right; font-size: 8pt; color: #3e4c59; line-height: 1.45; }
+	.fg-sr-meta strong { color: #102a43; }
+	.fg-sr-rule { border-top: 1.5px solid #102a43; margin: 5px 0 8px; }
+
+	.fg-sr-kpis td { width: 20%; padding: 0 4px; }
+	.fg-sr-kpis td:first-child { padding-left: 0; }
+	.fg-sr-kpis td:last-child { padding-right: 0; }
+	.fg-sr-kpi { border: 1px solid #9aa5b1; border-left-width: 4px; padding: 5px 8px; }
+	.fg-sr-kpi-label { font-size: 6.8pt; font-weight: bold; color: #52606d; letter-spacing: 0.4px; }
+	.fg-sr-kpi-value { font-size: 14pt; font-weight: bold; color: #102a43; }
+	.fg-sr-kpi--total { border-left-color: #102a43; }
+	.fg-sr-kpi--resolved { border-left-color: #2f855a; }
+	.fg-sr-kpi--open { border-left-color: #c53030; }
+	.fg-sr-kpi--progress { border-left-color: #dd6b20; }
+	.fg-sr-kpi--qty { border-left-color: #486581; }
+
+	.fg-sr-table { margin-top: 10px; border: 1px solid #9aa5b1; }
+	.fg-sr-table thead { display: table-header-group; }
+	.fg-sr-table th {
+		background: #d9e2ec; color: #102a43; font-size: 7pt; text-align: left;
+		padding: 4px 4px; border-bottom: 1px solid #9aa5b1; white-space: nowrap;
+	}
+	.fg-sr-table td { padding: 3px 4px; vertical-align: top; }
+	.fg-sr-row td { border-top: 1px solid #bcccdc; }
+	.fg-sr-detail td { padding-top: 0; padding-bottom: 4px; font-size: 7pt; color: #3e4c59; }
+	.fg-sr-group { page-break-inside: avoid; }
+	.fg-sr-num { text-align: right; white-space: nowrap; }
+	.fg-sr-nowrap { white-space: nowrap; }
+	.fg-sr-item-code { font-weight: bold; }
+	.fg-sr-item-name { color: #3e4c59; }
+	.fg-sr-shortage { font-weight: bold; }
+	.fg-sr-label { font-weight: bold; color: #52606d; }
+
+	.fg-sr-status {
+		display: inline-block; padding: 1px 4px; border: 1px solid; border-radius: 2px;
+		font-size: 6.8pt; font-weight: bold; white-space: nowrap;
+	}
+	.fg-sr-status--abierto { color: #c53030; border-color: #c53030; background: #fff5f5; }
+	.fg-sr-status--en-proceso { color: #b45309; border-color: #dd6b20; background: #fffaf0; }
+	.fg-sr-status--resuelto { color: #276749; border-color: #2f855a; background: #f0fff4; }
+
+	.fg-sr-empty { margin-top: 18px; padding: 14px; border: 1px dashed #9aa5b1; text-align: center; color: #52606d; font-size: 9pt; }
+	.fg-sr-footer { margin-top: 8px; font-size: 6.8pt; color: #7b8794; text-align: right; }
+</style>
+</head>
+<body>
+	<table class="fg-sr-head">
+		<tr>
+			<td>
+				<div class="fg-sr-brand">FABRIGRAY</div>
+				<div class="fg-sr-title">REPORTE DE FALTANTES</div>
+			</td>
+			<td class="fg-sr-meta">
+				Período: <strong>{{ period_label }}</strong><br>
+				Estado: <strong>{{ status_filter_label | e }}</strong><br>
+				Empresa: {{ report.company | e }}
+			</td>
+		</tr>
+	</table>
+	<div class="fg-sr-rule"></div>
+
+	<table class="fg-sr-kpis">
+		<tr>
+			<td><div class="fg-sr-kpi fg-sr-kpi--total"><div class="fg-sr-kpi-label">TOTAL REPORTADOS</div><div class="fg-sr-kpi-value">{{ s.total_reports }}</div></div></td>
+			<td><div class="fg-sr-kpi fg-sr-kpi--resolved"><div class="fg-sr-kpi-label">RESUELTOS</div><div class="fg-sr-kpi-value">{{ s.resolved }}</div></div></td>
+			<td><div class="fg-sr-kpi fg-sr-kpi--open"><div class="fg-sr-kpi-label">PENDIENTES (ABIERTOS)</div><div class="fg-sr-kpi-value">{{ s.open }}</div></div></td>
+			<td><div class="fg-sr-kpi fg-sr-kpi--progress"><div class="fg-sr-kpi-label">EN PROCESO</div><div class="fg-sr-kpi-value">{{ s.in_progress }}</div></div></td>
+			<td><div class="fg-sr-kpi fg-sr-kpi--qty"><div class="fg-sr-kpi-label">CANTIDAD TOTAL FALTANTE</div><div class="fg-sr-kpi-value">{{ fmt_qty(s.total_shortage_qty) }}</div></div></td>
+		</tr>
+	</table>
+
+	{% if report["items"] %}
+	<table class="fg-sr-table">
+		<thead>
+			<tr>
+				<th>Fecha</th>
+				<th>Pedido</th>
+				<th>Cliente</th>
+				<th>Item</th>
+				<th class="fg-sr-num">Solicitado</th>
+				<th class="fg-sr-num">Disponible</th>
+				<th class="fg-sr-num">Faltante</th>
+				<th>Bodega</th>
+				<th>Estado</th>
+				<th>Fecha solución</th>
+			</tr>
+		</thead>
+		{% for row in report["items"] %}
+		<tbody class="fg-sr-group">
+			<tr class="fg-sr-row">
+				<td class="fg-sr-nowrap">{{ fmt_date(row.reported_on) }}</td>
+				<td class="fg-sr-nowrap">{{ (row.order_number or "—") | e }}</td>
+				<td>{{ (row.customer_name or row.customer or "—") | e }}</td>
+				<td><span class="fg-sr-item-code">{{ (row.item_code or "—") | e }}</span>{% if row.item_name %}<br><span class="fg-sr-item-name">{{ row.item_name | e }}</span>{% endif %}</td>
+				<td class="fg-sr-num">{{ fmt_qty(row.qty_solicitada) }}</td>
+				<td class="fg-sr-num">{{ fmt_qty(row.qty_disponible) }}</td>
+				<td class="fg-sr-num fg-sr-shortage">{{ fmt_qty(row.qty_faltante) }}</td>
+				<td>{{ (row.warehouse or "—") | e }}</td>
+				<td><span class="fg-sr-status fg-sr-status--{{ (row.status or '') | lower | replace(' ', '-') }}">{{ status_labels.get(row.status, row.status or "—") | e }}</span></td>
+				<td class="fg-sr-nowrap">{{ fmt_date(row.resolved_on) }}</td>
+			</tr>
+			<tr class="fg-sr-detail">
+				<td></td>
+				<td colspan="9">
+					<span class="fg-sr-label">Motivo:</span> {{ (row.shortage_reason or "—") | e }}
+					&nbsp;·&nbsp; <span class="fg-sr-label">Reportado por:</span> {{ (row.reported_by_name or row.reported_by or "—") | e }}
+					&nbsp;·&nbsp; <span class="fg-sr-label">Nota de solución:</span> {{ (row.resolution_note or "—") | e }}
+					&nbsp;·&nbsp; <span class="fg-sr-label">Ref.:</span> {{ row.name | e }}
+				</td>
+			</tr>
+		</tbody>
+		{% endfor %}
+	</table>
+	{% else %}
+	<div class="fg-sr-empty">No hay faltantes reportados en este período.</div>
+	{% endif %}
+
+	<div class="fg-sr-footer">Generado el {{ generated_on }} por {{ generated_by | e }} · Documento de consulta, no modifica datos.</div>
+</body>
+</html>

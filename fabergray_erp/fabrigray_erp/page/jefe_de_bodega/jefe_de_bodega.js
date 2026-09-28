@@ -297,6 +297,9 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 				<button type="button" class="fg-btn fg-btn--ghost" data-quick="warehouses">${icon(
 					"house"
 				)} ${__("Almacenes")}</button>
+				<button type="button" class="fg-btn fg-btn--ghost" data-quick="reports">${icon(
+					"file-text"
+				)} ${__("Reportes")}</button>
 			</div>
 		`;
 	}
@@ -339,6 +342,8 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 		this.$body.find('[data-quick="shortage_reports"]').on("click", () => frappe.set_route("centro-faltantes"));
 		this.$body.find('[data-quick="inventory"]').on("click", () => frappe.set_route("inventario"));
 		this.$body.find('[data-quick="warehouses"]').on("click", () => frappe.set_route("almacenes"));
+		// Hotfix "Reporte PDF de faltantes" -- read-only PDF report by period.
+		this.$body.find('[data-quick="reports"]').on("click", () => frappe.set_route("reporte-faltantes"));
 	}
 
 	// =====================================================================

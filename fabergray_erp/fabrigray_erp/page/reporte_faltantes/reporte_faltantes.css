@@ -1,0 +1,248 @@
+/* Copyright (c) 2026, Fabrigray SAS and contributors
+ * For license information, please see license.txt
+ *
+ * Hotfix "Reporte PDF de faltantes" -- Page Reporte de Faltantes (Jefe de
+ * Bodega > REPORTES). Generic shell/KPI primitives come from fg_shell.css;
+ * this file only styles the filters, summary cards and actions. Scoped
+ * under .fg-reporte-faltantes. Mobile: the chip rows scroll horizontally
+ * inside themselves, so the page itself never overflows.
+ */
+
+.fg-reporte-faltantes .fg-body {
+	display: flex;
+	flex-direction: column;
+	gap: 16px;
+}
+
+/* ---------------------------- Filters ------------------------------ */
+.fg-reporte-faltantes .fg-rf-filters {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	padding: 16px;
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius);
+	background: var(--fg-card);
+	min-width: 0;
+}
+
+.fg-reporte-faltantes .fg-rf-filter-group {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	min-width: 0;
+}
+
+.fg-reporte-faltantes .fg-rf-filter-label {
+	font-size: 0.72rem;
+	font-weight: 700;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--fg-text-muted);
+}
+
+.fg-reporte-faltantes .fg-rf-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.fg-reporte-faltantes .fg-rf-chip {
+	appearance: none;
+	flex: 0 0 auto;
+	min-height: 40px;
+	padding: 0 16px;
+	border-radius: var(--fg-radius-pill);
+	border: 1.5px solid var(--fg-border);
+	background: var(--fg-card);
+	color: var(--fg-text-muted);
+	font-size: 0.8rem;
+	font-weight: 700;
+	white-space: nowrap;
+	cursor: pointer;
+	transition: background var(--fg-transition), border-color var(--fg-transition), color var(--fg-transition);
+}
+
+.fg-reporte-faltantes .fg-rf-chip.is-active {
+	background: var(--fg-primary);
+	border-color: var(--fg-primary);
+	color: #fff;
+}
+
+.fg-reporte-faltantes .fg-rf-range {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 10px 16px;
+}
+
+.fg-reporte-faltantes .fg-rf-range.is-hidden {
+	display: none;
+}
+
+.fg-reporte-faltantes .fg-rf-range label {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	margin: 0;
+	font-size: 0.82rem;
+	font-weight: 600;
+	color: var(--fg-text-muted);
+}
+
+.fg-reporte-faltantes .fg-rf-range input {
+	min-height: 40px;
+	padding: 0 10px;
+	border: 1.5px solid var(--fg-border);
+	border-radius: var(--fg-radius-sm);
+	background: var(--fg-card);
+	color: var(--fg-text);
+	font-size: 0.86rem;
+}
+
+/* ------------------------------ Summary ----------------------------- */
+.fg-reporte-faltantes .fg-rf-period {
+	font-size: 0.86rem;
+	color: var(--fg-text-muted);
+	margin-bottom: 12px;
+}
+
+.fg-reporte-faltantes.fg-shell .fg-kpis--rf {
+	grid-template-columns: repeat(4, 1fr);
+}
+
+.fg-reporte-faltantes .fg-kpi--rf-total {
+	--fg-kpi-color: var(--fg-primary);
+	--fg-kpi-tint: var(--fg-primary-tint);
+}
+
+.fg-reporte-faltantes .fg-kpi--rf-abiertos {
+	--fg-kpi-color: var(--fg-danger);
+	--fg-kpi-tint: var(--fg-danger-tint);
+}
+
+.fg-reporte-faltantes .fg-kpi--rf-proceso {
+	--fg-kpi-color: var(--fg-warning-dark);
+	--fg-kpi-tint: var(--fg-warning-tint);
+}
+
+.fg-reporte-faltantes .fg-kpi--rf-resueltos {
+	--fg-kpi-color: var(--fg-success-dark);
+	--fg-kpi-tint: var(--fg-success-tint);
+}
+
+/* ------------------------------- Cards ------------------------------ */
+.fg-reporte-faltantes .fg-rf-cards {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 12px;
+	margin-top: 16px;
+}
+
+.fg-reporte-faltantes .fg-rf-card {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 12px 14px;
+	border: 1px solid var(--fg-border);
+	border-radius: var(--fg-radius);
+	background: var(--fg-card);
+	min-width: 0;
+}
+
+.fg-reporte-faltantes .fg-rf-card-top {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.fg-reporte-faltantes .fg-rf-card-order {
+	font-weight: 800;
+	color: var(--fg-text);
+}
+
+.fg-reporte-faltantes .fg-rf-card-item {
+	font-weight: 700;
+	color: var(--fg-text);
+	overflow-wrap: anywhere;
+}
+
+.fg-reporte-faltantes .fg-rf-card-meta {
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+	overflow-wrap: anywhere;
+}
+
+.fg-reporte-faltantes .fg-rf-card-qty {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 12px;
+	margin-top: 4px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted);
+}
+
+.fg-reporte-faltantes .fg-rf-card-qty strong {
+	color: var(--fg-text);
+}
+
+.fg-reporte-faltantes .fg-rf-card-shortage {
+	color: var(--fg-danger) !important;
+}
+
+.fg-reporte-faltantes .fg-status-pill--rf-abierto {
+	background: var(--fg-danger-tint);
+	color: var(--fg-danger);
+}
+
+.fg-reporte-faltantes .fg-status-pill--rf-proceso {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+}
+
+.fg-reporte-faltantes .fg-status-pill--rf-resuelto {
+	background: var(--fg-success-tint);
+	color: var(--fg-success-dark);
+}
+
+/* ------------------------------ Actions ----------------------------- */
+.fg-reporte-faltantes .fg-rf-actions {
+	display: flex;
+	justify-content: flex-end;
+	flex-wrap: wrap;
+	gap: 10px;
+}
+
+/* ------------------------------ Mobile ------------------------------ */
+@media (max-width: 860px) {
+	.fg-reporte-faltantes.fg-shell .fg-kpis--rf {
+		grid-template-columns: repeat(2, 1fr);
+	}
+
+	.fg-reporte-faltantes .fg-rf-cards {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+}
+
+@media (max-width: 640px) {
+	/* Chip rows scroll inside themselves -- never the page. */
+	.fg-reporte-faltantes .fg-rf-chips {
+		flex-wrap: nowrap;
+		overflow-x: auto;
+		-webkit-overflow-scrolling: touch;
+		padding-bottom: 4px;
+	}
+
+	.fg-reporte-faltantes .fg-rf-cards {
+		grid-template-columns: minmax(0, 1fr);
+	}
+
+	.fg-reporte-faltantes .fg-rf-actions {
+		flex-direction: column-reverse;
+	}
+
+	.fg-reporte-faltantes .fg-rf-actions .fg-btn {
+		width: 100%;
+		justify-content: center;
+	}
+}
