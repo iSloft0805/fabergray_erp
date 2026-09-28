@@ -259,13 +259,47 @@ def get_open_shortage_reports():
 
 	pick_list_cache = {}
 	item_name_by_code = _batch_item_names([r.item_code for r in reports])
+	customers_by_order = _batch_sales_order_customers([r.sales_order for r in reports])
 	for report in reports:
 		report["item_name"] = _resolve_item_name(
 			report.pick_list, report.pick_list_item, report.item_code, pick_list_cache, item_name_by_code
 		)
 		report["reported_by_fullname"] = frappe.utils.get_fullname(report.reported_by)
+		# Ajuste UI tarjetas -- cliente del Sales Order vinculado y fecha/hora
+		# EXACTA del reporte (reported_on, nunca modified/creation), ya
+		# formateada en el servidor: el navegador no calcula nada.
+		customer, customer_name = customers_by_order.get(report.sales_order, (None, None))
+		report["customer"] = customer
+		report["customer_name"] = customer_name
+		report["reported_on_display"] = format_report_datetime(report.reported_on)
 
 	return reports
+
+
+def _batch_sales_order_customers(sales_orders):
+	"""{sales_order: (customer, customer_name)} for every distinct Sales Order
+	in one frappe.get_list() -- never one query per card (same batched
+	resolution get_shortage_center() already uses; Jefe de Bodega holds
+	native read on Sales Order). A report without Sales Order, or one the
+	caller cannot read, simply has no customer."""
+	names = sorted({so for so in sales_orders if so})
+	if not names:
+		return {}
+	return {
+		row.name: (row.customer or None, row.customer_name or None)
+		for row in frappe.get_list(
+			"Sales Order", filters={"name": ["in", names]}, fields=["name", "customer", "customer_name"]
+		)
+	}
+
+
+def format_report_datetime(value):
+	"""DD/MM/YYYY HH:mm of a stored Datetime (site time, as saved) -- or None.
+	strftime, not frappe.utils.format_datetime(): the latter's babel pattern
+	reads "mm" as minutes (see api.reporte_faltantes._format_generated_on)."""
+	if not value:
+		return None
+	return frappe.utils.get_datetime(value).strftime("%d/%m/%Y %H:%M")
 
 
 def _resolve_item_name(pick_list, pick_list_item, item_code, pick_list_cache=None, item_name_by_code=None):

@@ -181,7 +181,12 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 			: __("Sin pedido asociado");
 		const motivo = r.shortage_reason ? frappe.utils.escape_html(r.shortage_reason) : "—";
 		const reportado_por = r.reported_by_fullname ? frappe.utils.escape_html(r.reported_by_fullname) : "—";
-		const hace = r.reported_on ? frappe.datetime.comment_when(r.reported_on) : "—";
+		// Cliente del Sales Order vinculado (customer_name, si no customer) y
+		// fecha/hora exacta del reporte, ambos resueltos por el servidor
+		// (get_open_shortage_reports()) -- nunca un "hace X minutos" calculado
+		// con el reloj del navegador.
+		const cliente = frappe.utils.escape_html(r.customer_name || r.customer || "—");
+		const fecha_reporte = frappe.utils.escape_html(r.reported_on_display || "—");
 
 		return `
 			<div class="fg-shortage-card" data-name="${frappe.utils.escape_html(r.name)}">
@@ -193,6 +198,7 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 				</div>
 				<div class="fg-shortage-card-title">${frappe.utils.escape_html(r.item_name)}</div>
 				<div class="fg-shortage-card-meta">${pedido}</div>
+				<div class="fg-shortage-card-meta fg-shortage-card-customer">${__("Cliente")}: ${cliente}</div>
 				<div class="fg-shortage-card-meta">${__("Bodega")}: ${frappe.utils.escape_html(r.warehouse || "—")}</div>
 				<div class="fg-shortage-card-qty">
 					<div class="fg-shortage-card-qty-col">
@@ -213,7 +219,7 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 				<div class="fg-shortage-card-meta">${__("Motivo")}: ${motivo}</div>
 				<div class="fg-shortage-card-footer">
 					<span>${icon("user", "fg-icon-sm")} ${__("Reportado por")} ${reportado_por}</span>
-					<span>${icon("clock", "fg-icon-sm")} ${hace}</span>
+					<span class="fg-shortage-card-date">${icon("clock", "fg-icon-sm")} ${__("Fecha reporte")}: ${fecha_reporte}</span>
 				</div>
 				<button type="button" class="fg-btn fg-btn--outline-danger fg-shortage-card-btn">${__(
 					"VER FALTANTE"

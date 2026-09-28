@@ -49,6 +49,9 @@
 .fg-jefe-bodega .fg-shortage-card-meta {
 	font-size: 0.82rem;
 	color: var(--fg-text-muted);
+	/* Long customer/warehouse names wrap -- never truncated, never overflow. */
+	overflow-wrap: anywhere;
+	min-width: 0;
 }
 
 .fg-jefe-bodega .fg-shortage-card-qty {
@@ -93,6 +96,9 @@
 	display: inline-flex;
 	align-items: center;
 	gap: 4px;
+	flex-wrap: wrap;
+	min-width: 0;
+	overflow-wrap: anywhere;
 }
 
 .fg-jefe-bodega .fg-shortage-card-btn {
