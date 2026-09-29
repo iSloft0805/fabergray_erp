@@ -1,22 +1,25 @@
 # -*- coding: utf-8 -*-
-"""Hotfix Inventario -- EXISTENCIAS TOTALES / VALOR COMERCIAL in
+"""Hotfix Inventario -- EXISTENCIAS VENDIBLES / VALOR COMERCIAL in
 api.inventario.get_inventory_summary(), built from the SAME per-product
 numbers the product list and detail show:
 
-- stock total of a product = _bin_totals(): SUM(max(Bin.actual_qty, 0))
+- _bin_totals(): per product, physical_qty = SUM(max(Bin.actual_qty, 0))
   over every leaf, enabled warehouse of the company under its real root
-  (Devoluciones/Cuarentena included, as the detail always showed); test
-  warehouses (no parent) and other companies' warehouses never count;
+  (Devoluciones/Cuarentena included: the stock exists), and sellable_qty =
+  the same minus Devoluciones, Cuarentena and native rejected warehouses;
+  test warehouses (no parent) and other companies' warehouses never count;
 - price = _selling_rates(): ONE current Standard Selling price (no
   customer, valid today, > 0, stock UOM);
-- value = stock total x price, per product (summed first, priced once);
+- value = sellable_qty x price, per product (summed first, priced once);
   a product without price adds units but $0;
-- summary == detail, product by product.
+- summary == detail, product by product; the detail keeps every warehouse
+  row and flags the non-sellable ones.
 
 Calculation tests pin the warehouse set (patch _stock_warehouses) so the
 site's own stock never leaks into the expected numbers; the warehouse rules
 are tested unpatched. Stock is Bin-only (fixtures.stock_up()), never a
-Stock Ledger Entry."""
+Stock Ledger Entry -- except TestCommercialValueAfterStockIssue, which
+needs real stock for COMPLETAR PEDIDO's Material Issue."""
 
 from unittest.mock import patch
 
@@ -24,8 +27,12 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, flt, nowdate
 
+from fabergray_erp.api import bodega, facturacion
 from fabergray_erp.api import inventario as api
 from fabergray_erp.tests import fixtures as fx
+from fabergray_erp.tests import test_recorridos_api as recorridos_base
+from fabergray_erp.tests import test_recorridos_deliver_stop as deliver_base
+from fabergray_erp.tests import test_recorridos_start_route as start_base
 from fabergray_erp.warehouses import ROOT_WAREHOUSE, warehouse_name
 
 EXTRA_TEST_RECORD_DEPENDENCIES = []
@@ -85,7 +92,7 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 
 	def _numbers(self, summary):
 		return (
-			summary["total_units"],
+			summary["sellable_units"],
 			summary["commercial_value"],
 			summary["items_with_stock"],
 			summary["items_without_selling_price"],
@@ -179,64 +186,130 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 		self._price(item, 2500)
 		self.assertEqual(self._numbers(self._summary([self.wh_a.name])), (4, 10000, 1, 0))
 
+	# -- Physical vs sellable ---------------------------------------------------
+
+	def _stock(self, item):
+		return api._bin_totals([item.name]).get(item.name)
+
+	def test_devoluciones_and_cuarentena_are_physical_but_not_sellable(self):
+		for base in ("Devoluciones", "Cuarentena"):
+			item = self._item()
+			self._price(item, 1000)
+			wh = warehouse_name(base, fx.COMPANY)
+			self.assertEqual(self._delta([(item, wh, 50)]), (0, 0, 0, 0), base)  # no sellable KPI change
+			self.assertEqual(dict(self._stock(item)), {"physical_qty": 50, "sellable_qty": 0}, base)
+
+	def test_devoluciones_50_and_cuarentena_100_are_no_vendible_in_the_detail(self):
+		"""00002/00006-like: priced, physically there, never sellable nor valued."""
+		for base, qty, rate in (("Devoluciones", 50, 37700), ("Cuarentena", 100, 16245)):
+			item = self._item()
+			self._price(item, rate)
+			wh = warehouse_name(base, fx.COMPANY)
+			self.world.stock_up(item.name, wh, qty)
+			detail = api.get_inventory_item_detail(item.name)
+			self.assertEqual(
+				(detail["physical_stock"], detail["sellable_stock"], detail["selling_rate"], detail["commercial_value"]),
+				(qty, 0, rate, 0),
+				base,
+			)
+			self.assertEqual([(b["warehouse"], b["sellable"]) for b in detail["stock_by_warehouse"]], [(wh, False)], base)
+
+	def test_native_rejected_warehouse_is_physical_but_not_sellable(self):
+		frappe.db.set_value("Warehouse", self.wh_b.name, "is_rejected_warehouse", 1)
+		item = self._item()
+		self._price(item, 1000)
+		self.world.stock_up(item.name, self.wh_b.name, 8)
+		self.assertEqual(dict(self._stock(item)), {"physical_qty": 8, "sellable_qty": 0})
+
+	def test_same_item_sellable_plus_returned(self):
+		item = self._item()
+		self._price(item, 10000)
+		devoluciones = warehouse_name("Devoluciones", fx.COMPANY)
+		self.world.stock_up(item.name, self.wh_a.name, 3)
+		self.world.stock_up(item.name, devoluciones, 5)
+		self.assertEqual(dict(self._stock(item)), {"physical_qty": 8, "sellable_qty": 3})
+		summary = self._summary([self.wh_a.name, devoluciones])
+		self.assertEqual(self._numbers(summary), (3, 30000, 1, 0))  # the price multiplies only sellable_qty
+
 	# -- Warehouses (unpatched) -------------------------------------------------
 
 	def test_stock_warehouses(self):
 		warehouses = api._stock_warehouses(fx.COMPANY)
-		for base in ("Producto Terminado", "Líquidos", "Materia Prima", "Envases", "Devoluciones", "Cuarentena"):
+		for base in ("Producto Terminado", "Líquidos", "Varios", "Materia Prima", "Envases", "Devoluciones", "Cuarentena"):
 			self.assertIn(warehouse_name(base, fx.COMPANY), warehouses, base)
 		self.assertIn(self.wh_a.name, warehouses)
 		for excluded in (self.wh_test.name, self.root, self.other_company_wh):
 			self.assertNotIn(excluded, warehouses)
 
-	def test_real_warehouses_count_like_the_detail(self):
-		for wh in (self.wh_a.name, warehouse_name("Producto Terminado", fx.COMPANY), warehouse_name("Devoluciones", fx.COMPANY)):
+	def test_sellable_warehouses_count(self):
+		for base in ("Producto Terminado", "Líquidos", "Varios", "Materia Prima"):
 			item = self._item()
 			self._price(item, 1000)
-			self.assertEqual(self._delta([(item, wh, 3)]), (3, 3000, 1, 0), wh)
+			self.assertEqual(self._delta([(item, warehouse_name(base, fx.COMPANY), 3)]), (3, 3000, 1, 0), base)
 
-	def test_test_other_company_and_disabled_warehouses_never_count(self):
+	def test_non_sellable_test_other_company_and_disabled_warehouses_never_count(self):
 		disabled = self._real_warehouse(f"FGINV Off {self.tag} {self._seq}")
 		frappe.db.set_value("Warehouse", disabled.name, "disabled", 1)
 		self.assertTrue(self.other_company_wh)
-		for wh in (self.wh_test.name, self.other_company_wh, disabled.name):
+		for wh in (
+			warehouse_name("Devoluciones", fx.COMPANY),
+			warehouse_name("Cuarentena", fx.COMPANY),
+			self.wh_test.name,
+			self.other_company_wh,
+			disabled.name,
+		):
 			item = self._item()
 			self._price(item, 1000)
 			self.assertEqual(self._delta([(item, wh, 50)]), (0, 0, 0, 0), wh)
 
 	# -- Summary == detail ------------------------------------------------------
 
-	def test_summary_matches_the_product_detail(self):
+	def test_detail_shows_physical_sellable_and_value(self):
+		"""00002-like: 50 in Devoluciones -> physical 50, sellable 0, $0; plus
+		1 sellable unit at $37.700 -> sellable 1, $37.700."""
 		item = self._item()
 		self._price(item, 37700)
-		self.world.stock_up(item.name, self.wh_a.name, 1)
-		self.world.stock_up(item.name, self.wh_test.name, 9)  # test warehouse: neither side counts it
+		devoluciones = warehouse_name("Devoluciones", fx.COMPANY)
+		self.world.stock_up(item.name, devoluciones, 50)
+		self.world.stock_up(item.name, self.wh_test.name, 9)  # test warehouse: never counted
 		detail = api.get_inventory_item_detail(item.name)
-		self.assertEqual((detail["total_stock"], detail["selling_rate"]), (1, 37700))
-		self.assertEqual([b["warehouse"] for b in detail["stock_by_warehouse"]], [self.wh_a.name])
+		self.assertEqual(
+			(detail["physical_stock"], detail["sellable_stock"], detail["selling_rate"], detail["commercial_value"]),
+			(50, 0, 37700, 0),
+		)
+		self.assertEqual([(b["warehouse"], b["sellable"]) for b in detail["stock_by_warehouse"]], [(devoluciones, False)])
+
+		self.world.stock_up(item.name, self.wh_a.name, 1)
+		detail = api.get_inventory_item_detail(item.name)
+		self.assertEqual((detail["physical_stock"], detail["sellable_stock"], detail["commercial_value"]), (51, 1, 37700))
+		self.assertEqual(
+			{b["warehouse"]: b["sellable"] for b in detail["stock_by_warehouse"]}, {devoluciones: False, self.wh_a.name: True}
+		)
 		row = next(r for r in api.get_inventory_items(txt=item.name)["items"] if r["item_code"] == item.name)
-		self.assertEqual((row["total_actual_qty"], row["selling_rate"]), (1, 37700))
-		# Its whole contribution to the KPIs is 1 x 37.700.
-		frappe.db.set_value("Bin", {"item_code": item.name, "warehouse": self.wh_a.name}, "actual_qty", 0)
-		self.assertEqual(self._delta([(item, self.wh_a.name, 1)]), (1, 37700, 1, 0))
+		self.assertEqual((row["total_actual_qty"], row["sellable_qty"], row["selling_rate"]), (51, 1, 37700))
 
 	def test_every_product_with_stock_matches_its_detail(self):
 		"""Real site data, read-only: the KPIs are exactly the sum of what
 		each product's detail shows (00002 included when it has stock)."""
 		summary = api.get_inventory_summary()
-		totals = {code: qty for code, qty in api._bin_totals().items() if qty > 0}
-		units = value = 0.0
-		for code, qty in totals.items():
-			if frappe.db.get_value("Item", code, "disabled"):
+		physical = sellable = value = 0.0
+		items = without_price = 0
+		for code, stock in api._bin_totals().items():
+			if frappe.db.get_value("Item", code, "disabled") or stock.physical_qty <= 0:
 				continue
 			detail = api.get_inventory_item_detail(code)
-			self.assertEqual(detail["total_stock"], qty, code)
-			units += detail["total_stock"]
-			value += detail["total_stock"] * flt(detail["selling_rate"])
-		self.assertEqual(summary["total_units"], units)
-		self.assertEqual(summary["commercial_value"], flt(value, 2))
-		# total_stock (legacy key) also counts disabled Items; the KPI does not.
-		self.assertGreaterEqual(summary["total_stock"], summary["total_units"])
+			self.assertEqual((detail["physical_stock"], detail["sellable_stock"]), (stock.physical_qty, stock.sellable_qty), code)
+			physical += detail["physical_stock"]
+			sellable += detail["sellable_stock"]
+			value += detail["commercial_value"]
+			if detail["sellable_stock"] > 0:
+				items += 1
+				without_price += detail["selling_rate"] is None
+		self.assertEqual(
+			(summary["physical_units"], summary["sellable_units"], summary["commercial_value"]),
+			(physical, sellable, flt(value, 2)),
+		)
+		self.assertEqual((summary["items_with_stock"], summary["items_without_selling_price"]), (items, without_price))
 
 	# -- Endpoint ---------------------------------------------------------------
 
@@ -246,7 +319,7 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 		self.assertTrue(
 			{"references", "total_stock", "out_of_stock", "low_stock", "low_stock_status"} <= set(summary)
 		)
-		for key in ("total_units", "commercial_value", "items_with_stock", "items_without_selling_price"):
+		for key in ("physical_units", "sellable_units", "commercial_value", "items_with_stock", "items_without_selling_price"):
 			self.assertIn(key, summary)
 		self.assertEqual(summary["commercial_price_list"], SELLING)
 
@@ -262,3 +335,101 @@ class TestInventoryCommercialValue(IntegrationTestCase):
 		self.assertEqual(counts(), before)
 		self.assertEqual(frappe.db.get_value("Bin", {"item_code": item.name}, "modified"), modified)
 		self.assertEqual(flt(frappe.db.get_value("Bin", {"item_code": item.name}, "actual_qty")), 3)
+
+
+class TestCommercialValueAfterStockIssue(IntegrationTestCase):
+	"""INVENTARIO-OUT-01 + commercial value: the value is computed from the
+	REAL stock after COMPLETAR PEDIDO's Material Issue (Bin 20 -> 16), never
+	minus the Pick List again (never 12), and invoicing / the route never
+	change it. Real stock (Stock Reconciliation) in this suite's own
+	warehouse; _stock_warehouses is pinned to it."""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls.world = fx.TestWorld()
+		cls.addClassCleanup(cls.world.cleanup)
+		tag = frappe.generate_hash(length=4).upper()
+		cls.wh = cls.world.warehouse(f"FGINV Valor {tag}")
+		cls.item = cls.world.item(f"FGINV-VALOR-{tag}")
+		cls.item_codes = [cls.item.name]
+		cls.addClassCleanup(_purge_item_prices, cls.item_codes)
+		cls.customer = cls.world.customer(f"FGINV Valor Cliente {tag}")
+		cls.world.stock_up_real(cls.item.name, cls.wh.name, 20, rate=5000)
+		for name in frappe.get_all("Item Price", filters={"item_code": cls.item.name}, pluck="name"):
+			frappe.delete_doc("Item Price", name, ignore_permissions=True, force=True)  # native auto price
+		cls.world._track(
+			frappe.get_doc(
+				{"doctype": "Item Price", "item_code": cls.item.name, "price_list": SELLING, "price_list_rate": 10000}
+			).insert()
+		)
+		cls.bodega_user = cls.world.user(f"fginv-valor-bodega-{tag.lower()}@example.com", ["Bodega"])
+		cls.world.warehouse_user_permission(cls.bodega_user, cls.wh.name)
+		cls.facturacion_user = cls.world.user(f"fginv-valor-facturacion-{tag.lower()}@example.com", ["Facturación"])
+		cls.recorrido_user = cls.world.user(f"fginv-valor-recorrido-{tag.lower()}@example.com", ["Recorrido"])
+		cls._seq = 0
+		cls._evidence_file_names = []
+		cls.addClassCleanup(deliver_base.TestRecorridosDeliverStop._delete_evidence_files.__func__, cls)
+
+	_set_customer_primary_address = recorridos_base.TestRecorridosApi._set_customer_primary_address
+	_geocode_customer_address = recorridos_base.TestRecorridosApi._geocode_customer_address
+	_track_route = recorridos_base.TestRecorridosApi._track_route
+	_create_route = recorridos_base.TestRecorridosApi._create_route
+	_plan_route = recorridos_base.TestRecorridosApi._plan_route
+	_driver = recorridos_base.TestRecorridosApi._driver
+	_unique = start_base.TestRecorridosStartRoute._unique
+	_stop_customer = start_base.TestRecorridosStartRoute._stop_customer
+	_start = start_base.TestRecorridosStartRoute._start
+	_deliver = deliver_base.TestRecorridosDeliverStop._deliver
+	_track_delivery_files = deliver_base.TestRecorridosDeliverStop._track_delivery_files
+
+	def _value(self):
+		"""(Bin.actual_qty, summary sellable/value, detail sellable/value)."""
+		with patch.object(api, "_stock_warehouses", return_value=[self.wh.name]):
+			summary = api._inventory_value_summary(api._bin_totals())
+			detail = api.get_inventory_item_detail(self.item.name)
+		actual = flt(frappe.db.get_value("Bin", {"item_code": self.item.name, "warehouse": self.wh.name}, "actual_qty"))
+		return (
+			actual,
+			summary["sellable_units"],
+			summary["commercial_value"],
+			detail["sellable_stock"],
+			detail["commercial_value"],
+		)
+
+	def test_value_follows_real_stock_through_complete_invoice_and_route(self):
+		self.assertEqual(self._value(), (20, 20, 200000, 20, 200000))
+
+		customer = self._stop_customer()
+		so = self.world.submitted_sales_order(self.item.name, self.wh.name, 4, customer.name, rate=10000)
+		pl = self.world.pick_list_for(so, self.wh.name).name
+		with fx.as_user(self.bodega_user):
+			bodega.start_picking(pl)
+			for row in bodega.get_pick_list(pl)["rows"]:
+				bodega.set_picked_qty(pl, row["row_name"], row["qty_solicitada"])
+			self.assertTrue(bodega.finish_picking(pl)["stock_entry"])
+		# The open order still reserves 4 natively; the value is NOT 12.
+		self.assertEqual(self._value(), (16, 16, 160000, 16, 160000))
+
+		with fx.as_user(self.facturacion_user):
+			for it in facturacion.get_invoicing_detail(pl)["items"]:
+				facturacion.set_invoicing_item_checked(pl, it["row_name"], 1)
+			facturacion.mark_as_invoiced(pl, "integrandoMAS")
+		self.assertEqual(self._value(), (16, 16, 160000, 16, 160000))
+
+		driver = self._driver(self._unique("Conductor")).name
+		with fx.as_user(self.recorrido_user):
+			route = self._create_route(pick_lists=[pl], driver=driver)
+			self._plan_route(route["name"])
+		started = self._start(route["name"])
+		self.assertEqual(self._value(), (16, 16, 160000, 16, 160000))
+
+		self._deliver(route["name"], started["stops"][0]["name"])
+		self.assertEqual(frappe.db.get_value("Recorrido Parada", started["stops"][0]["name"], "status"), "Entregado")
+		self.assertEqual(self._value(), (16, 16, 160000, 16, 160000))
+
+
+def _purge_item_prices(item_codes):
+	frappe.db.delete("Item Price", {"item_code": ["in", item_codes]})
+	frappe.db.delete("Bin", {"item_code": ["in", item_codes]})
+	frappe.db.commit()

@@ -45,7 +45,16 @@
 	grid-template-columns: repeat(3, 1fr);
 }
 
-/* Hotfix Inventario -- EXISTENCIAS TOTALES / VALOR COMERCIAL (dos cards grandes)
+/* Hotfix Inventario -- stock físico que no es vendible (Devoluciones,
+   Cuarentena): visible en "Stock por almacén", marcado. */
+.fg-inventario .fg-badge--inv-no-vendible {
+	background: var(--fg-warning-tint);
+	color: var(--fg-warning-dark);
+	margin-left: 6px;
+	white-space: nowrap;
+}
+
+/* Hotfix Inventario -- EXISTENCIAS VENDIBLES / VALOR COMERCIAL (dos cards grandes)
    y la línea de productos con stock / sin precio. */
 .fg-inventario .fg-kpi--inv-existencias {
 	--fg-kpi-color: var(--fg-primary);

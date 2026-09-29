@@ -248,8 +248,9 @@ fabergray_erp.Inventario = class Inventario {
 	}
 
 	// Hotfix Inventario -- existencias y valor comercial con el MISMO stock
-	// total y precio Standard Selling que muestran la lista y el detalle de
-	// cada producto (get_inventory_summary(): stock total x precio vigente).
+	// VENDIBLE y precio Standard Selling que muestra el detalle de cada
+	// producto (get_inventory_summary(): stock vendible x precio vigente;
+	// Devoluciones/Cuarentena nunca son vendibles).
 	render_commercial_kpis() {
 		const s = this.summary || {};
 		const without_price = s.items_without_selling_price || 0;
@@ -257,8 +258,8 @@ fabergray_erp.Inventario = class Inventario {
 			<div class="fg-inv-commercial">
 				<div class="fg-inv-commercial-main">
 					<div class="fg-kpi fg-kpi--inv-existencias">
-						<div class="fg-kpi-label">${__("EXISTENCIAS TOTALES")}</div>
-						<div class="fg-kpi-number fg-inv-commercial-number">${format_units(s.total_units)} ${__("UNIDADES")}</div>
+						<div class="fg-kpi-label">${__("EXISTENCIAS VENDIBLES")}</div>
+						<div class="fg-kpi-number fg-inv-commercial-number">${format_units(s.sellable_units)} ${__("UNIDADES")}</div>
 					</div>
 					<div class="fg-kpi fg-kpi--inv-valor">
 						<div class="fg-kpi-label">${__("VALOR COMERCIAL")}</div>
@@ -285,8 +286,9 @@ fabergray_erp.Inventario = class Inventario {
 		const s = this.summary || {};
 		const cards = [
 			{ key: "references", label: __("Referencias"), i: "package", mod: "inv-referencias" },
-			// "Stock total" ya no se muestra aquí: es el mismo número que
-			// EXISTENCIAS TOTALES de arriba (Hotfix Inventario).
+			// "Stock total" ya no se muestra aquí (Hotfix Inventario): arriba
+			// va EXISTENCIAS VENDIBLES, y el stock físico de cada producto
+			// (Devoluciones/Cuarentena incluidas) se ve en su detalle.
 			{ key: "out_of_stock", label: __("Agotados"), i: "triangle-alert", mod: "inv-agotados" },
 			{ key: "low_stock", label: __("Stock bajo"), i: "gauge", mod: "inv-stock-bajo" },
 		];
@@ -596,8 +598,16 @@ fabergray_erp.Inventario = class Inventario {
 						<div>${price_html}</div>
 					</div>
 					<div class="fg-inv-detail-field">
-						<div class="fg-inv-detail-label">${__("Stock total")}</div>
-						<div><strong>${format_qty(d.total_stock)} ${frappe.utils.escape_html(d.stock_uom || "")}</strong></div>
+						<div class="fg-inv-detail-label">${__("Stock físico")}</div>
+						<div><strong>${format_qty(d.physical_stock)} ${frappe.utils.escape_html(d.stock_uom || "")}</strong></div>
+					</div>
+					<div class="fg-inv-detail-field">
+						<div class="fg-inv-detail-label">${__("Stock vendible")}</div>
+						<div><strong>${format_qty(d.sellable_stock)} ${frappe.utils.escape_html(d.stock_uom || "")}</strong></div>
+					</div>
+					<div class="fg-inv-detail-field">
+						<div class="fg-inv-detail-label">${__("Valor comercial")}</div>
+						<div><strong>${format_cop(d.commercial_value)}</strong></div>
 					</div>
 				</div>
 
@@ -678,7 +688,11 @@ fabergray_erp.Inventario = class Inventario {
 					.map(
 						(r) => `
 					<div class="fg-inv-warehouse-row">
-						<span>${frappe.utils.escape_html(r.warehouse)}</span>
+						<span>${frappe.utils.escape_html(r.warehouse)}${
+							r.sellable === false
+								? ` <span class="fg-badge fg-badge--inv-no-vendible">${__("NO VENDIBLE")}</span>`
+								: ""
+						}</span>
 						<span class="fg-inv-warehouse-row-qty">${format_qty(r.actual_qty)}</span>
 						${
 							can_edit

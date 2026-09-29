@@ -64,7 +64,7 @@ from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import get_
 
 from fabergray_erp.api.bodega import _require_login
 from fabergray_erp.fulfillment.stock_issue_service import issued_pending_delivery_qty
-from fabergray_erp.warehouses import ROOT_WAREHOUSE, warehouse_name
+from fabergray_erp.warehouses import ROOT_WAREHOUSE, non_picking_warehouses, warehouse_name
 
 PRICE_LIST = "Standard Selling"
 PRICE_LIST_BUYING = "Standard Buying"
@@ -160,25 +160,35 @@ def _stock_warehouses(company):
 
 
 def _bin_totals(item_codes=None):
-    """THE stock total of a product -- the one definition the list
-    (total_actual_qty), the detail (total_stock) and the summary KPIs all
-    use, so they can never disagree: {item_code: SUM(max(Bin.actual_qty, 0))}
-    over _stock_warehouses() (negative stock is not available). One grouped
-    query, never one per Item; `item_codes` narrows it (the detail)."""
-    warehouses = _stock_warehouses(get_default_company())
+    """THE stock of a product -- the one definition the list, the detail
+    and the summary KPIs all use, so they can never disagree:
+    {item_code: {"physical_qty", "sellable_qty"}} over _stock_warehouses().
+
+    - physical_qty: SUM(max(Bin.actual_qty, 0)) -- negative stock is not
+      available; the stock physically exists wherever it is.
+    - sellable_qty: the same, minus warehouses.non_picking_warehouses()
+      (Devoluciones, Cuarentena, native rejected warehouses) -- stock that
+      physically exists but cannot be sold.
+
+    One Bin query, never one per Item; `item_codes` narrows it (the detail)."""
+    company = get_default_company()
+    warehouses = _stock_warehouses(company)
     if not warehouses or (item_codes is not None and not item_codes):
         return {}
     filters = {"warehouse": ["in", warehouses], "actual_qty": [">", 0]}
     if item_codes is not None:
         filters["item_code"] = ["in", list(item_codes)]
-    rows = frappe.get_list(
-        "Bin",
-        filters=filters,
-        fields=["item_code", {"SUM": "actual_qty", "as": "total_qty"}],
-        group_by="item_code",
-        limit_page_length=0,
-    )
-    return {r.item_code: flt(r.total_qty) for r in rows}
+    not_sellable = non_picking_warehouses(company)
+    totals = {}
+    for row in frappe.get_list(
+        "Bin", filters=filters, fields=["item_code", "warehouse", "actual_qty"], limit_page_length=0
+    ):
+        entry = totals.setdefault(row.item_code, frappe._dict(physical_qty=0.0, sellable_qty=0.0))
+        qty = max(flt(row.actual_qty), 0.0)
+        entry.physical_qty += qty
+        if row.warehouse not in not_sellable:
+            entry.sellable_qty += qty
+    return totals
 
 
 def _selling_rates(item_codes):
@@ -221,29 +231,29 @@ def _selling_rates(item_codes):
 
 def _inventory_value_summary(totals):
     """Hotfix Inventario -- the summary KPIs from the SAME per-product
-    stock total (_bin_totals()) and price (_selling_rates()) the list and
-    the detail show: for each active stock Item with stock > 0, value =
-    stock_total x its price (0 without one -- the units still count). The
-    stock is summed per Item first, then multiplied by ONE price, so a
-    product in several warehouses is never priced per Bin."""
-    with_stock = {code: qty for code, qty in totals.items() if qty > 0}
+    stock (_bin_totals()) and price (_selling_rates()) the list and the
+    detail show. Commercial numbers use ONLY sellable stock: for each active
+    stock Item with sellable_qty > 0, value = sellable_qty x its price (0
+    without one -- the units still count). The stock is summed per Item
+    first, then multiplied by ONE price, so a product in several warehouses
+    is never priced per Bin. physical_units is the total physical stock of
+    the same Items (Devoluciones/Cuarentena included), for reference only."""
+    codes = [code for code, t in totals.items() if t.physical_qty > 0]
     active = set(
         frappe.get_list(
-            "Item",
-            filters={"name": ["in", list(with_stock)], "disabled": 0, "is_stock_item": 1},
-            pluck="name",
-            limit_page_length=0,
+            "Item", filters={"name": ["in", codes], "disabled": 0, "is_stock_item": 1}, pluck="name", limit_page_length=0
         )
-        if with_stock
+        if codes
         else []
     )
-    stock = {code: qty for code, qty in with_stock.items() if code in active}
-    prices = _selling_rates(list(stock))
+    sellable = {code: totals[code].sellable_qty for code in active if totals[code].sellable_qty > 0}
+    prices = _selling_rates(list(sellable))
     return {
-        "total_units": flt(sum(stock.values())),
-        "commercial_value": flt(sum(qty * prices.get(code, 0.0) for code, qty in stock.items()), 2),
-        "items_with_stock": len(stock),
-        "items_without_selling_price": sum(1 for code in stock if code not in prices),
+        "physical_units": flt(sum(totals[code].physical_qty for code in active)),
+        "sellable_units": flt(sum(sellable.values())),
+        "commercial_value": flt(sum(qty * prices.get(code, 0.0) for code, qty in sellable.items()), 2),
+        "items_with_stock": len(sellable),
+        "items_without_selling_price": sum(1 for code in sellable if code not in prices),
         "commercial_price_list": PRICE_LIST,
     }
 
@@ -256,19 +266,21 @@ def get_inventory_summary():
     explicitly: no reliable reorder level exists for any migrated Item
     yet, and no threshold is invented here to fill that gap.
 
-    Hotfix Inventario -- total_units / commercial_value / items_with_stock
-    / items_without_selling_price (_inventory_value_summary()), from the
-    same stock total and price as the product list and detail. total_stock
-    is kept for compatibility (sum of every product's stock total)."""
+    Hotfix Inventario -- sellable_units / commercial_value /
+    items_with_stock / items_without_selling_price (sellable stock only)
+    and physical_units (_inventory_value_summary()), from the same stock
+    and price as the product list and detail. total_stock / out_of_stock
+    keep their meaning on PHYSICAL stock (compatibility)."""
     _require_login()
     frappe.has_permission("Item", "read", throw=True)
 
     references = frappe.get_list("Item", pluck="name")
     totals = _bin_totals()
-    total_stock = sum(totals.values())
+    physical = {code: t.physical_qty for code, t in totals.items()}
+    total_stock = sum(physical.values())
 
     stock_items = frappe.get_list("Item", filters={"is_stock_item": 1}, pluck="name")
-    out_of_stock = sum(1 for code in stock_items if totals.get(code, 0) <= 0)
+    out_of_stock = sum(1 for code in stock_items if physical.get(code, 0) <= 0)
 
     return {
         "references": len(references),
@@ -304,6 +316,7 @@ def get_inventory_items(txt=None, status=None, start=0, page_length=20):
     page_length = cint(page_length) or 20
 
     totals = _bin_totals()
+    physical = {code: t.physical_qty for code, t in totals.items()}
 
     or_filters = None
     if txt:
@@ -317,7 +330,7 @@ def get_inventory_items(txt=None, status=None, start=0, page_length=20):
             order_by="item_code asc",
             limit_page_length=0,
         )
-        rows = [i for i in all_matching if totals.get(i.item_code, 0) <= 0]
+        rows = [i for i in all_matching if physical.get(i.item_code, 0) <= 0]
         total = len(rows)
         page_rows = rows[start : start + page_length]
     else:
@@ -343,7 +356,8 @@ def get_inventory_items(txt=None, status=None, start=0, page_length=20):
             "item_group": r.item_group,
             "stock_uom": r.stock_uom,
             "disabled": r.disabled,
-            "total_actual_qty": totals.get(r.item_code, 0),
+            "total_actual_qty": physical.get(r.item_code, 0),
+            "sellable_qty": totals[r.item_code].sellable_qty if r.item_code in totals else 0,
             "selling_rate": rates.get(r.item_code),
         }
         for r in page_rows
@@ -375,11 +389,14 @@ def get_inventory_item_detail(item_code, warehouse=None):
     doc = frappe.get_doc("Item", item_code)
     doc.check_permission("read")
 
-    # Hotfix Inventario -- the same warehouses, stock total (_bin_totals())
-    # and price (_selling_rates()) as the list and the summary KPIs.
+    # Hotfix Inventario -- the same warehouses, stock (_bin_totals()) and
+    # price (_selling_rates()) as the list and the summary KPIs. Every
+    # warehouse row stays visible; the non-sellable ones are flagged.
+    company = get_default_company()
+    not_sellable = non_picking_warehouses(company)
     bin_rows = frappe.get_list(
         "Bin",
-        filters={"item_code": item_code, "warehouse": ["in", _stock_warehouses(get_default_company()) or [""]]},
+        filters={"item_code": item_code, "warehouse": ["in", _stock_warehouses(company) or [""]]},
         fields=["warehouse", "actual_qty", "reserved_qty", "projected_qty"],
         order_by="warehouse asc",
     )
@@ -391,10 +408,12 @@ def get_inventory_item_detail(item_code, warehouse=None):
     # OPERATIONAL figures. Read-only, Bin is never written.
     issued = issued_pending_delivery_qty([item_code])
     for row in bin_rows:
+        row["sellable"] = row.warehouse not in not_sellable
         issued_qty = min(issued.get((item_code, row.warehouse), 0.0), flt(row.reserved_qty))
         row["reserved_qty"] = flt(row.reserved_qty) - issued_qty
         row["projected_qty"] = flt(row.projected_qty) + issued_qty
-    total_stock = _bin_totals([item_code]).get(item_code, 0.0)
+    stock = _bin_totals([item_code]).get(item_code) or frappe._dict(physical_qty=0.0, sellable_qty=0.0)
+    total_stock = stock.physical_qty
 
     selling_rate = _selling_rates([item_code]).get(item_code)
     currency = None
@@ -430,6 +449,9 @@ def get_inventory_item_detail(item_code, warehouse=None):
         "selling_rate": selling_rate,
         "currency": currency,
         "total_stock": total_stock,
+        "physical_stock": stock.physical_qty,
+        "sellable_stock": stock.sellable_qty,
+        "commercial_value": flt(stock.sellable_qty * flt(selling_rate), 2),
         "stock_by_warehouse": bin_rows,
         "recent_movements": recent_movements,
     }
