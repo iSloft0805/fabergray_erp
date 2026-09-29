@@ -54,7 +54,7 @@ class TestPickListHistoryApi(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		cls.wh_a = cls.world.warehouse("FG229 Pick History Wh A")
@@ -215,7 +215,7 @@ class TestShortageCenterApi(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		cls.warehouse = cls.world.warehouse("FG229 Shortage Center Wh")
@@ -385,7 +385,7 @@ class TestWarehouseApi(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		cls.wh_active = cls.world.warehouse("FG229 Almacen Activo")

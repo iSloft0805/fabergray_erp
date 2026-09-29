@@ -861,7 +861,7 @@ class TestFullFlowRegression(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		cls.wh = cls.world.warehouse("FG8 Regression")
@@ -945,7 +945,7 @@ class TestFabrigrayWorkspace(IntegrationTestCase):
 		super().setUpClass()
 		from fabergray_erp.tests import fixtures as fx
 
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		cls.role_to_email = {

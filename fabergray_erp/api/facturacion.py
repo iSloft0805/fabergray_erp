@@ -121,6 +121,7 @@ from fabergray_erp.api.cotizaciones import (
 	_resolve_pdf_advisor_name,
 	_resolve_pdf_contact,
 )
+from fabergray_erp.fulfillment.stock_issue_service import get_stock_issue
 from fabergray_erp.invoice_issuers import (
 	INVOICE_ISSUERS,
 	INVOICE_NUMBERING,
@@ -511,6 +512,19 @@ def generate_invoice(pick_list_name):
 
 	if pl.delivery_status == "Fully Delivered":
 		frappe.throw(_("Este Pick List ya fue facturado por completo; no queda nada pendiente."))
+
+	# INVENTARIO-OUT-01 -- the stock already left at COMPLETAR PEDIDO (Material
+	# Issue); this legacy Sales Invoice has update_stock=1 and would take it
+	# out a second time.
+	stock_issue = get_stock_issue(pl.name)
+	if stock_issue or any(flt(row.transferred_qty) > 0 for row in pl.get("locations")):
+		frappe.throw(
+			_(
+				"El inventario de este pedido ya se descontó al completarlo ({0}). Esta factura "
+				"legada volvería a descontarlo; usa el flujo de Facturación."
+			).format(stock_issue or _("Material Issue")),
+			title=_("Inventario ya descontado"),
+		)
 
 	locations = pl.get("locations") or []
 	if not any(flt(row.picked_qty) - flt(row.delivered_qty) > 0 for row in locations):

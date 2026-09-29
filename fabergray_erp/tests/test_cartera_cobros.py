@@ -57,7 +57,7 @@ class TestCarteraCobros(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		cls.wh = cls.world.warehouse("FG273 WH")

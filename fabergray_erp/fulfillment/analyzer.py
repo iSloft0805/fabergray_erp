@@ -67,6 +67,12 @@ def _qty_committed_by_open_pick_lists(item_code, warehouse):
 	that row lock exists there because it runs inside an actual document
 	save; this function never writes anything, so there is nothing to
 	protect with a lock.
+
+	INVENTARIO-OUT-01 -- a submitted row also subtracts its transferred_qty
+	(native, written by the Material Issue COMPLETAR PEDIDO creates, see
+	stock_issue_service): those units already left Bin.actual_qty, so
+	counting them here too would take them out of the available stock
+	twice. Same rule as pick_list_mixin._get_pick_list_items().
 	"""
 	pick_list = frappe.qb.DocType("Pick List")
 	pick_list_item = frappe.qb.DocType("Pick List Item")
@@ -79,7 +85,7 @@ def _qty_committed_by_open_pick_lists(item_code, warehouse):
 			Case()
 			.when(
 				(pick_list_item.picked_qty > 0) & (pick_list_item.docstatus == 1),
-				pick_list_item.picked_qty - pick_list_item.delivered_qty,
+				pick_list_item.picked_qty - pick_list_item.delivered_qty - pick_list_item.transferred_qty,
 			)
 			.else_(pick_list_item.stock_qty)
 			.as_("qty")

@@ -38,7 +38,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, flt, nowdate
 
 from fabergray_erp.api import bodega
-from fabergray_erp.fulfillment import pick_list_mixin
+from fabergray_erp.fulfillment import pick_list_mixin, stock_issue_service
 from fabergray_erp.tests import fixtures as fx
 
 EXTRA_TEST_RECORD_DEPENDENCIES = []
@@ -49,7 +49,7 @@ class TestBodegaPhysicalPicking(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		# Deliberately left at 0 stock -- world.stock_up()/stock_up_real() is
@@ -231,24 +231,37 @@ class TestBodegaPhysicalPicking(IntegrationTestCase):
 		for forbidden in ("ignore_negative_stock", "allow_negative_stock", "frappe.flags"):
 			self.assertNotIn(forbidden, source, f"{forbidden!r} must never appear in the mixin's own code")
 
-	def test_finish_picking_no_longer_blocked_by_zero_erp_stock(self):
-		"""End-to-end: the exact real-world scenario (0 ERP stock, physical
-		count of the full requested qty) must reach a submitted Pick List,
-		never "Insuficiente Stock"."""
+	# INVENTARIO-OUT-01 changed the END of this scenario on purpose: COMPLETAR
+	# PEDIDO now issues the stock (Material Issue) and negative stock is not
+	# allowed, so a pick with 0 ERP stock can still be RECORDED physically
+	# (the Commit 25.9 fix above stays: never ERPNext's "Insuficiente
+	# Stock" on set_picked_qty), but it can only be COMPLETED once the stock
+	# is registered in the ERP (Jefe de Bodega: inventario inicial/ajuste).
+
+	def _assert_completion_refused_without_writing(self, pl_name):
+		with fx.as_user(self.bodega_user):
+			with self.assertRaises(stock_issue_service.InsufficientStockForIssueError) as ctx:
+				bodega.finish_picking(pl_name)
+		self.assertIn("stock suficiente", str(ctx.exception))
+		self.assertEqual(frappe.db.get_value("Pick List", pl_name, "docstatus"), 0)
+		self.assertEqual(frappe.db.count("Stock Entry", {"pick_list": pl_name}), 0)
+
+	def test_zero_erp_stock_can_be_picked_but_not_completed(self):
+		"""0 ERP stock, physical count of the full requested qty: the pick is
+		recorded, the completion is refused with a clear message and nothing
+		is written."""
 		pl = self._zero_stock_pick_list(qty=10)
 		with fx.as_user(self.bodega_user):
 			bodega.start_picking(pl.name)
 			row_name = bodega.get_pick_list(pl.name)["rows"][0]["row_name"]
 			bodega.set_picked_qty(pl.name, row_name, 10)
-			result = bodega.finish_picking(pl.name)
-		self.assertEqual(result["docstatus"], 1)
+		self.assertEqual(flt(frappe.db.get_value("Pick List Item", row_name, "picked_qty")), 10)
+		self._assert_completion_refused_without_writing(pl.name)
 
-	def test_partial_physical_pick_with_zero_erp_stock_can_finish_with_shortage_report(self):
-		"""The requested=10/stock=0/picked=7 example from the brief itself,
-		carried all the way through finish_picking() via the existing
-		Reporte de Faltante mechanism -- never auto-created, filed
-		explicitly, exactly like every other partial-pick test in this
-		suite already does."""
+	def test_partial_physical_pick_with_zero_erp_stock_is_not_completed(self):
+		"""The requested=10/stock=0/picked=7 example from the brief itself:
+		the Reporte de Faltante is filed as before, but completion is refused
+		until the 7 exist in the ERP."""
 		pl = self._zero_stock_pick_list(qty=10)
 		with fx.as_user(self.bodega_user):
 			bodega.start_picking(pl.name)
@@ -261,5 +274,4 @@ class TestBodegaPhysicalPicking(IntegrationTestCase):
 				shortage_reason="Stock físico no encontrado",
 			)
 			self.world.track_existing("Reporte de Faltante", report["name"])
-			result = bodega.finish_picking(pl.name)
-		self.assertEqual(result["docstatus"], 1)
+		self._assert_completion_refused_without_writing(pl.name)

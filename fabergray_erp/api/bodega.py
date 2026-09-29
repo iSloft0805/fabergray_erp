@@ -15,10 +15,19 @@ from frappe.utils import flt, now_datetime
 
 from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
+from fabergray_erp.fulfillment.stock_issue_service import (
+	create_stock_issue,
+	get_stock_issue,
+	issued_pending_delivery_qty,
+	lock_stock_for_pick_list,
+	pending_issue_rows,
+	validate_stock_for_issue,
+)
 from fabergray_erp.sales_order_naming import root_commercial_name
 
 OPEN_SHORTAGE_STATUSES = ["Abierto", "En Proceso"]
 ALL_SHORTAGE_STATUSES = ["Abierto", "En Proceso", "Resuelto"]
+FINISH_PICKING_SAVEPOINT = "fg_finish_picking"
 
 
 def _require_login():
@@ -710,6 +719,20 @@ def report_shortage(pick_list, row_name, qty_disponible, shortage_reason, resolu
 
 @frappe.whitelist()
 def finish_picking(name):
+	"""COMPLETAR PEDIDO -- see _finish_picking(). INVENTARIO-OUT-01: wrapped
+	in the same bounded retry (3 attempts, whole-transaction rollback) as
+	api.recorridos/jefe_bodega's own write endpoints: two completions
+	competing for the same Bin can hit MariaDB's snapshot-isolation conflict
+	(1020, raised as QueryDeadlockError) when the second one takes its lock
+	after the first one committed. The retry re-runs everything with fresh
+	data -- it then returns already_completed, or refuses for insufficient
+	stock -- never a raw deadlock, never half-applied."""
+	from fabergray_erp.api.recorridos import _retrying_on_deadlock
+
+	return _retrying_on_deadlock(_finish_picking)(name)
+
+
+def _finish_picking(name):
 	"""Submit a Pick List through its standard ERPNext submit flow.
 
 	Does not invent a new status: `pl.submit()` is what runs Pick List's own
@@ -735,11 +758,33 @@ def finish_picking(name):
 	partial pick, per_picked ends up correct via ERPNext's native mechanism.
 	A pick list can never look "completely alistado" via this API when it
 	physically isn't.
+
+	INVENTARIO-OUT-01 -- COMPLETAR PEDIDO is also where the stock leaves the
+	inventory: right after the submit, ONE native Material Issue for the
+	picked units (stock_issue_service.create_stock_issue()), in the same
+	transaction. Order: lock its Bin rows, then the Pick List -> re-read it -> validate
+	state and every picked_qty -> validate stock (negative stock is not
+	allowed) -> submit + Material Issue under a savepoint, so any failure
+	leaves the Pick List a draft with nothing issued. Idempotent: a second
+	call (double click, retry, a concurrent request that waited on the lock)
+	finds the submitted Material Issue and returns already_completed=True
+	without creating anything.
 	"""
 	_require_login()
 
-	pl = frappe.get_doc("Pick List", name)
-	pl.check_permission("write")
+	frappe.get_doc("Pick List", name).check_permission("write")
+
+	# Lock order: the stock (Bin rows) first, then the Pick List -- see
+	# lock_stock_for_pick_list(). Two requests for the same Pick List or the
+	# same stock serialize here, and the second one re-reads the first one's
+	# committed result.
+	lock_stock_for_pick_list(name)
+	pl = frappe.get_doc("Pick List", name, for_update=True)
+
+	if pl.docstatus == 1:
+		stock_entry = get_stock_issue(pl.name)
+		if stock_entry:
+			return _finish_picking_result(pl, stock_entry, already_completed=True)
 
 	if pl.docstatus != 0:
 		frappe.throw(_("Este Pick List ya fue finalizado o cancelado."))
@@ -783,14 +828,29 @@ def finish_picking(name):
 			).format(", ".join(str(idx) for idx in zero_qty_rows))
 		)
 
+	# Fail before writing anything when the picked units are not in stock.
+	validate_stock_for_issue(pending_issue_rows(pl))
+
+	frappe.db.savepoint(FINISH_PICKING_SAVEPOINT)
 	try:
 		pl.submit()
+		stock_entry = create_stock_issue(pl)
+	except frappe.QueryDeadlockError:
+		raise  # InnoDB already aborted the whole transaction (savepoint gone): finish_picking() retries it
 	except frappe.exceptions.TimestampMismatchError:
+		frappe.db.rollback(save_point=FINISH_PICKING_SAVEPOINT)
 		frappe.throw(
 			_("Otro usuario modificó este Pick List al mismo tiempo. Actualiza y vuelve a intentar."),
 			exc=frappe.exceptions.TimestampMismatchError,
 		)
+	except Exception:
+		frappe.db.rollback(save_point=FINISH_PICKING_SAVEPOINT)
+		raise
 
+	return _finish_picking_result(pl, stock_entry.name if stock_entry else None, already_completed=False)
+
+
+def _finish_picking_result(pl, stock_entry, already_completed):
 	sales_orders = {row.sales_order for row in pl.get("locations") if row.sales_order}
 	per_picked_by_so = {
 		so: frappe.db.get_value("Sales Order", so, "per_picked") for so in sales_orders
@@ -799,8 +859,10 @@ def finish_picking(name):
 	return {
 		"name": pl.name,
 		"docstatus": pl.docstatus,
-		"status": pl.status,
+		"status": frappe.db.get_value("Pick List", pl.name, "status"),
 		"per_picked_by_sales_order": per_picked_by_so,
+		"stock_entry": stock_entry,
+		"already_completed": already_completed,
 	}
 
 
@@ -950,6 +1012,12 @@ def get_inventory():
 		limit_page_length=0,
 	)
 	item_by_code = {i.name: i for i in items}
+	# INVENTARIO-OUT-01 -- units already issued at COMPLETAR PEDIDO left
+	# actual_qty; they must not also stay in the native (Sales Order based)
+	# reserved_qty. The native Bin keeps counting them (no Delivery Note ever
+	# lowers it, see issued_pending_delivery_qty()); these are the
+	# OPERATIONAL figures. Read-only correction, Bin is never written.
+	issued = issued_pending_delivery_qty(item_codes)
 
 	result = []
 	for b in bins:
@@ -958,6 +1026,7 @@ def get_inventory():
 			# Bin row for an item Bodega cannot (or can no longer) read via
 			# Item -- skip rather than show a code with no name.
 			continue
+		reserved_qty = max(flt(b.reserved_qty) - issued.get((b.item_code, b.warehouse), 0.0), 0.0)
 		result.append(
 			{
 				"item_code": b.item_code,
@@ -965,8 +1034,8 @@ def get_inventory():
 				"uom": item.stock_uom,
 				"warehouse": b.warehouse,
 				"actual_qty": flt(b.actual_qty),
-				"reserved_qty": flt(b.reserved_qty),
-				"available_qty": flt(b.actual_qty) - flt(b.reserved_qty),
+				"reserved_qty": reserved_qty,
+				"available_qty": flt(b.actual_qty) - reserved_qty,
 			}
 		)
 	return result

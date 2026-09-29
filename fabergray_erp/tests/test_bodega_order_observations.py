@@ -75,7 +75,7 @@ class _ObservationsBodegaWorld(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		sfx = frappe.generate_hash(length=5)

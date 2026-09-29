@@ -59,7 +59,7 @@ class TestCarteraDashboard(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 		# Fixture customers carry TOKEN; customers created by individual
 		# tests carry OTHER_TOKEN, so the fixture set stays exactly 7 rows.

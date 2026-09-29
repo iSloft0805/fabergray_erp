@@ -53,7 +53,7 @@ class TestBodegaQueueCustomerName(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		cls.wh = cls.world.warehouse("FG2520 Bodega Wh")
@@ -123,7 +123,7 @@ class TestInvoicingQueueDateSearch(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		cls.wh = cls.world.warehouse("FG2520 Fact Wh")
@@ -214,7 +214,7 @@ class TestRoutesSearch(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		cls.wh = cls.world.warehouse("FG2520 Rec Wh")
@@ -325,7 +325,7 @@ class TestShortageCenterCustomerAndDateSearch(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		cls.wh = cls.world.warehouse("FG2520 JB Wh")

@@ -221,6 +221,10 @@ class TestFacturacionInvoiceNumbering(IntegrationTestCase):
 
 	def test_10_cancelled_pick_list_keeps_its_number_and_it_is_never_reused(self):
 		pl_name, number = self._invoiced("integrandoMAS")
+		# INVENTARIO-OUT-01: the Material Issue of COMPLETAR PEDIDO natively
+		# blocks cancelling its Pick List -- it has to be reversed first.
+		for entry in frappe.get_all("Stock Entry", filters={"pick_list": pl_name, "docstatus": 1}, pluck="name"):
+			frappe.get_doc("Stock Entry", entry).cancel()
 		frappe.get_doc("Pick List", pl_name).cancel()
 		self.assertEqual(frappe.db.get_value("Pick List", pl_name, ["docstatus", "fg_invoice_number"]), (2, number))
 		_, next_number = self._invoiced("integrandoMAS")

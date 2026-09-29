@@ -18,7 +18,7 @@ class TestJefeDeBodegaAPI(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
-		cls.world = fx.TestWorld()
+		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
 		cls.wh_a = cls.world.warehouse("FG8 Jefe API A")

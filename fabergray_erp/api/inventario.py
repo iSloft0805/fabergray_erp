@@ -63,6 +63,7 @@ from erpnext import get_default_company
 from erpnext.stock.doctype.stock_reconciliation.stock_reconciliation import get_difference_account
 
 from fabergray_erp.api.bodega import _require_login
+from fabergray_erp.fulfillment.stock_issue_service import issued_pending_delivery_qty
 from fabergray_erp.warehouses import ROOT_WAREHOUSE, warehouse_name
 
 PRICE_LIST = "Standard Selling"
@@ -382,6 +383,17 @@ def get_inventory_item_detail(item_code, warehouse=None):
         fields=["warehouse", "actual_qty", "reserved_qty", "projected_qty"],
         order_by="warehouse asc",
     )
+    # INVENTARIO-OUT-01 -- units issued at COMPLETAR PEDIDO already left
+    # actual_qty: they stop counting as reserved (native reserved_qty is
+    # Sales Order based) and projected_qty stops subtracting them twice.
+    # The native Bin may still show them reserved (no Delivery Note ever
+    # lowers it, see issued_pending_delivery_qty()); these rows carry the
+    # OPERATIONAL figures. Read-only, Bin is never written.
+    issued = issued_pending_delivery_qty([item_code])
+    for row in bin_rows:
+        issued_qty = min(issued.get((item_code, row.warehouse), 0.0), flt(row.reserved_qty))
+        row["reserved_qty"] = flt(row.reserved_qty) - issued_qty
+        row["projected_qty"] = flt(row.projected_qty) + issued_qty
     total_stock = _bin_totals([item_code]).get(item_code, 0.0)
 
     selling_rate = _selling_rates([item_code]).get(item_code)

@@ -86,12 +86,21 @@ all -- exactly like a zero-stock line (the Fulfillment Engine's own
 top-up row still carries the demand). Non-Delivery Pick Lists, Work Order
 Pick Lists and rows without a Sales Order line keep the native behaviour
 unchanged.
+
+INVENTARIO-OUT-01 -- `_get_pick_list_items()` below: the native claim other
+open Pick Lists hold on an item+warehouse (`picked_qty - delivered_qty` once
+submitted) also subtracts `transferred_qty`, the units the Material Issue
+created by COMPLETAR PEDIDO already took out of Bin.actual_qty (see
+stock_issue_service). Without it an issued Pick List keeps claiming stock
+that is already gone, and a new Pick List sees it missing twice. Same query
+as the native method otherwise, field for field.
 """
 
 from collections import OrderedDict
 
 import frappe
 from frappe import _
+from frappe.query_builder import Case
 from frappe.utils import flt
 
 from fabergray_erp.warehouses import non_picking_warehouses
@@ -161,6 +170,42 @@ class PickListPhysicalCountMixin:
             row.idx = idx
         if save:
             self.save()
+
+    def _get_pick_list_items(self, items):
+        pi = frappe.qb.DocType("Pick List")
+        pi_item = frappe.qb.DocType("Pick List Item")
+        query = (
+            frappe.qb.from_(pi)
+            .inner_join(pi_item)
+            .on(pi.name == pi_item.parent)
+            .select(
+                pi_item.item_code,
+                pi_item.warehouse,
+                pi_item.batch_no,
+                pi_item.serial_and_batch_bundle,
+                pi_item.serial_no,
+                (
+                    Case()
+                    .when(
+                        (pi_item.picked_qty > 0) & (pi_item.docstatus == 1),
+                        pi_item.picked_qty - pi_item.delivered_qty - pi_item.transferred_qty,
+                    )
+                    .else_(pi_item.stock_qty)
+                ).as_("picked_qty"),
+            )
+            .where(
+                (pi_item.item_code.isin([x.item_code for x in items]))
+                & ((pi_item.picked_qty > 0) | (pi_item.stock_qty > 0))
+                & (pi.status != "Completed")
+                & (pi.status != "Cancelled")
+                & (pi_item.docstatus != 2)
+            )
+        )
+
+        if self.name:
+            query = query.where(pi_item.parent != self.name)
+
+        return query.for_update().run(as_dict=True)
 
     def _fg_sales_order_line_warehouses(self):
         """{sales_order_item: warehouse} when this is a Delivery Pick List

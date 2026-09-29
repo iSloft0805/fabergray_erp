@@ -39,9 +39,10 @@ teardown case documented above.
 """
 
 from contextlib import contextmanager
+from datetime import timedelta
 
 import frappe
-from frappe.utils import add_days, nowdate
+from frappe.utils import add_days, get_datetime, now_datetime, nowdate
 
 COMPANY = "fabrigraysas"
 UOM = "Nos"
@@ -69,7 +70,13 @@ class TestWorld:
 	its cleanup once via `cls.addClassCleanup(cls.world.cleanup)`.
 	"""
 
-	def __init__(self):
+	def __init__(self, real_stock=False):
+		"""real_stock (INVENTARIO-OUT-01): stock_up() posts a real Stock
+		Reconciliation (stock_up_real()) in this world's OWN warehouses, for
+		suites that complete orders -- COMPLETAR PEDIDO now issues the stock
+		and negative stock is not allowed, so a Bin-only seed is no longer
+		enough there. Real warehouses keep the Bin-only seed."""
+		self.real_stock = real_stock
 		self._created = []  # [(doctype, name), ...] in creation order
 		self._shared_group_docs_created = False
 		self._isolate_invoice_numbering()
@@ -213,6 +220,9 @@ class TestWorld:
 		Bin.actual_qty, so get_bin()+save() is the correct, minimal fixture:
 		no SLE is ever created, so nothing here needs unwinding at all.
 		"""
+		if self.real_stock and ("Warehouse", warehouse) in self._created:
+			return self.stock_up_real(item_code, warehouse, qty, rate=rate)
+
 		from erpnext.stock.utils import get_bin
 
 		bin_doc = get_bin(item_code, warehouse)
@@ -241,12 +251,23 @@ class TestWorld:
         test must go through this TestWorld's explicit cleanup(), the same
 		as every other suite in this app -- nothing here is new risk, just a
 		second confirmed instance of the same root cause.
+
+		INVENTARIO-OUT-01 -- explicit posting datetime (set_posting_time=1),
+		see _seed_posting_datetime(): the WSL2 dev clock can step BACKWARDS
+		(Hyper-V TimeSync; "Time jumped backwards" in journald), so a
+		Material Issue created milliseconds after a "now" seed could be
+		posted before it and see 0 stock. Test fixture only -- the app's own
+		Material Issue keeps ERPNext's normal posting time.
 		"""
+		posting = self._seed_posting_datetime(item_code, warehouse)
 		doc = frappe.get_doc(
 			{
 				"doctype": "Stock Reconciliation",
 				"company": COMPANY,
 				"purpose": "Stock Reconciliation",
+				"set_posting_time": 1,
+				"posting_date": posting.date(),
+				"posting_time": posting.time(),
 				"expense_account": STOCK_ADJUSTMENT_ACCOUNT,
 				"cost_center": COST_CENTER,
 				"items": [
@@ -257,6 +278,26 @@ class TestWorld:
 		doc.insert()
 		doc.submit()
 		return self._track(doc)
+
+	@staticmethod
+	def _seed_posting_datetime(item_code, warehouse):
+		"""One datetime (date and time both derived from it, so crossing
+		midnight moves the date too) safely BEFORE whatever the test posts
+		next: one minute ago -- but never before this item/warehouse's own
+		latest movement, or ERPNext would replay that movement on top of the
+		seed (re-seeding 20 after an issue of 4 would end at 16)."""
+		posting = now_datetime() - timedelta(minutes=1)
+		last = frappe.get_all(
+			"Stock Ledger Entry",
+			filters={"item_code": item_code, "warehouse": warehouse, "is_cancelled": 0},
+			pluck="posting_datetime",
+			order_by="posting_datetime desc",
+			limit=1,
+		)
+		last = last[0] if last else None
+		if last and get_datetime(last) >= posting:
+			posting = get_datetime(last) + timedelta(milliseconds=1)
+		return posting
 
 	def temporary_opening_account(self, account_name=None):
 		"""A throwaway Account (account_type="Temporary", root_type="Equity",
@@ -478,9 +519,17 @@ class TestWorld:
 		doctype's own on_trash guard would hit the identical teardown
 		problem for the identical reason."""
 		frappe.set_user("Administrator")
+		# INVENTARIO-OUT-01: reverse every Material Issue first -- including
+		# those of Pick Lists a service created without this world tracking
+		# them (e.g. a remainder Pick List of a tracked Sales Order); otherwise
+		# cancelling the stock this world seeded would go negative.
+		for pick_list in self._pick_lists_of_tracked_documents():
+			self._cancel_stock_issues_of(pick_list)
 		for doctype, name in reversed(self._created):
 			if not frappe.db.exists(doctype, name):
 				continue
+			if doctype == "Pick List":
+				self._cancel_stock_issues_of(name)
 			doc = frappe.get_doc(doctype, name)
 			if doc.meta.is_submittable and doc.docstatus == 1:
 				if doctype == "Cartera Pago":
@@ -505,6 +554,29 @@ class TestWorld:
 			frappe.delete_doc(doctype, name, ignore_permissions=True, force=True, ignore_on_trash=True)
 		self._restore_invoice_numbering()
 		frappe.db.commit()
+
+	def _pick_lists_of_tracked_documents(self):
+		pick_lists = {name for doctype, name in self._created if doctype == "Pick List"}
+		sales_orders = [name for doctype, name in self._created if doctype == "Sales Order"]
+		if sales_orders:
+			pick_lists.update(
+				frappe.get_all(
+					"Pick List Item", filters={"sales_order": ["in", sales_orders]}, pluck="parent", distinct=True
+				)
+			)
+		return sorted(pick_lists)
+
+	@staticmethod
+	def _cancel_stock_issues_of(pick_list):
+		"""INVENTARIO-OUT-01: COMPLETAR PEDIDO creates a Material Issue linked
+		to the Pick List (Stock Entry.pick_list), which natively blocks
+		cancelling the Pick List -- cancel and delete it first. Its cancelled
+		Stock Ledger/GL rows go with _purge_stock_ledger_for_warehouse()."""
+		for name in frappe.get_all("Stock Entry", filters={"pick_list": pick_list}, pluck="name"):
+			entry = frappe.get_doc("Stock Entry", name)
+			if entry.docstatus == 1:
+				entry.cancel()
+			frappe.delete_doc("Stock Entry", name, ignore_permissions=True, force=True, ignore_on_trash=True)
 
 	@staticmethod
 	def _purge_stock_ledger_for_warehouse(warehouse):
