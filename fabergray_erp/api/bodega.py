@@ -16,6 +16,8 @@ from frappe.utils import flt, now_datetime
 from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
 from fabergray_erp.fulfillment.stock_issue_service import (
+	IncompleteStockIssueError,
+	controlled_pick_list_submit,
 	create_stock_issue,
 	get_stock_issue,
 	issued_pending_delivery_qty,
@@ -768,7 +770,9 @@ def _finish_picking(name):
 	leaves the Pick List a draft with nothing issued. Idempotent: a second
 	call (double click, retry, a concurrent request that waited on the lock)
 	finds the submitted Material Issue and returns already_completed=True
-	without creating anything.
+	without creating anything -- only when that issue covers every line; a
+	submitted Pick List with units still pending refuses with
+	IncompleteStockIssueError (see _throw_incomplete_stock_issue()).
 	"""
 	_require_login()
 
@@ -783,8 +787,11 @@ def _finish_picking(name):
 
 	if pl.docstatus == 1:
 		stock_entry = get_stock_issue(pl.name)
-		if stock_entry:
+		pending = pending_issue_rows(pl)
+		if stock_entry and not pending:
 			return _finish_picking_result(pl, stock_entry, already_completed=True)
+		if pending:
+			_throw_incomplete_stock_issue(pl, pending)
 
 	if pl.docstatus != 0:
 		frappe.throw(_("Este Pick List ya fue finalizado o cancelado."))
@@ -833,7 +840,8 @@ def _finish_picking(name):
 
 	frappe.db.savepoint(FINISH_PICKING_SAVEPOINT)
 	try:
-		pl.submit()
+		with controlled_pick_list_submit(pl.name):
+			pl.submit()
 		stock_entry = create_stock_issue(pl)
 	except frappe.QueryDeadlockError:
 		raise  # InnoDB already aborted the whole transaction (savepoint gone): finish_picking() retries it
@@ -848,6 +856,50 @@ def _finish_picking(name):
 		raise
 
 	return _finish_picking_result(pl, stock_entry.name if stock_entry else None, already_completed=False)
+
+
+def _throw_incomplete_stock_issue(pl, pending):
+	"""A SUBMITTED Pick List whose picked units did not all leave the
+	inventory: no Material Issue at all (finished before INVENTARIO-OUT-01)
+	or one that no longer covers every line (e.g. it was cancelled).
+	COMPLETAR PEDIDO never issues a submitted Pick List -- that is the
+	administrative historical review -- so it refuses with the exact state
+	instead of answering "already completed". Same structured-detail channel
+	as validate_stock_for_issue(): the exception's `detail` and the HTTP
+	error body's `fg_incomplete_stock_issue`."""
+	detail = {
+		"pick_list": pl.name,
+		"stock_entries": frappe.get_all(
+			"Stock Entry",
+			filters={"pick_list": pl.name, "purpose": "Material Issue", "docstatus": 1},
+			pluck="name",
+			order_by="creation asc",
+		),
+		"pending_rows": [
+			{
+				"pick_list_item": row.name,
+				"item_code": row.item_code,
+				"warehouse": row.warehouse,
+				"picked_qty": flt(row.picked_qty),
+				"delivered_qty": flt(row.delivered_qty),
+				"transferred_qty": flt(row.transferred_qty),
+				"pending_qty": qty,
+			}
+			for row, qty in pending
+		],
+	}
+	frappe.local.response["fg_incomplete_stock_issue"] = detail
+	exc = IncompleteStockIssueError()
+	exc.detail = detail
+	frappe.throw(
+		_(
+			"El Pick List {0} ya fue finalizado, pero su salida de inventario está incompleta: "
+			"{1} línea(s) con unidades alistadas sin descontar. No se descontó nada; "
+			"requiere revisión administrativa."
+		).format(pl.name, len(pending)),
+		title=_("Salida de inventario incompleta"),
+		exc=exc,
+	)
 
 
 def _finish_picking_result(pl, stock_entry, already_completed):

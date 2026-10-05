@@ -258,6 +258,16 @@ class TestWorld:
 		Material Issue created milliseconds after a "now" seed could be
 		posted before it and see 0 stock. Test fixture only -- the app's own
 		Material Issue keeps ERPNext's normal posting time.
+
+		INVENTARIO-OUT-01 -- the posting datetime alone is not enough: ERPNext
+		v16 looks up the previous SLE with `creation < the new SLE's creation`
+		too (stock_ledger.get_previous_sle_of_current_voucher(), the
+		sle_id/creation branch). A backward step of ~2 s between this seed and
+		the next movement left the seed's creation AFTER the Material Issue's
+		SLE, so ERPNext did not see it, computed 0 - 4 and raised
+		NegativeStockError (2 of 10 runs, captured live: MAT-RECO-2026-00109 /
+		00138). _pin_seed_creation() makes the seed unambiguously older --
+		test fixture only, production documents are never touched.
 		"""
 		posting = self._seed_posting_datetime(item_code, warehouse)
 		doc = frappe.get_doc(
@@ -271,13 +281,48 @@ class TestWorld:
 				"expense_account": STOCK_ADJUSTMENT_ACCOUNT,
 				"cost_center": COST_CENTER,
 				"items": [
-					{"item_code": item_code, "warehouse": warehouse, "qty": qty, "valuation_rate": rate}
+					{
+						"item_code": item_code,
+						"warehouse": warehouse,
+						"qty": qty,
+						"valuation_rate": rate,
+						# ERPNext refuses a 0 rate unless the row explicitly allows it.
+						"allow_zero_valuation_rate": 1 if not rate else 0,
+					}
 				],
 			}
 		)
 		doc.insert()
 		doc.submit()
+		self._pin_seed_creation(doc, posting)
 		return self._track(doc)
+
+	@staticmethod
+	def _pin_seed_creation(doc, posting):
+		"""Test seed only: set creation/modified of this Stock Reconciliation,
+		its rows and its Stock Ledger Entries to a moment at least one minute
+		in the past (never later than its own posting datetime), so every
+		movement the test creates afterwards -- even across a backward clock
+		step -- has a later creation and sees the seed. Raw UPDATE on exactly
+		this voucher's rows; ordering by (posting_datetime, creation) stays
+		consistent because the seed's posting is already the earliest of what
+		follows."""
+		creation = min(get_datetime(posting), now_datetime() - timedelta(minutes=1))
+		values = {"creation": creation, "name": doc.name}
+		frappe.db.sql(
+			"update `tabStock Reconciliation` set creation=%(creation)s, modified=%(creation)s where name=%(name)s",
+			values,
+		)
+		frappe.db.sql(
+			"update `tabStock Reconciliation Item` set creation=%(creation)s, modified=%(creation)s where parent=%(name)s",
+			values,
+		)
+		frappe.db.sql(
+			"""update `tabStock Ledger Entry` set creation=%(creation)s, modified=%(creation)s
+			where voucher_type='Stock Reconciliation' and voucher_no=%(name)s""",
+			values,
+		)
+		doc.creation = doc.modified = creation
 
 	@staticmethod
 	def _seed_posting_datetime(item_code, warehouse):

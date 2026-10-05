@@ -272,10 +272,30 @@ doc_events = {
 			"fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
 			"fabergray_erp.api.facturacion.guard_invoice_number_fields",
 		],
+		# INVENTARIO-OUT-01 -- un Pick List de entrega solo se somete con
+		# COMPLETAR PEDIDO (api.bodega.finish_picking()), que crea su Material
+		# Issue. Bodega necesita el permiso submit para ese flujo, así que el
+		# Submit directo (Desk/API/bulk) se bloquea aquí, server-side, para
+		# todo rol. Ver stock_issue_service.guard_pick_list_submit().
+		"before_submit": "fabergray_erp.fulfillment.stock_issue_service.guard_pick_list_submit",
 		"before_update_after_submit": [
 			"fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
 			"fabergray_erp.api.facturacion.guard_invoice_number_fields",
 		],
+	},
+	# INVENTARIO-OUT-01 -- un Material Issue vinculado a un Pick List nunca
+	# descuenta más de lo pendiente por Pick List Item (alistado - entregado
+	# - ya descontado): bloquea una segunda salida por Desk/API y deja pasar
+	# cancelar + enmendar. Ver stock_issue_service.guard_pick_list_stock_issue().
+	"Stock Entry": {
+		"validate": "fabergray_erp.fulfillment.stock_issue_service.guard_pick_list_stock_issue",
+	},
+	# INVENTARIO-OUT-01 -- una Sales Invoice que mueve stock (update_stock=1)
+	# nunca vuelve a descontar unidades que el Material Issue de COMPLETAR
+	# PEDIDO ya descontó (p. ej. create_delivery(pl, target="Sales Invoice")
+	# nativo desde Desk). Ver stock_issue_service.guard_sales_invoice_double_issue().
+	"Sales Invoice": {
+		"validate": "fabergray_erp.fulfillment.stock_issue_service.guard_sales_invoice_double_issue",
 	},
 	# Home Fabrigray -- Desk-navigation profile only (never a Doctype
 	# permission). See fabergray_erp/user_hooks.py's own module docstring

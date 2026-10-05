@@ -225,11 +225,26 @@ class TestReportShortageIdempotency(IntegrationTestCase):
         )
         pl_a = self.world.pick_list_for(so, self.wh.name)
         pl_b = self.world.pick_list_for(so, self.wh_b.name)
+        # create_pick_list(so) maps EVERY Sales Order line into each Pick List
+        # (parent_warehouse does not filter rows), and since Fase 28.4A each
+        # line is located only in its own warehouse -- so rows[0] is line A in
+        # both. Pick each row by its Sales Order line, never by position.
+        line_a, line_b = (i.name for i in so.items)
+
+        def row_for(pick_list_name, sales_order_item, warehouse):
+            (row,) = [
+                r for r in frappe.get_doc("Pick List", pick_list_name).locations
+                if r.sales_order_item == sales_order_item
+            ]
+            self.assertEqual(row.warehouse, warehouse)
+            return row.name
+
         with fx.as_user(self.bodega_user):
             bodega.start_picking(pl_a.name)
             bodega.start_picking(pl_b.name)
-            row_a = bodega.get_pick_list(pl_a.name)["rows"][0]["row_name"]
-            row_b = bodega.get_pick_list(pl_b.name)["rows"][0]["row_name"]
+        # Read after start_picking() (its save fixes the row identities).
+        row_a = row_for(pl_a.name, line_a, self.wh.name)
+        row_b = row_for(pl_b.name, line_b, self.wh_b.name)
 
         with fx.as_user(self.bodega_user):
             r_a = bodega.report_shortage(pl_a.name, row_a, qty_disponible=1, shortage_reason="Stock insuficiente")
@@ -240,8 +255,11 @@ class TestReportShortageIdempotency(IntegrationTestCase):
         self.assertNotEqual(r_a["name"], r_b["name"])
         self.assertFalse(r_a["already_exists"])
         self.assertFalse(r_b["already_exists"])
-        self.assertEqual(frappe.db.get_value("Reporte de Faltante", r_a["name"], "warehouse"), self.wh.name)
-        self.assertEqual(frappe.db.get_value("Reporte de Faltante", r_b["name"], "warehouse"), self.wh_b.name)
+        # report_shortage() files exactly the warehouse of the row it was given.
+        for report, row_name, warehouse in ((r_a, row_a, self.wh.name), (r_b, row_b, self.wh_b.name)):
+            self.assertEqual(frappe.db.get_value("Pick List Item", row_name, "warehouse"), warehouse)
+            self.assertEqual(frappe.db.get_value("Reporte de Faltante", report["name"], "warehouse"), warehouse)
+            self.assertEqual(frappe.db.get_value("Reporte de Faltante", report["name"], "pick_list_item"), row_name)
 
     # -- 10. Ciclo de vida: reporte Resuelto -------------------------------------
 

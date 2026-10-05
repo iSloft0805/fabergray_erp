@@ -20,6 +20,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, flt, get_datetime, nowdate
 
 from erpnext.stock import get_warehouse_account_map
+from erpnext.stock.doctype.stock_entry.stock_entry import StockEntry
 
 from fabergray_erp.api import bodega, facturacion, inventario
 from fabergray_erp.fulfillment import analyzer, stock_issue_service
@@ -31,7 +32,14 @@ from fabergray_erp.fulfillment.stock_issue_reconciliation import (
 	audit_pick_lists_without_stock_issue,
 	reconcile_historical_stock_issues,
 )
-from fabergray_erp.fulfillment.stock_issue_service import InsufficientStockForIssueError, get_stock_issue
+from fabergray_erp.fulfillment.stock_issue_service import (
+	DirectPickListSubmitError,
+	IncompleteStockIssueError,
+	InsufficientStockForIssueError,
+	PickListStockIssueOverflowError,
+	get_stock_issue,
+	pending_issue_rows,
+)
 from fabergray_erp.tests import fixtures as fx
 from fabergray_erp.tests import test_recorridos_api as recorridos_base
 from fabergray_erp.tests import test_recorridos_deliver_stop as deliver_base
@@ -584,7 +592,8 @@ class TestCompleteOrderStockIssue(_StockIssueMixin, IntegrationTestCase):
 		plain submit, no Material Issue."""
 		_so, pl = self._order((item, self.wh_liq, qty))
 		self._pick(pl)
-		frappe.get_doc("Pick List", pl).submit()
+		with stock_issue_service.controlled_pick_list_submit(pl):
+			frappe.get_doc("Pick List", pl).submit()
 		return pl
 
 	def test_audit_lists_only_completed_pick_lists_without_issue(self):
@@ -643,6 +652,345 @@ class TestCompleteOrderStockIssue(_StockIssueMixin, IntegrationTestCase):
 		with fx.as_user(self.bodega_user):
 			with self.assertRaises(frappe.PermissionError):
 				reconcile_historical_stock_issues(from_date=nowdate())
+
+	# =====================================================================
+	# Direct submit bypass -- only COMPLETAR PEDIDO submits a Delivery Pick List
+	# =====================================================================
+
+	def _picked_draft(self, qty=2):
+		item = self._item(self.wh_liq, stock=20)
+		_so, pl = self._order((item, self.wh_liq, qty))
+		self._pick(pl)
+		return item, pl
+
+	def _assert_direct_submit_refused(self, pl, item, user=None):
+		def submit():
+			frappe.get_doc("Pick List", pl).submit()
+
+		if user:
+			with fx.as_user(user):
+				self.assertRaises(DirectPickListSubmitError, submit)
+		else:
+			self.assertRaises(DirectPickListSubmitError, submit)
+		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
+		self.assertIsNone(get_stock_issue(pl))
+		self.assertEqual(_actual(item, self.wh_liq), 20)
+
+	def test_direct_submit_refused_for_bodega(self):
+		item, pl = self._picked_draft()
+		self.assertTrue(frappe.has_permission("Pick List", "submit", user=self.bodega_user))
+		self._assert_direct_submit_refused(pl, item, self.bodega_user)
+
+	def test_direct_submit_refused_for_jefe_de_bodega_with_stock_manager(self):
+		"""Production's jefebodega@: Jefe de Bodega + Bodega + Stock Manager.
+		Its submit permission comes from Bodega (Custom DocPerm replaces the
+		native Stock Manager rows for Pick List)."""
+		jefe = self.world.user(
+			f"fgout-jefe-{frappe.generate_hash(length=4).lower()}@example.com",
+			["Jefe de Bodega", "Bodega", "Stock Manager"],
+		)
+		self.world.warehouse_user_permission(jefe, self.wh_liq)
+		item, pl = self._picked_draft()
+		self.assertTrue(frappe.has_permission("Pick List", "submit", user=jefe))
+		self._assert_direct_submit_refused(pl, item, jefe)
+
+	def test_direct_submit_refused_for_stock_manager_and_facturacion(self):
+		stock_manager = self.world.user(
+			f"fgout-sm-{frappe.generate_hash(length=4).lower()}@example.com", ["Stock Manager"]
+		)
+		item, pl = self._picked_draft()
+		with fx.as_user(stock_manager):
+			with self.assertRaises((frappe.PermissionError, DirectPickListSubmitError)):
+				frappe.get_doc("Pick List", pl).submit()
+		self._assert_direct_submit_refused(pl, item, self.facturacion_user)
+
+	def test_direct_submit_refused_for_administrator_and_system_manager(self):
+		item, pl = self._picked_draft()
+		self._assert_direct_submit_refused(pl, item)  # Administrator
+		system_manager = self.world.user(
+			f"fgout-sysm-{frappe.generate_hash(length=4).lower()}@example.com", ["System Manager", "Stock Manager"]
+		)
+		with fx.as_user(system_manager):
+			with self.assertRaises((frappe.PermissionError, DirectPickListSubmitError)):
+				frappe.get_doc("Pick List", pl).submit()
+		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
+
+	def test_direct_submit_refused_through_the_api(self):
+		from frappe.client import submit as client_submit
+
+		item, pl = self._picked_draft()
+		doc = frappe.get_doc("Pick List", pl).as_dict()
+		doc["flags"] = {"fg_controlled_pick_list_submit": pl}  # client input never opens the door
+		with fx.as_user(self.bodega_user):
+			with self.assertRaises(DirectPickListSubmitError):
+				client_submit(doc)
+		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
+		self.assertEqual(_actual(item, self.wh_liq), 20)
+
+	def test_controlled_submit_is_scoped_to_one_pick_list_and_closes(self):
+		item, pl = self._picked_draft()
+		other_item, other = self._picked_draft()
+		with stock_issue_service.controlled_pick_list_submit(other):
+			self._assert_direct_submit_refused(pl, item)
+		self.assertIsNone(frappe.flags.get(stock_issue_service.CONTROLLED_SUBMIT_FLAG))
+		# Non-Delivery purposes keep the native flow.
+		self.assertIsNone(
+			stock_issue_service.guard_pick_list_submit(frappe._dict(name=pl, purpose="Material Transfer for Manufacture"))
+		)
+
+	def test_completar_pedido_submits_once_and_issues_once(self):
+		item, pl = self._picked_draft(qty=3)
+		first = self._complete(pl)
+		second = self._complete(pl)
+
+		self.assertFalse(first["already_completed"])
+		self.assertTrue(second["already_completed"])
+		self.assertEqual(first["stock_entry"], second["stock_entry"])
+		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 1)
+		self.assertEqual(len(_stock_issues(pl)), 1)
+		self.assertEqual(_actual(item, self.wh_liq), 17)
+		self.assertEqual(frappe.get_all("Pick List Item", filters={"parent": pl}, pluck="transferred_qty"), [3])
+		self.assertIsNone(frappe.flags.get(stock_issue_service.CONTROLLED_SUBMIT_FLAG))
+
+
+	# =====================================================================
+	# Forward flow hardening -- structured shortage, pending_qty, links,
+	# valuation independence, rollback after SLE, Stock Entry guard
+	# =====================================================================
+
+	def test_insufficient_stock_returns_structured_shortage_and_writes_nothing(self):
+		enough = self._item(self.wh_liq, stock=20)
+		short = self._item(self.wh_var, stock=2)
+		so, pl = self._order((enough, self.wh_liq, 3), (short, self.wh_var, 5))
+		self._pick(pl)
+		frappe.local.response.pop("fg_stock_shortages", None)
+
+		with self.assertRaises(InsufficientStockForIssueError) as ctx:
+			self._complete(pl)
+
+		expected = [
+			{
+				"item_code": short,
+				"warehouse": self.wh_var,
+				"required_qty": 5,
+				"available_qty": 2,
+				"shortage_qty": 3,
+			}
+		]
+		self.assertEqual(ctx.exception.shortages, expected)
+		self.assertEqual(frappe.local.response.pop("fg_stock_shortages"), expected)
+		# All or nothing: the line that had stock was not issued either.
+		self.assertEqual(frappe.db.count("Stock Entry", {"pick_list": pl}), 0)
+		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
+		self.assertEqual((_actual(enough, self.wh_liq), _actual(short, self.wh_var)), (20, 2))
+		self.assertEqual(flt(frappe.db.get_value("Sales Order", so.name, "per_picked")), 0)
+
+	def test_pending_qty_is_picked_minus_delivered_minus_transferred_never_negative(self):
+		item = self._item(self.wh_liq, stock=20)
+		_so, pl = self._order((item, self.wh_liq, 4))
+		self._pick(pl)
+		doc = frappe.get_doc("Pick List", pl)
+		row = doc.locations[0]
+
+		for picked, delivered, transferred, expected in (
+			(4, 0, 0, [4]),
+			(4, 1, 1, [2]),
+			(4, 0, 4, []),  # fully issued
+			(4, 4, 0, []),  # fully delivered (legacy stock invoice)
+			(4, 2, 3, []),  # over-covered: negative -> nothing, never a negative qty
+			(0, 0, 0, []),
+		):
+			row.picked_qty, row.delivered_qty, row.transferred_qty = picked, delivered, transferred
+			self.assertEqual([qty for _r, qty in pending_issue_rows(doc)], expected, (picked, delivered, transferred))
+
+	def test_pending_zero_line_is_never_issued_again(self):
+		item = self._item(self.wh_liq, stock=20)
+		_so, pl = self._order((item, self.wh_liq, 4))
+		self._pick(pl)
+		first = self._complete(pl)
+		doc = frappe.get_doc("Pick List", pl)
+		counts = _ledger_counts(item)
+
+		self.assertEqual(pending_issue_rows(doc), [])
+		self.assertIsNone(stock_issue_service.create_stock_issue(doc))
+		again = self._complete(pl)
+
+		self.assertTrue(again["already_completed"])
+		self.assertEqual(again["stock_entry"], first["stock_entry"])
+		self.assertEqual(_ledger_counts(item), counts)
+		self.assertEqual(_actual(item, self.wh_liq), 16)
+
+	def test_multiline_issue_is_one_entry_linked_to_pick_list_and_every_pick_list_item(self):
+		a = self._item(self.wh_liq, stock=20)
+		b = self._item(self.wh_liq, stock=20)
+		c = self._item(self.wh_var, stock=20)
+		_so, pl = self._order((a, self.wh_liq, 5), (b, self.wh_liq, 2), (c, self.wh_var, 3))
+		self._pick(pl, {b: 1})  # partial line: issues 1, not 2
+
+		result = self._complete(pl)
+
+		self.assertEqual(len(_stock_issues(pl)), 1)
+		entry = frappe.get_doc("Stock Entry", result["stock_entry"])
+		self.assertEqual((entry.purpose, entry.pick_list, entry.docstatus), ("Material Issue", pl, 1))
+		# Current date/time, never backdated.
+		self.assertEqual((entry.set_posting_time, str(entry.posting_date)), (0, nowdate()))
+		rows = {r.name: r for r in frappe.get_doc("Pick List", pl).locations}
+		self.assertEqual(len(entry.items), 3)
+		self.assertEqual({d.pick_list_item for d in entry.items}, set(rows))
+		for d in entry.items:
+			row = rows[d.pick_list_item]
+			self.assertEqual((d.item_code, d.s_warehouse, d.t_warehouse), (row.item_code, row.warehouse, None))
+			self.assertEqual(flt(d.qty), flt(row.picked_qty))
+			self.assertEqual(flt(row.transferred_qty), flt(row.picked_qty))
+		self.assertEqual(
+			sorted((d.item_code, flt(d.qty)) for d in entry.items), sorted([(a, 5), (b, 1), (c, 3)])
+		)
+
+	def test_valuation_rate_zero_or_one_never_blocks_the_issue(self):
+		for rate in (0, 1):
+			with self.subTest(rate=rate):
+				item = self._item(self.wh_liq)
+				self.world.stock_up_real(item, self.wh_liq, 10, rate=rate)
+				_so, pl = self._order((item, self.wh_liq, 4))
+				self._pick(pl)
+
+				result = self._complete(pl)
+
+				entry = frappe.get_doc("Stock Entry", result["stock_entry"])
+				self.assertEqual(entry.docstatus, 1)
+				self.assertEqual([flt(d.qty) for d in entry.items], [4])
+				self.assertEqual(_actual(item, self.wh_liq), 6)
+				self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 1)
+
+	def test_failure_after_stock_ledger_is_written_rolls_back_everything(self):
+		item = self._item(self.wh_liq, stock=20)
+		so, pl = self._order((item, self.wh_liq, 4))
+		self._pick(pl)
+		counts = _ledger_counts(item)
+		seen = {}
+
+		def fail_after_sle(entry):
+			# on_submit already posted the SLE, moved Bin and wrote transferred_qty.
+			seen["sle"] = frappe.db.count("Stock Ledger Entry", {"voucher_no": entry.name, "is_cancelled": 0})
+			seen["actual"] = _actual(item, self.wh_liq)
+			raise frappe.ValidationError("GL failure simulated")
+
+		with patch.object(StockEntry, "make_gl_entries", autospec=True, side_effect=fail_after_sle):
+			with self.assertRaises(frappe.ValidationError):
+				self._complete(pl)
+
+		self.assertEqual((seen["sle"], seen["actual"]), (1, 16))  # it really failed mid-posting
+		self.assertEqual(_ledger_counts(item), counts)
+		self.assertEqual(frappe.db.count("Stock Entry", {"pick_list": pl}), 0)
+		self.assertEqual(_actual(item, self.wh_liq), 20)
+		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
+		self.assertEqual(frappe.get_all("Pick List Item", filters={"parent": pl}, pluck="transferred_qty"), [0])
+		self.assertEqual(flt(frappe.db.get_value("Sales Order", so.name, "per_picked")), 0)
+
+		# Nothing half-applied: the same Pick List completes normally afterwards.
+		result = self._complete(pl)
+		self.assertFalse(result["already_completed"])
+		self.assertEqual(_actual(item, self.wh_liq), 16)
+
+	def test_submitted_pick_list_without_issue_is_reported_incomplete(self):
+		item = self._item(self.wh_liq, stock=20)
+		legacy = self._legacy_completed_pick_list(item, 4)
+		frappe.local.response.pop("fg_incomplete_stock_issue", None)
+
+		with self.assertRaises(IncompleteStockIssueError) as ctx:
+			self._complete(legacy)
+
+		detail = ctx.exception.detail
+		self.assertEqual(frappe.local.response.pop("fg_incomplete_stock_issue"), detail)
+		self.assertEqual((detail["pick_list"], detail["stock_entries"]), (legacy, []))
+		self.assertEqual(
+			[(r["item_code"], r["warehouse"], r["pending_qty"]) for r in detail["pending_rows"]],
+			[(item, self.wh_liq, 4)],
+		)
+		self.assertEqual(frappe.db.count("Stock Entry", {"pick_list": legacy}), 0)
+		self.assertEqual(_actual(item, self.wh_liq), 20)
+
+	def _manual_issue(self, pl, row, qty):
+		entry = frappe.new_doc("Stock Entry")
+		entry.purpose = "Material Issue"
+		entry.company = fx.COMPANY
+		entry.pick_list = pl
+		entry.set_stock_entry_type()
+		entry.append(
+			"items",
+			{
+				"item_code": row.item_code,
+				"s_warehouse": row.warehouse,
+				"qty": qty,
+				"transfer_qty": qty,
+				"uom": row.stock_uom,
+				"stock_uom": row.stock_uom,
+				"conversion_factor": 1,
+				"pick_list_item": row.name,
+			},
+		)
+		return entry
+
+	def test_stock_entry_guard_refuses_a_second_issue_for_the_same_pick_list(self):
+		item = self._item(self.wh_liq, stock=20)
+		_so, pl = self._order((item, self.wh_liq, 4))
+		self._pick(pl)
+		self._complete(pl)
+		row = frappe.get_doc("Pick List", pl).locations[0]
+
+		with self.assertRaises(PickListStockIssueOverflowError):
+			self._manual_issue(pl, row, 1).insert()  # Administrator, from Desk/API
+
+		self.assertEqual(len(_stock_issues(pl)), 1)
+		self.assertEqual(_actual(item, self.wh_liq), 16)
+
+	def test_stock_entry_guard_refuses_unlinked_foreign_or_draft_lines(self):
+		item = self._item(self.wh_liq, stock=20)
+		_so, done = self._order((item, self.wh_liq, 2))
+		self._pick(done)
+		self._complete(done)
+		_so, draft = self._order((item, self.wh_liq, 3))
+		self._pick(draft)
+		draft_row = frappe.get_doc("Pick List", draft).locations[0]
+
+		unlinked = self._manual_issue(done, draft_row, 1)
+		unlinked.items[0].pick_list_item = None
+		foreign = self._manual_issue(done, draft_row, 1)  # row of another Pick List
+		on_draft = self._manual_issue(draft, draft_row, 1)  # Pick List not finished
+		for entry in (unlinked, foreign, on_draft):
+			with self.assertRaises(PickListStockIssueOverflowError):
+				entry.insert()
+		self.assertEqual(_actual(item, self.wh_liq), 18)
+
+	def test_stock_entry_guard_allows_cancel_and_amend(self):
+		item = self._item(self.wh_liq, stock=20)
+		_so, pl = self._order((item, self.wh_liq, 4))
+		self._pick(pl)
+		original = frappe.get_doc("Stock Entry", self._complete(pl)["stock_entry"])
+
+		original.cancel()
+		self.assertEqual(_actual(item, self.wh_liq), 20)
+		self.assertEqual(frappe.get_all("Pick List Item", filters={"parent": pl}, pluck="transferred_qty"), [0])
+		# Cancelled issue: COMPLETAR PEDIDO reports it, never re-issues on its own.
+		with self.assertRaises(IncompleteStockIssueError):
+			self._complete(pl)
+		self.assertEqual(_actual(item, self.wh_liq), 20)
+
+		# Same as Desk's Amend (copy_doc(from_amend): no_copy fields such as
+		# pick_list_item are kept), back to draft.
+		amended = frappe.copy_doc(original)
+		amended.docstatus = 0
+		amended.amended_from = original.name
+		self.assertEqual([d.pick_list_item for d in amended.items], [d.pick_list_item for d in original.items])
+		amended.insert()
+		amended.submit()
+
+		self.assertEqual(_actual(item, self.wh_liq), 16)
+		self.assertEqual(frappe.get_all("Pick List Item", filters={"parent": pl}, pluck="transferred_qty"), [4])
+		result = self._complete(pl)
+		self.assertTrue(result["already_completed"])
+		self.assertEqual(result["stock_entry"], amended.name)
+		self.assertEqual(_actual(item, self.wh_liq), 16)
 
 
 def _sum_by_account(rows, field):

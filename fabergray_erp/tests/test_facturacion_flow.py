@@ -37,6 +37,7 @@ from erpnext.stock.doctype.pick_list.pick_list import create_delivery
 from erpnext.stock.utils import get_bin
 
 from fabergray_erp.api import bodega
+from fabergray_erp.fulfillment.stock_issue_service import SalesInvoiceDoubleIssueError, controlled_pick_list_submit
 from fabergray_erp.tests import fixtures as fx
 
 EXTRA_TEST_RECORD_DEPENDENCIES = []
@@ -184,75 +185,55 @@ class TestFacturacionFullFlow(IntegrationTestCase):
 		return so, frappe.get_doc("Pick List", pl.name)
 
 	def test_full_flow_create_submit_cancel(self):
+		"""INVENTARIO-OUT-01 contract (1ea7dad): COMPLETAR PEDIDO takes the
+		stock out once, through ONE Material Issue; the native stock Sales
+		Invoice (create_delivery(..., target="Sales Invoice"), update_stock=1)
+		is then refused (stock_issue_service.guard_sales_invoice_double_
+		issue()) -- no second Stock Ledger row, Bin unchanged, transferred_qty
+		not doubled, still exactly one Material Issue. Billing itself is
+		mark_as_invoiced(), which moves no stock."""
+		qty_start = _actual_qty(self.item.name, self.wh.name)
 		so, pl = self._submitted_pick_list(qty=5, rate=250)
-		so_item_name = so.items[0].name
-		pl_row_name = pl.locations[0].name
 
-		# -- Precondition: Pick List submitted, nothing delivered yet ------
+		# -- Precondition: Pick List submitted, nothing delivered/billed ----
 		self.assertEqual(pl.docstatus, 1)
 		self.assertEqual(pl.delivery_status, "Not Delivered")
 		self.assertEqual(flt(pl.per_delivered), 0)
 		self.assertEqual(flt(pl.locations[0].delivered_qty), 0)
-
 		so_before = frappe.get_doc("Sales Order", so.name)
 		self.assertEqual(flt(so_before.per_billed), 0)
 		self.assertEqual(so_before.billing_status, "Not Billed")
 
-		qty_before = _actual_qty(self.item.name, self.wh.name)
+		# -- The stock left once, through the Material Issue ---------------
+		(issue,) = frappe.get_all(
+			"Stock Entry", filters={"pick_list": pl.name, "docstatus": 1}, fields=["name", "purpose"]
+		)
+		self.assertEqual(issue.purpose, "Material Issue")
+		entry = frappe.get_doc("Stock Entry", issue.name)
+		self.assertEqual([(d.pick_list_item, flt(d.qty)) for d in entry.items], [(pl.locations[0].name, 5)])
+		self.assertEqual(flt(pl.locations[0].transferred_qty), 5)
+		self.assertEqual(_actual_qty(self.item.name, self.wh.name), qty_start - 5)
+		sle_before = frappe.db.count("Stock Ledger Entry", {"item_code": self.item.name, "is_cancelled": 0})
 
-		# -- Real Facturación session, real native flow, temporary
-		# accounting override (see TestFacturacionAccountingPrecondition) --
-		with fx.as_user(self.facturacion_user), fx.company_defaults(
-			default_income_account=_VALID_INCOME_ACCOUNT
-		):
-			si = create_delivery(pl.name, target="Sales Invoice")
-			self.world.track_existing("Sales Invoice", si.name)
+		# -- The native stock invoice is refused, before anything is written
+		with fx.as_user(self.facturacion_user), self.assertRaises(SalesInvoiceDoubleIssueError) as ctx:
+			create_delivery(pl.name, target="Sales Invoice")
+		self.assertIn(issue.name, str(ctx.exception))
 
-			# -- Draft Sales Invoice: native field mapping from Pick List --
-			self.assertEqual(si.update_stock, 1)
-			self.assertEqual(len(si.items), 1)
-			si_item = si.items[0]
-			self.assertEqual(flt(si_item.qty), 5)  # picked_qty(5) - delivered_qty(0)
-			self.assertEqual(flt(si_item.rate), 250)  # preserved from Sales Order Item
-			self.assertEqual(si_item.against_pick_list, pl.name)
-			self.assertEqual(si_item.pick_list_item, pl_row_name)
-			self.assertEqual(si_item.so_detail, so_item_name)
-			self.assertEqual(si_item.warehouse, self.wh.name)
-
-			si.submit()
-			self.assertEqual(si.docstatus, 1)
-
-			# -- After submit: Pick List / Sales Order / Bin all updated
-			# through ERPNext's own native update_prevdoc_status() chain --
-			pl_after = frappe.get_doc("Pick List", pl.name)
-			self.assertEqual(flt(pl_after.locations[0].delivered_qty), 5)
-			self.assertEqual(pl_after.delivery_status, "Fully Delivered")
-			self.assertEqual(flt(pl_after.per_delivered), 100)
-			# Confirms the queue-rule contract test below, live: fully
-			# delivered now genuinely means "Completed".
-			self.assertEqual(pl_after.status, "Completed")
-
-			so_after = frappe.get_doc("Sales Order", so.name)
-			self.assertEqual(flt(so_after.per_billed), 100)
-			self.assertEqual(so_after.billing_status, "Fully Billed")
-
-			self.assertEqual(_actual_qty(self.item.name, self.wh.name), qty_before - 5)
-
-			si.cancel()
-			self.assertEqual(si.docstatus, 2)
-
-			# -- After cancel: everything back to its initial state --------
-			pl_final = frappe.get_doc("Pick List", pl.name)
-			self.assertEqual(flt(pl_final.locations[0].delivered_qty), 0)
-			self.assertEqual(pl_final.delivery_status, "Not Delivered")
-			self.assertEqual(flt(pl_final.per_delivered), 0)
-			self.assertEqual(pl_final.status, "Open")
-
-			so_final = frappe.get_doc("Sales Order", so.name)
-			self.assertEqual(flt(so_final.per_billed), 0)
-			self.assertEqual(so_final.billing_status, "Not Billed")
-
-			self.assertEqual(_actual_qty(self.item.name, self.wh.name), qty_before)
+		self.assertEqual(_actual_qty(self.item.name, self.wh.name), qty_start - 5)
+		self.assertEqual(
+			frappe.db.count("Stock Ledger Entry", {"item_code": self.item.name, "is_cancelled": 0}), sle_before
+		)
+		self.assertEqual(
+			frappe.get_all("Sales Invoice Item", filters={"against_pick_list": pl.name}, pluck="parent"), []
+		)
+		pl_after = frappe.get_doc("Pick List", pl.name)
+		self.assertEqual(flt(pl_after.locations[0].transferred_qty), 5)
+		self.assertEqual(flt(pl_after.locations[0].delivered_qty), 0)
+		self.assertEqual(frappe.db.count("Stock Entry", {"pick_list": pl.name, "docstatus": 1}), 1)
+		so_after = frappe.get_doc("Sales Order", so.name)
+		self.assertEqual(flt(so_after.per_billed), 0)
+		self.assertEqual(so_after.billing_status, "Not Billed")
 
 
 class TestFacturacionQueueContract(IntegrationTestCase):
@@ -311,28 +292,38 @@ class TestFacturacionQueueContract(IntegrationTestCase):
 		self.assertTrue(self._is_ready_to_invoice(pl_doc))
 
 	def test_fully_invoiced_pick_list_is_completed_and_excluded(self):
+		"""Built on a legacy Pick List (submitted through the controlled
+		door, NO Material Issue): after COMPLETAR PEDIDO a stock-moving
+		Sales Invoice is refused (INVENTARIO-OUT-01), so this is the only
+		Pick List whose native invoice can still reach Fully Delivered
+		without discounting the same units twice. The line carries its own
+		income_account -- Company is never overridden."""
 		so = self.world.submitted_sales_order(self.item.name, self.wh.name, 5, self.customer.name, rate=100)
 		pl = self.world.pick_list_for(so, self.wh.name)
 		with fx.as_user(self.bodega_user):
 			bodega.start_picking(pl.name)
 			for row in bodega.get_pick_list(pl.name)["rows"]:
 				bodega.set_picked_qty(pl.name, row["row_name"], row["qty_solicitada"])
-			bodega.finish_picking(pl.name)
+		with controlled_pick_list_submit(pl.name):
+			frappe.get_doc("Pick List", pl.name).submit()
+		self.assertEqual(frappe.db.count("Stock Entry", {"pick_list": pl.name}), 0)
 
-		with fx.company_defaults(default_income_account=_VALID_INCOME_ACCOUNT):
-			si = create_delivery(pl.name, target="Sales Invoice")
-			self.world.track_existing("Sales Invoice", si.name)
-			si.submit()
+		si = create_delivery(pl.name, target="Sales Invoice")
+		self.world.track_existing("Sales Invoice", si.name)
+		for row in si.items:
+			row.income_account = _VALID_INCOME_ACCOUNT
+		si.save()
+		si.submit()
 
-			pl_doc = frappe.get_doc("Pick List", pl.name)
-			self.assertEqual(pl_doc.status, "Completed")
-			self.assertEqual(pl_doc.delivery_status, "Fully Delivered")
+		pl_doc = frappe.get_doc("Pick List", pl.name)
+		self.assertEqual(pl_doc.status, "Completed")
+		self.assertEqual(pl_doc.delivery_status, "Fully Delivered")
 
-			# Now that it's genuinely done, the corrected condition
-			# correctly EXCLUDES it -- nothing left to invoice:
-			self.assertFalse(self._is_ready_to_invoice(pl_doc))
+		# Now that it's genuinely done, the corrected condition
+		# correctly EXCLUDES it -- nothing left to invoice:
+		self.assertFalse(self._is_ready_to_invoice(pl_doc))
 
-			si.cancel()  # restore, so class cleanup can delete cleanly
+		si.cancel()  # restore, so class cleanup can delete cleanly
 
 
 class TestFacturacionMultiSalesOrderGuardrail(IntegrationTestCase):

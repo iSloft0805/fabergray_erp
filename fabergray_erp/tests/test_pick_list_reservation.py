@@ -41,6 +41,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import flt
 
 from fabergray_erp.api import bodega
+from fabergray_erp.fulfillment.stock_issue_service import controlled_pick_list_submit
 from fabergray_erp.tests import fixtures as fx
 
 EXTRA_TEST_RECORD_DEPENDENCIES = []
@@ -408,8 +409,11 @@ class TestPickListReservation(IntegrationTestCase):
 		self._pick_fully(pl.name)
 		self._reserve_pick_list(pl)
 
+		# INVENTARIO-OUT-01: a direct submit of a Delivery Pick List is refused
+		# by stock_issue_service.guard_pick_list_submit(); opening the same
+		# controlled door finish_picking() uses isolates ERPNext's own gate.
 		pl.reload()
-		with self.assertRaises(frappe.ValidationError):
+		with self.assertRaises(frappe.ValidationError), controlled_pick_list_submit(pl.name):
 			pl.submit()
 
 		pl.reload()
@@ -417,5 +421,6 @@ class TestPickListReservation(IntegrationTestCase):
 
 		pl.cancel_stock_reservation_entries()
 		pl.reload()
-		pl.submit()  # native call, not finish_picking() -- proves it's ERPNext's own gate, not ours
+		with controlled_pick_list_submit(pl.name):
+			pl.submit()  # native call, not finish_picking() -- proves it's ERPNext's own gate, not ours
 		self.assertEqual(pl.docstatus, 1)

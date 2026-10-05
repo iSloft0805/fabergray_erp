@@ -16,6 +16,7 @@ from erpnext.stock.doctype.pick_list.pick_list import create_delivery
 from erpnext.stock.utils import get_bin
 
 from fabergray_erp.api import bodega, facturacion
+from fabergray_erp.fulfillment.stock_issue_service import controlled_pick_list_submit
 from fabergray_erp.tests import fixtures as fx
 
 EXTRA_TEST_RECORD_DEPENDENCIES = []
@@ -60,16 +61,47 @@ class TestFacturacionApi(IntegrationTestCase):
 			bodega.finish_picking(pl.name)
 		return so, frappe.get_doc("Pick List", pl.name)
 
-	def _invoice_fully(self, pl):
-		"""Real native flow (Commit 21.1) -- invoices the whole Pick List so
-		its delivery_status becomes Fully Delivered."""
-		with fx.as_user(self.facturacion_user), fx.company_defaults(
-			default_income_account=_VALID_INCOME_ACCOUNT
-		):
+	def _legacy_submitted_pick_list(self, qty, rate=100):
+		"""A Pick List completed the pre-INVENTARIO-OUT-01 way: picked through
+		the real Bodega flow, submitted through the controlled door, NO
+		Material Issue (transferred_qty 0). The only Pick List a stock-moving
+		Sales Invoice may still deliver -- after COMPLETAR PEDIDO the stock
+		already left, and stock_issue_service.guard_sales_invoice_double_
+		issue() refuses a second outflow. Used to reach Partly/Fully
+		Delivered for the queue/detail filters below without ever
+		discounting the same units twice."""
+		so = self.world.submitted_sales_order(self.item.name, self.wh.name, qty, self.customer.name, rate=rate)
+		pl = self.world.pick_list_for(so, self.wh.name)
+		with fx.as_user(self.bodega_user):
+			bodega.start_picking(pl.name)
+			for row in bodega.get_pick_list(pl.name)["rows"]:
+				bodega.set_picked_qty(pl.name, row["row_name"], row["qty_solicitada"])
+		with controlled_pick_list_submit(pl.name):
+			frappe.get_doc("Pick List", pl.name).submit()
+		pl = frappe.get_doc("Pick List", pl.name)
+		self.assertEqual(frappe.db.count("Stock Entry", {"pick_list": pl.name}), 0)
+		self.assertEqual(sum(flt(r.transferred_qty) for r in pl.locations), 0)
+		return so, pl
+
+	def _stock_invoice(self, pl, qty=None):
+		"""Native stock Sales Invoice (Commit 21.1 flow) of a legacy Pick
+		List -- the line carries its own income_account, so Company is never
+		overridden. `qty` < picked leaves it Partly Delivered."""
+		with fx.as_user(self.facturacion_user):
 			si = create_delivery(pl.name, target="Sales Invoice")
 			self.world.track_existing("Sales Invoice", si.name)
+			for row in si.items:
+				row.income_account = _VALID_INCOME_ACCOUNT
+			if qty is not None:
+				si.items[0].qty = qty
+			si.save()
 			si.submit()
 		return si
+
+	def _invoice_fully(self, pl):
+		"""Invoices the whole (legacy) Pick List so its delivery_status
+		becomes Fully Delivered."""
+		return self._stock_invoice(pl)
 
 	def _amended_sales_order(self, qty, rate=100):
 		"""A real, submitted, once-amended Sales Order -- PEDIDO-N cancelled
@@ -107,39 +139,11 @@ class TestFacturacionApi(IntegrationTestCase):
 		self.assertIn(pl.name, names)
 
 	def test_partly_delivered_pick_list_appears(self):
-		so, pl = self._submitted_pick_list(qty=10, rate=100)
-		# Invoice only part of it -- reduce what's picked to leave a
-		# remainder by invoicing less than the full picked_qty via a manual
-		# partial Sales Invoice built the same way create_delivery() would,
-		# is unnecessary here: cancelling after a full picked_qty=10 pick,
-		# simplest real way to reach Partly Delivered without a second
-		# native endpoint is to invoice the Pick List, then invoice a
-		# second Pick List against the remainder of the SAME order -- but
-		# the simplest, most direct real reproduction is to set picked_qty
-		# short of stock_qty from the start. Rebuild with a short pick.
-		so2 = self.world.submitted_sales_order(self.item.name, self.wh.name, 10, self.customer.name, rate=100)
-		pl2 = self.world.pick_list_for(so2, self.wh.name)
-		with fx.as_user(self.bodega_user):
-			bodega.start_picking(pl2.name)
-			rows = bodega.get_pick_list(pl2.name)["rows"]
-			bodega.set_picked_qty(pl2.name, rows[0]["row_name"], 10)
-			bodega.finish_picking(pl2.name)
-
-		pl2 = frappe.get_doc("Pick List", pl2.name)
-		with fx.as_user(self.facturacion_user), fx.company_defaults(
-			default_income_account=_VALID_INCOME_ACCOUNT
-		):
-			# Invoice with a client-supplied target_doc whose item qty is
-			# reduced below the full picked_qty, so the Pick List ends up
-			# Partly Delivered, not Fully Delivered -- create_delivery()
-			# itself always proposes the full remaining qty, so the partial
-			# amount is applied the same way a human editing the invoice
-			# draft before submitting it would.
-			si = create_delivery(pl2.name, target="Sales Invoice")
-			si.items[0].qty = 4
-			si.save()
-			self.world.track_existing("Sales Invoice", si.name)
-			si.submit()
+		"""Partly Delivered (4 of 10 invoiced) stays in the queue. Built on a
+		legacy Pick List (no Material Issue) -- see _legacy_submitted_pick_
+		list()."""
+		_, pl2 = self._legacy_submitted_pick_list(qty=10, rate=100)
+		self._stock_invoice(pl2, qty=4)
 
 		pl2_after = frappe.get_doc("Pick List", pl2.name)
 		self.assertEqual(pl2_after.delivery_status, "Partly Delivered")
@@ -149,7 +153,7 @@ class TestFacturacionApi(IntegrationTestCase):
 		self.assertIn(pl2_after.name, names)
 
 	def test_fully_delivered_pick_list_does_not_appear(self):
-		_, pl = self._submitted_pick_list(qty=2, rate=100)
+		_, pl = self._legacy_submitted_pick_list(qty=2, rate=100)
 		self._invoice_fully(pl)
 		pl_after = frappe.get_doc("Pick List", pl.name)
 		self.assertEqual(pl_after.delivery_status, "Fully Delivered")
@@ -340,7 +344,11 @@ class TestFacturacionApi(IntegrationTestCase):
 		)
 		pl.insert()
 		self.world.track_existing("Pick List", pl.name)
-		pl.submit()
+		# INVENTARIO-OUT-01: a direct submit of a Delivery Pick List is refused by
+		# stock_issue_service.guard_pick_list_submit(); this fixture opens the same
+		# controlled door finish_picking() uses.
+		with controlled_pick_list_submit(pl.name):
+			pl.submit()
 
 		with fx.as_user(self.facturacion_user):
 			with self.assertRaises(frappe.ValidationError):
@@ -354,7 +362,7 @@ class TestFacturacionApi(IntegrationTestCase):
 				facturacion.get_pick_list_for_facturacion(pl.name)
 
 	def test_fully_delivered_pick_list_rejected_in_detail(self):
-		_, pl = self._submitted_pick_list(qty=2, rate=100)
+		_, pl = self._legacy_submitted_pick_list(qty=2, rate=100)
 		self._invoice_fully(pl)
 		with fx.as_user(self.facturacion_user):
 			with self.assertRaises(frappe.ValidationError):

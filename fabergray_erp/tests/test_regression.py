@@ -779,14 +779,19 @@ class TestStaticGuardrails(IntegrationTestCase):
 			)
 
 	def test_finish_picking_uses_native_submit_not_a_manual_docstatus_flip(self):
-		source = inspect.getsource(bodega.finish_picking)
+		# INVENTARIO-OUT-01 (1ea7dad): the whitelisted finish_picking() only
+		# wraps _finish_picking() in the deadlock retry; the submit lives there.
+		wrapper = inspect.getsource(bodega.finish_picking)
+		self.assertIn("_finish_picking", wrapper)
+		source = inspect.getsource(bodega._finish_picking)
 		self.assertIn("pl.submit()", source)
-		self.assertNotRegex(
-			source,
-			r"docstatus\s*=\s*1",
-			"finish_picking() must submit the Pick List through Document.submit(), "
-			"never by assigning docstatus directly",
-		)
+		for code in (wrapper, source):
+			self.assertNotRegex(
+				code,
+				r"docstatus\s*=\s*1",
+				"finish_picking() must submit the Pick List through Document.submit(), "
+				"never by assigning docstatus directly",
+			)
 
 	def test_only_one_reporte_de_faltante_insert_path_exists(self):
 		"""Commit 9: _insert_shortage_report() must be the only place in
@@ -995,27 +1000,31 @@ class TestFabrigrayWorkspace(IntegrationTestCase):
 		self.assertFalse(frappe.get_doc("Workspace", "Fabrigray ERP").module)
 
 	def test_workspace_roles(self):
+		# Recorrido (24.2), Cartera (27.2), Producción + Jefe de Producción (28.3)
+		# joined the committed Workspace after Commit 22.
 		roles = set(frappe.get_all("Has Role", filters={"parent": "Fabrigray ERP", "parenttype": "Workspace"}, pluck="role"))
-		self.assertEqual(roles, {"Vendedora", "Bodega", "Jefe de Bodega", "Facturación", "System Manager"})
-
-	def test_workspace_shortcuts_are_exactly_the_five_pages_no_more_no_less(self):
-		"""No Compras/Producción/Despachos yet -- exactly the 5 Pages that
-		exist today, each a native type="Page" shortcut (never a raw URL/
-		DocType shortcut, which would bypass is_item_allowed()'s real
-		Page-permission derivation)."""
-		shortcuts = frappe.get_all(
-			"Workspace Shortcut", filters={"parent": "Fabrigray ERP"}, fields=["type", "link_to", "label"]
-		)
 		self.assertEqual(
-			{(s.type, s.link_to, s.label) for s in shortcuts},
+			roles,
 			{
-				("Page", "ventas", "Ventas"),
-				("Page", "cotizaciones", "Cotizaciones"),
-				("Page", "bodega", "Bodega"),
-				("Page", "jefe-de-bodega", "Jefe de Bodega"),
-				("Page", "facturacion", "Facturación"),
+				"Vendedora",
+				"Bodega",
+				"Jefe de Bodega",
+				"Facturación",
+				"System Manager",
+				"Recorrido",
+				"Cartera",
+				"Producción",
+				"Jefe de Producción",
 			},
 		)
+
+	def test_workspace_shortcuts_are_exactly_the_five_pages_no_more_no_less(self):
+		"""Home Fabrigray launcher (7c9c1e7): the 5 native Workspace shortcuts
+		were replaced by the "Fabrigray Home" Custom HTML Block's cards, so
+		the Workspace itself carries no shortcut at all -- navigation is the
+		launcher, access is each destination Page's own roles (see
+		_permitted_launcher_routes())."""
+		self.assertEqual(frappe.get_all("Workspace Shortcut", filters={"parent": "Fabrigray ERP"}), [])
 
 	# -- Live resolution --------------------------------------------------
 
@@ -1026,21 +1035,29 @@ class TestFabrigrayWorkspace(IntegrationTestCase):
 		self.assertTrue(pages, "get_workspaces() returned no pages for this session")
 		return pages[0]["name"]
 
-	def _visible_shortcut_routes(self):
-		"""Exactly what a real Desk session would render for this
-		Workspace's shortcut grid -- frappe.desk.desktop.Workspace(...).
-		get_shortcuts(), the same method boot.py/get_desktop_page() call."""
-		from frappe.desk.desktop import Workspace
+	# Cards of the "Fabrigray Home" launcher (fixtures/custom_html_block.json).
+	LAUNCHER_PAGES = (
+		"ventas",
+		"cotizaciones",
+		"bodega",
+		"jefe-de-bodega",
+		"facturacion",
+		"clientes",
+		"inventario",
+		"recorridos",
+		"cartera",
+		"produccion",
+	)
 
-		ws = Workspace(frappe._dict({"name": "Fabrigray ERP", "title": "Fabrigray ERP", "public": 1}))
-		page_name_to_route = {
-			"ventas": "/app/ventas",
-			"cotizaciones": "/app/cotizaciones",
-			"bodega": "/app/bodega",
-			"jefe-de-bodega": "/app/jefe-de-bodega",
-			"facturacion": "/app/facturacion",
-		}
-		return {page_name_to_route[s["link_to"]] for s in ws.get_shortcuts()}
+	def _permitted_launcher_routes(self):
+		"""The launcher Pages this session may open -- DeskViews.
+		get_allowed_pages(), the very dict boot.py ships as frappe.boot.
+		page_info, which the launcher reads and each Page's is_permitted()
+		enforces (built from each Page's own roles)."""
+		from frappe.desk.desk_views import DeskViews
+
+		allowed = DeskViews.get_allowed_pages(user=frappe.session.user)
+		return {f"/app/{page}" for page in self.LAUNCHER_PAGES if page in allowed}
 
 	def test_fabrigray_erp_is_the_first_workspace_for_every_fabrigray_role(self):
 		"""sequence_id=0 winning frappe.boot.workspaces[0] -- the real
@@ -1065,33 +1082,25 @@ class TestFabrigrayWorkspace(IntegrationTestCase):
 		"""The actual brief: Vendedora -> Ventas/Cotizaciones only, Bodega
 		-> Bodega only, Jefe de Bodega -> only what she's really granted,
 		Facturación -> Facturación only, System Manager -> every module
-		this app has built. Derived entirely from is_item_allowed(), never
-		a parallel table."""
+		this app has built. Derived entirely from each Page's own roles (via
+		_permitted_launcher_routes()), never a parallel table. Inventario
+		is a Bodega/Jefe de Bodega Page too (committed page roles)."""
 		from fabergray_erp.tests import fixtures as fx
 
 		expected_routes = {
 			"Vendedora": {"/app/ventas", "/app/cotizaciones"},
-			"Bodega": {"/app/bodega"},
-			"Jefe de Bodega": {"/app/jefe-de-bodega"},
+			"Bodega": {"/app/bodega", "/app/inventario"},
+			"Jefe de Bodega": {"/app/jefe-de-bodega", "/app/inventario"},
 			"Facturación": {"/app/facturacion"},
-			"System Manager": {
-				"/app/ventas",
-				"/app/cotizaciones",
-				"/app/bodega",
-				"/app/jefe-de-bodega",
-				"/app/facturacion",
-			},
+			"System Manager": {f"/app/{page}" for page in self.LAUNCHER_PAGES},
 		}
 		for role, user in self.users.items():
 			with self.subTest(role=role), fx.as_user(user):
-				self.assertEqual(self._visible_shortcut_routes(), expected_routes[role])
+				self.assertEqual(self._permitted_launcher_routes(), expected_routes[role])
 
 	def test_administrator_sees_all_five_shortcuts(self):
 		frappe.set_user("Administrator")
-		self.assertEqual(
-			self._visible_shortcut_routes(),
-			{"/app/ventas", "/app/cotizaciones", "/app/bodega", "/app/jefe-de-bodega", "/app/facturacion"},
-		)
+		self.assertEqual(self._permitted_launcher_routes(), {f"/app/{page}" for page in self.LAUNCHER_PAGES})
 
 	def test_jefe_de_bodega_only_sees_bodega_shortcut_if_actually_granted_that_role(self):
 		"""Brief's own example: Jefe de Bodega sees Bodega's shortcut too,
@@ -1102,7 +1111,9 @@ class TestFabrigrayWorkspace(IntegrationTestCase):
 
 		user = self.world.user("fg22w-jefebodega-dual@example.com", ["Jefe de Bodega", "Bodega"])
 		with fx.as_user(user):
-			self.assertEqual(self._visible_shortcut_routes(), {"/app/jefe-de-bodega", "/app/bodega"})
+			self.assertEqual(
+				self._permitted_launcher_routes(), {"/app/jefe-de-bodega", "/app/bodega", "/app/inventario"}
+			)
 
 	def test_user_without_any_fabrigray_role_does_not_get_this_workspace(self):
 		"""Same real is_permitted() check every Workspace uses -- a session
