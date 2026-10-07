@@ -778,6 +778,29 @@ def _finish_picking(name):
 
 	frappe.get_doc("Pick List", name).check_permission("write")
 
+	return _complete_pick_list(name)
+
+
+def _complete_pick_list(name, prepare=None, system_action=False):
+	"""The body of COMPLETAR PEDIDO, shared by finish_picking() (Bodega) and
+	fulfillment.resolved_shortage_service (Jefe de Bodega's "Validar pedidos
+	con faltantes resueltos") -- one implementation of lock -> re-read ->
+	idempotency -> guards -> stock validation -> submit + Material Issue.
+
+	`prepare(pl)` runs on the locked, freshly re-read Pick List only once it
+	is known to be a DRAFT (a submitted or cancelled one has already
+	returned/raised above), before the picking guards: it may only change
+	the in-memory document (picked_qty, fg_started_by...) or raise --
+	nothing is written until the submit below, inside the savepoint, so a
+	refusal or any later failure leaves the Pick List as it was. Every guard
+	after it still applies to what it prepared.
+
+	`system_action` is set ONLY by that service, after its own explicit role
+	check (Jefe de Bodega / System Manager): it lets the submit run without
+	Pick List submit permission, which Jefe de Bodega does not hold. Nothing
+	else is skipped -- locking, idempotency, shortage-report guards, stock
+	validation, the Pick List/Stock Entry guards and the savepoint all run
+	exactly as for Bodega."""
 	# Lock order: the stock (Bin rows) first, then the Pick List -- see
 	# lock_stock_for_pick_list(). Two requests for the same Pick List or the
 	# same stock serialize here, and the second one re-reads the first one's
@@ -795,6 +818,9 @@ def _finish_picking(name):
 
 	if pl.docstatus != 0:
 		frappe.throw(_("Este Pick List ya fue finalizado o cancelado."))
+
+	if prepare:
+		prepare(pl)
 
 	if not pl.fg_started_by:
 		frappe.throw(_("No se puede finalizar un alistamiento que no ha sido iniciado."))
@@ -839,6 +865,8 @@ def _finish_picking(name):
 	validate_stock_for_issue(pending_issue_rows(pl))
 
 	frappe.db.savepoint(FINISH_PICKING_SAVEPOINT)
+	if system_action:
+		pl.flags.ignore_permissions = True
 	try:
 		with controlled_pick_list_submit(pl.name):
 			pl.submit()

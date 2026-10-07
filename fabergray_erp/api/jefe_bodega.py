@@ -819,6 +819,29 @@ def _route_shortage_tx(shortage_report, company):
 
 
 # ---------------------------------------------------------------------------
+# "Validar pedidos con faltantes resueltos"
+# ---------------------------------------------------------------------------
+
+RESOLVED_SHORTAGE_VALIDATION_ROLES = ("Jefe de Bodega", "System Manager")
+
+
+@frappe.whitelist(methods=["POST"])
+def validate_resolved_shortage_orders():
+	"""Completes the Pick Lists waiting on Reportes de Faltante resolved
+	today, only where the stock really is there -- one isolated transaction
+	per Pick List, at most 50 per run (`remaining_count` says how many are
+	left). Jefe de Bodega / System Manager only; Bodega cannot call it. See
+	fulfillment.resolved_shortage_service for every rule."""
+	from fabergray_erp.fulfillment.resolved_shortage_service import (
+		validate_resolved_shortage_orders as run_validation,
+	)
+
+	_require_login()
+	frappe.only_for(RESOLVED_SHORTAGE_VALIDATION_ROLES)
+	return run_validation()
+
+
+# ---------------------------------------------------------------------------
 # Commit 22.9 -- Módulos visuales de Jefe de Bodega: Pick Lists (resumen
 # operativo/historial), Reportes de Faltante (centro de faltantes/compras),
 # Almacenes. Inventario reuses /app/inventario as-is (api/inventario.py),

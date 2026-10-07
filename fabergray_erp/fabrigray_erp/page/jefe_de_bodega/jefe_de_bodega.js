@@ -286,11 +286,19 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 	// Page as-is (Commit 22.4/22.6), never a second inventory module.
 	// -------------------------------------------------------------------
 	render_quick_actions() {
+		// "Validar pedidos con faltantes resueltos" -- solo Jefe de Bodega /
+		// System Manager (el servidor vuelve a exigirlo: frappe.only_for).
+		const validate_btn = can_validate_resolved_shortages()
+			? `<button type="button" class="fg-btn fg-btn--solid-primary" data-action="validate_resolved_shortages">${icon(
+					"circle-check-big"
+			  )} ${__("Validar pedidos con faltantes resueltos")}</button>`
+			: "";
 		return `
 			<div class="fg-section-head">
 				<div class="fg-section-title">${__("Accesos rápidos")}</div>
 			</div>
 			<div class="fg-quick-actions">
+				${validate_btn}
 				<button type="button" class="fg-btn fg-btn--solid-primary" data-quick="pick_lists">${icon(
 					"clipboard-list"
 				)} ${__("Pick Lists")}</button>
@@ -350,6 +358,116 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 		this.$body.find('[data-quick="warehouses"]').on("click", () => frappe.set_route("almacenes"));
 		// Hotfix "Reporte PDF de faltantes" -- read-only PDF report by period.
 		this.$body.find('[data-quick="reports"]').on("click", () => frappe.set_route("reporte-faltantes"));
+		this.$body
+			.find('[data-action="validate_resolved_shortages"]')
+			.on("click", (e) => this.validate_resolved_shortages($(e.currentTarget)));
+	}
+
+	// =====================================================================
+	// "Validar pedidos con faltantes resueltos" -- toda la lógica (qué
+	// pedidos, stock, permisos, transacción por Pick List) vive en
+	// api/jefe_bodega.py::validate_resolved_shortage_orders(); aquí solo
+	// confirmación, botón deshabilitado en vuelo, resumen y refresco.
+	// =====================================================================
+	validate_resolved_shortages($btn) {
+		// Un solo intento a la vez: el flag cubre también la ventana del
+		// diálogo de confirmación (dos clics no abren dos confirmaciones).
+		if (this.validating_resolved) return;
+		this.validating_resolved = true;
+		$btn.prop("disabled", true);
+		const release = () => {
+			this.validating_resolved = false;
+			$btn.prop("disabled", false);
+		};
+		frappe.confirm(
+			__(
+				"Se revisarán los pedidos con faltantes resueltos de hoy. Solo se completarán los que tengan existencias suficientes en bodega. ¿Deseas continuar?"
+			),
+			() => {
+				this.set_busy(true);
+				// Promise.resolve(): frappe.call() devuelve un jqXHR; así
+				// .finally() siempre corre, también si el endpoint falla.
+				Promise.resolve(
+					frappe.call({
+						method: this.method_prefix + "validate_resolved_shortage_orders",
+						type: "POST",
+						freeze: true,
+						freeze_message: __("Validando pedidos..."),
+					})
+				)
+					.then((r) => {
+						this.show_resolved_validation_result((r && r.message) || {});
+						this.load_all();
+					})
+					.catch(() => {
+						// frappe.call() ya mostró su propio diálogo de error real.
+					})
+					.finally(() => {
+						release();
+						this.set_busy(false);
+					});
+			},
+			release
+		);
+	}
+
+	show_resolved_validation_result(result) {
+		const s = result.summary || {};
+		const rows = (result.results || [])
+			.map(
+				(r) => `
+				<tr>
+					<td>${frappe.utils.escape_html(r.pick_list || "—")}</td>
+					<td>${frappe.utils.escape_html(r.pedido || r.sales_order || "—")}</td>
+					<td>${frappe.utils.escape_html(r.customer || "—")}</td>
+					<td><span class="fg-resolved-status" data-status="${frappe.utils.escape_html(
+						r.status
+					)}">${frappe.utils.escape_html(r.status)}</span></td>
+					<td>${frappe.utils.escape_html(r.material_issue || "—")}</td>
+					<td>${frappe.utils.escape_html(r.detail || "")}</td>
+				</tr>`
+			)
+			.join("");
+		const remaining = cint(result.remaining_count)
+			? `<div class="fg-resolved-remaining">${__(
+					"Quedan {0} pedidos por revisar. Ejecuta de nuevo la validación.",
+					[cint(result.remaining_count)]
+			  )}</div>`
+			: "";
+		const table = rows
+			? `<div class="fg-resolved-table-wrap"><table class="fg-resolved-table">
+					<thead><tr>
+						<th>${__("Pick List")}</th><th>${__("Pedido")}</th><th>${__("Cliente")}</th>
+						<th>${__("Estado")}</th><th>${__("Material Issue")}</th><th>${__("Detalle")}</th>
+					</tr></thead>
+					<tbody>${rows}</tbody>
+				</table></div>`
+			: `<div class="fg-resolved-empty">${__("No hay pedidos con faltantes resueltos hoy por validar.")}</div>`;
+
+		const dialog = new frappe.ui.Dialog({
+			title: __("Validación terminada"),
+			size: "extra-large",
+			fields: [
+				{
+					fieldtype: "HTML",
+					fieldname: "result_html",
+					options: `
+						<div class="fg-resolved-summary">
+							<div>${__("Completados")}: <strong>${cint(s.completed)}</strong></div>
+							<div>${__("Aún con faltantes")}: <strong>${cint(s.still_short)}</strong></div>
+							<div>${__("Ya completados")}: <strong>${cint(s.already_completed)}</strong></div>
+							<div>${__("Errores")}: <strong>${cint(s.errors)}</strong></div>
+						</div>
+						${remaining}
+						${table}
+					`,
+				},
+			],
+			primary_action_label: __("CERRAR"),
+			primary_action: () => dialog.hide(),
+		});
+		dialog.$wrapper.addClass("fg-resolved-validation-dialog");
+		dialog.show();
 	}
 
 	// =====================================================================
@@ -559,6 +677,14 @@ function get_initials(name) {
 	const first = parts[0][0] || "";
 	const second = parts.length > 1 ? parts[1][0] : "";
 	return (first + second).toUpperCase();
+}
+
+function can_validate_resolved_shortages() {
+	return frappe.user.has_role(["Jefe de Bodega", "System Manager"]);
+}
+
+function cint(v) {
+	return parseInt(v, 10) || 0;
 }
 
 function flt(v) {

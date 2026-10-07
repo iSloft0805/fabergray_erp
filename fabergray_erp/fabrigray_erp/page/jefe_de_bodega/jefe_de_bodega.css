@@ -262,3 +262,53 @@
 		width: 100%;
 	}
 }
+
+/* "Validar pedidos con faltantes resueltos" -- resumen del resultado. */
+.fg-resolved-summary {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+	gap: 8px;
+	margin-bottom: 12px;
+	font-size: 0.9rem;
+}
+
+.fg-resolved-remaining,
+.fg-resolved-empty {
+	margin-bottom: 12px;
+	color: var(--fg-text-muted, var(--text-muted));
+}
+
+.fg-resolved-table-wrap {
+	overflow-x: auto;
+}
+
+.fg-resolved-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.84rem;
+}
+
+.fg-resolved-table th,
+.fg-resolved-table td {
+	padding: 6px 8px;
+	border-bottom: 1px solid var(--fg-border, var(--border-color));
+	text-align: left;
+	vertical-align: top;
+}
+
+.fg-resolved-status {
+	font-weight: 600;
+	white-space: nowrap;
+}
+
+.fg-resolved-status[data-status="COMPLETADO"] {
+	color: var(--green-600, #16a34a);
+}
+
+.fg-resolved-status[data-status="ERROR"] {
+	color: var(--red-600, #dc2626);
+}
+
+.fg-resolved-status[data-status="AÚN CON FALTANTES"] {
+	color: var(--orange-600, #ea580c);
+}
