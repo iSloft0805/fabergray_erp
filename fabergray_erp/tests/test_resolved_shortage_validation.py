@@ -171,7 +171,7 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 	def test_concurrent_runs_complete_once(self):
 		item, _so, pl, report = self._draft_with_resolved_shortage()
 		frappe.db.commit()
-		target = {"rows": {report.pick_list_item}, "reports": [report.name]}
+		target = {"reports": [report.name]}
 
 		site = frappe.local.site
 		results = [None, None]
@@ -215,7 +215,9 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 			[(s["item_code"], s["warehouse"], s["required_qty"], s["available_qty"], s["shortage_qty"]) for s in row["shortages"]],
 			[(item, self.wh_liq, 4, 2, 2)],
 		)
-		self.assertIn("faltan 2", row["detail"])
+		self.assertEqual(
+			row["detail"], f"{item} — {self.wh_liq} · Requerido: 4 · Disponible: 2 · Faltante: 2"
+		)
 		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
 		self.assertEqual(self._picked(pl), [0])
 		self.assertEqual(_stock_issues(pl), [])
@@ -241,26 +243,240 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Pick List", pl_b, "docstatus"), 0)
 		self.assertEqual(_actual(item, self.wh_liq), 4)
 
-	def test_only_one_of_several_lines_resolved_is_not_completed(self):
-		item_1 = self._item(self.wh_liq)
-		item_2 = self._item(self.wh_var, stock=4)
-		_so, pl = self._order((item_1, self.wh_liq, 4), (item_2, self.wh_var, 4))
+	# =====================================================================
+	# The WHOLE Pick List is re-validated, not only the resolved line
+	# =====================================================================
+
+	def _start_and_report(self, pl, item_code):
+		"""Bodega starts the Pick List and reports ONE line short at 0; every
+		other line stays untouched (picked 0, no report)."""
 		with fx.as_user(self.bodega_user):
 			bodega.start_picking(pl)
-			row_1 = next(r for r in bodega.get_pick_list(pl)["rows"] if r["item_code"] == item_1)
-			bodega.set_picked_qty(pl, row_1["row_name"], 0)
-			report = bodega.report_shortage(pl, row_1["row_name"], 0, "Stock insuficiente")
+			row = next(r for r in bodega.get_pick_list(pl)["rows"] if r["item_code"] == item_code)
+			bodega.set_picked_qty(pl, row["row_name"], 0)
+			report = bodega.report_shortage(pl, row["row_name"], 0, "Stock insuficiente")
 		self.world.track_existing("Reporte de Faltante", report["name"])
-		self.world.stock_up_real(item_1, self.wh_liq, 4, rate=RATE)
-		self._resolve(report["name"])
+		return report["name"]
+
+	def _three_line_order(self, stock=(4, 4, 4)):
+		"""Pedido de 3 líneas (4 c/u), sin stock al crearlo; Bodega solo
+		reporta la primera; luego llega `stock` por línea y se resuelve."""
+		items = [self._item(self.wh_liq) for _i in range(3)]
+		_so, pl = self._order(*[(i, self.wh_liq, 4) for i in items])
+		report = self._start_and_report(pl, items[0])
+		for item, qty in zip(items, stock):
+			if qty:
+				self.world.stock_up_real(item, self.wh_liq, qty, rate=RATE)
+		self._resolve(report)
+		return items, pl
+
+	def _comments(self, pick_list):
+		return frappe.get_all(
+			"Comment",
+			filters={"reference_doctype": "Pick List", "reference_name": pick_list, "comment_type": "Comment"},
+			pluck="content",
+			order_by="creation asc",
+		)
+
+	def test_unpicked_lines_with_stock_are_filled_and_completed(self):
+		items, pl = self._three_line_order()
+
+		row = self._row(self._run(), pl)
+
+		self.assertEqual(row["status"], rss.STATUS_COMPLETED, row)
+		self.assertEqual(self._picked(pl), [4, 4, 4])
+		[issue] = _stock_issues(pl)
+		self.assertEqual(
+			sorted((d.item_code, flt(d.qty)) for d in frappe.get_doc("Stock Entry", issue.name).items),
+			sorted((i, 4) for i in items),
+		)
+		self.assertEqual([_actual(i, self.wh_liq) for i in items], [0, 0, 0])
+
+	def test_one_line_without_stock_changes_nothing(self):
+		items, pl = self._three_line_order(stock=(4, 4, 0))
+		before = frappe.db.get_value("Pick List", pl, ["fg_started_by", "fg_started_on", "modified"], as_dict=True)
 
 		row = self._row(self._run(), pl)
 
 		self.assertEqual(row["status"], rss.STATUS_STILL_SHORT, row)
-		self.assertIn("aún no la alista", row["detail"])
-		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
-		self.assertEqual(self._picked(pl), [0, 0])
+		self.assertEqual(
+			row["detail"], f"{items[2]} — {self.wh_liq} · Requerido: 4 · Disponible: 0 · Faltante: 4"
+		)
+		self.assertNotIn("aún no la alista", row["detail"])
+		self.assertEqual(self._picked(pl), [0, 0, 0])
+		self.assertEqual(
+			frappe.db.get_value("Pick List", pl, ["fg_started_by", "fg_started_on", "modified"], as_dict=True), before
+		)
 		self.assertEqual(_stock_issues(pl), [])
+		self.assertEqual([_actual(i, self.wh_liq) for i in items], [4, 4, 0])
+
+	def test_partially_picked_line_is_completed_to_the_requested_qty(self):
+		"""10 pedidas, 6 ya alistadas (siguen en el Bin hasta la salida), faltan
+		4. Bin 9 = 6 propias + 3 libres -> no alcanza; Bin 13 = 6 + 7 libres
+		-> pasa a 10 y sale 10 una sola vez."""
+		item = self._item(self.wh_liq, stock=20)
+		_so, pl = self._order((item, self.wh_liq, 10))
+		self._pick(pl, {item: 6})
+		self._resolve(self._report_for(pl).name)
+		self.world.stock_up_real(item, self.wh_liq, 9, rate=RATE)
+
+		row = self._row(self._run(), pl)
+
+		self.assertEqual(row["status"], rss.STATUS_STILL_SHORT, row)
+		self.assertEqual([(s["required_qty"], s["available_qty"]) for s in row["shortages"]], [(10, 9)])
+		self.assertEqual(self._picked(pl), [6])
+
+		self.world.stock_up_real(item, self.wh_liq, 13, rate=RATE)
+		row = self._row(self._run(), pl)
+
+		self.assertEqual(row["status"], rss.STATUS_COMPLETED, row)
+		self.assertEqual(self._picked(pl), [10])
+		self.assertEqual([flt(r.transferred_qty) for r in frappe.get_doc("Pick List", pl).locations], [10])
+		self.assertEqual(_actual(item, self.wh_liq), 3)
+
+	def test_unpicked_line_does_not_take_stock_held_by_another_open_pick_list(self):
+		items, pl = self._three_line_order(stock=(4, 4, 4))
+		# Another order's draft holds 4 of items[1] physically picked.
+		_so_b, pl_b = self._order((items[1], self.wh_liq, 4))
+		self._pick(pl_b)
+
+		row = self._row(self._run(), pl)
+
+		self.assertEqual(row["status"], rss.STATUS_STILL_SHORT, row)
+		self.assertEqual(
+			[(s["item_code"], s["available_qty"]) for s in row["shortages"]], [(items[1], 0)]
+		)
+		self.assertEqual(self._picked(pl), [0, 0, 0])
+		self.assertEqual(self._picked(pl_b), [4])
+
+	def test_each_warehouse_is_validated_on_its_own(self):
+		item_1 = self._item(self.wh_liq)
+		item_2 = self._item(self.wh_var)
+		_so, pl = self._order((item_1, self.wh_liq, 4), (item_2, self.wh_var, 4))
+		report = self._start_and_report(pl, item_1)
+		self.world.stock_up_real(item_1, self.wh_liq, 4, rate=RATE)
+		self.world.stock_up_real(item_2, self.wh_liq, 4, rate=RATE)  # stock in the WRONG warehouse
+		self._resolve(report)
+
+		row = self._row(self._run(), pl)
+
+		self.assertEqual(row["status"], rss.STATUS_STILL_SHORT, row)
+		self.assertEqual(
+			[(s["item_code"], s["warehouse"], s["available_qty"]) for s in row["shortages"]], [(item_2, self.wh_var, 0)]
+		)
+		self.assertEqual(self._picked(pl), [0, 0])
+
+		self.world.stock_up_real(item_2, self.wh_var, 4, rate=RATE)
+		row = self._row(self._run(), pl)
+
+		self.assertEqual(row["status"], rss.STATUS_COMPLETED, row)
+		issue = frappe.get_doc("Stock Entry", row["material_issue"])
+		self.assertEqual(
+			sorted((d.item_code, d.s_warehouse, flt(d.qty)) for d in issue.items),
+			sorted([(item_1, self.wh_liq, 4), (item_2, self.wh_var, 4)]),
+		)
+		self.assertEqual((_actual(item_1, self.wh_liq), _actual(item_2, self.wh_var), _actual(item_2, self.wh_liq)), (0, 0, 4))
+
+	def test_same_item_in_several_rows_is_aggregated_per_warehouse(self):
+		item = self._item(self.wh_liq)
+		other = self._item(self.wh_liq)
+		_so, pl = self._order((other, self.wh_liq, 1), (item, self.wh_liq, 2), (item, self.wh_liq, 3))
+		report = self._start_and_report(pl, other)
+		self.world.stock_up_real(other, self.wh_liq, 1, rate=RATE)
+		self.world.stock_up_real(item, self.wh_liq, 4, rate=RATE)  # each row alone fits, together (5) they do not
+		self._resolve(report)
+
+		row = self._row(self._run(), pl)
+
+		self.assertEqual(row["status"], rss.STATUS_STILL_SHORT, row)
+		self.assertEqual(
+			[(s["item_code"], s["required_qty"], s["available_qty"], s["shortage_qty"]) for s in row["shortages"]],
+			[(item, 5, 4, 1)],
+		)
+		self.assertTrue(all(q == 0 for q in self._picked(pl)))
+
+		self.world.stock_up_real(item, self.wh_liq, 5, rate=RATE)
+		row = self._row(self._run(), pl)
+		self.assertEqual(row["status"], rss.STATUS_COMPLETED, row)
+		self.assertEqual(_actual(item, self.wh_liq), 0)
+
+	def test_second_run_on_a_whole_pick_list_never_issues_twice(self):
+		items, pl = self._three_line_order()
+
+		first = self._row(self._run(), pl)
+		second = self._run()
+
+		self.assertEqual(first["status"], rss.STATUS_COMPLETED)
+		self.assertEqual([r for r in second["results"] if r["pick_list"] == pl], [])
+		self.assertEqual(len(_stock_issues(pl)), 1)
+		self.assertEqual([_actual(i, self.wh_liq) for i in items], [0, 0, 0])
+		self.assertEqual(len(self._comments(pl)), 2)  # never repeated by the re-run
+
+	def test_note_lists_only_the_lines_the_system_filled(self):
+		item_done = self._item(self.wh_liq, stock=20)
+		item_partial = self._item(self.wh_liq, stock=20)
+		item_unpicked = self._item(self.wh_liq, stock=20)
+		_so, pl = self._order((item_done, self.wh_liq, 2), (item_partial, self.wh_liq, 5), (item_unpicked, self.wh_liq, 1))
+		self._pick(pl, {item_partial: 3, item_unpicked: 0})  # item_done fully picked by Bodega
+		self._resolve(self._report_for(pl, item_partial).name)
+		self._resolve(self._report_for(pl, item_unpicked).name)
+
+		row = self._row(self._run(user=self.jefe), pl)
+
+		self.assertEqual(row["status"], rss.STATUS_COMPLETED, row)
+		self.assertEqual(self._picked(pl), [2, 5, 1])
+		general, note = self._comments(pl)
+		self.assertIn("Completado por", general)
+		self.assertIn(f"Validación automática de faltantes resueltos por {self.jefe}.", note)
+		self.assertIn(f"- {item_partial} — 2 unidades — {self.wh_liq}", note)
+		self.assertIn(f"- {item_unpicked} — 1 unidad — {self.wh_liq}", note)
+		self.assertNotIn(item_done, note)
+
+	def test_a_later_failure_reverts_every_automatic_fill(self):
+		items, pl = self._three_line_order()
+		before = frappe.db.get_value("Pick List", pl, ["fg_started_by", "fg_started_on"], as_dict=True)
+
+		with patch.object(bodega, "create_stock_issue", side_effect=RuntimeError("salida falló")):
+			row = self._row(self._run(), pl)
+
+		self.assertEqual(row["status"], rss.STATUS_ERROR, row)
+		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
+		self.assertEqual(self._picked(pl), [0, 0, 0])
+		self.assertEqual(frappe.db.get_value("Pick List", pl, ["fg_started_by", "fg_started_on"], as_dict=True), before)
+		self.assertEqual(_stock_issues(pl), [])
+		self.assertEqual(self._comments(pl), [])
+		self.assertEqual([_actual(i, self.wh_liq) for i in items], [4, 4, 4])
+
+	def test_open_shortage_blocks_even_with_stock(self):
+		item_1 = self._item(self.wh_liq)
+		item_2 = self._item(self.wh_var)
+		_so, pl = self._order((item_1, self.wh_liq, 4), (item_2, self.wh_var, 4))
+		self._pick(pl, {item_1: 0, item_2: 0})
+		self.world.stock_up_real(item_1, self.wh_liq, 4, rate=RATE)
+		self.world.stock_up_real(item_2, self.wh_var, 4, rate=RATE)
+		self._resolve(self._report_for(pl, item_1).name)
+		open_report = self._report_for(pl, item_2)  # still Abierto
+
+		row = self._row(self._run(), pl)
+
+		self.assertEqual(row["status"], rss.STATUS_STILL_SHORT, row)
+		self.assertEqual(row["detail"], f"{open_report.name} — faltante todavía Abierto/En Proceso")
+		self.assertEqual(self._picked(pl), [0, 0])
+		self.assertEqual(frappe.db.get_value("Reporte de Faltante", open_report.name, "status"), "Abierto")
+
+	def test_line_already_picked_in_a_non_picking_warehouse_does_not_block(self):
+		item_1 = self._item(self.wh_liq)
+		item_2 = self._item(self.wh_var, stock=4)
+		_so, pl = self._order((item_1, self.wh_liq, 4), (item_2, self.wh_var, 4))
+		self._pick(pl, {item_1: 0})  # item_2 fully picked by Bodega
+		self.world.stock_up_real(item_1, self.wh_liq, 4, rate=RATE)
+		self._resolve(self._report_for(pl, item_1).name)
+
+		with patch.object(rss, "non_picking_warehouses", return_value={self.wh_var}):
+			row = self._row(self._run(), pl)
+
+		self.assertEqual(row["status"], rss.STATUS_COMPLETED, row)
+		self.assertEqual(self._picked(pl), [4, 4])
 
 	def test_another_open_shortage_blocks_completion(self):
 		item_1 = self._item(self.wh_liq)
@@ -288,7 +504,7 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 			row = self._row(self._run(), pl)
 
 		self.assertEqual(row["status"], rss.STATUS_STILL_SHORT, row)
-		self.assertIn("no es de alistamiento", row["detail"])
+		self.assertIn("almacén no válido para alistamiento", row["detail"])
 		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
 		self.assertEqual(self._picked(pl), [0])
 		self.assertEqual(_actual(item, self.wh_liq), 4)
@@ -442,7 +658,7 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		self.assertFalse(self._complete(pl)["already_completed"])
 
 	# =====================================================================
-	# "Resuelto hoy": the status transition, not any edit
+	# "Resuelto" window: the status transition, not any edit
 	# =====================================================================
 
 	def _backdate_versions(self, report_name, days=1):
@@ -454,9 +670,34 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 			(days, report_name),
 		)
 
-	def test_resolved_yesterday_and_edited_today_is_not_included(self):
+	def test_window_is_today_and_the_two_previous_days(self):
+		self.assertEqual(rss.RESOLVED_SHORTAGE_LOOKBACK_DAYS, 3)
+		self.assertEqual(
+			rss.resolution_window("2026-10-07"), (frappe.utils.getdate("2026-10-05"), frappe.utils.getdate("2026-10-07"))
+		)
+
+	def test_resolved_today_yesterday_and_two_days_ago_are_included(self):
+		for days in (0, 1, 2):
+			with self.subTest(days=days):
+				item, _so, pl, report = self._draft_with_resolved_shortage()
+				if days:
+					self._backdate_versions(report.name, days)
+				row = self._row(self._run(), pl)
+				self.assertEqual(row["status"], rss.STATUS_COMPLETED, row)
+				self.assertEqual(_actual(item, self.wh_liq), 0)
+
+	def test_resolved_three_days_ago_is_out_of_the_window(self):
 		_item, _so, pl, report = self._draft_with_resolved_shortage()
-		self._backdate_versions(report.name)
+		self._backdate_versions(report.name, 3)
+
+		result = self._run()
+
+		self.assertEqual([r for r in result["results"] if r["pick_list"] == pl], [])
+		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
+
+	def test_resolved_before_the_window_and_edited_today_is_not_included(self):
+		_item, _so, pl, report = self._draft_with_resolved_shortage()
+		self._backdate_versions(report.name, 3)
 		doc = frappe.get_doc("Reporte de Faltante", report.name)
 		doc.resolution_note = "Nota editada hoy"
 		doc.save(ignore_version=False)  # a Version row created today, without a status change
@@ -473,9 +714,9 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
 		self.assertEqual(self._picked(pl), [0])
 
-	def test_reopened_and_resolved_again_today_is_included(self):
+	def test_reopened_and_resolved_again_inside_the_window_is_included(self):
 		item, _so, pl, report = self._draft_with_resolved_shortage()
-		self._backdate_versions(report.name)
+		self._backdate_versions(report.name, 3)
 		doc = frappe.get_doc("Reporte de Faltante", report.name)
 		doc.status = "Abierto"
 		doc.save(ignore_version=False)
@@ -767,7 +1008,8 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 			js = f.read()
 		self.assertIn('__("Validar pedidos con faltantes resueltos")', js)
 		self.assertIn(
-			"Se revisarán los pedidos con faltantes resueltos de hoy. Solo se completarán los que tengan "
+			"Se revisarán los pedidos con faltantes resueltos en los últimos 3 días (hoy, ayer y anteayer). "
+			"Solo se completarán los que tengan "
 			"existencias suficientes en bodega. ¿Deseas continuar?",
 			js,
 		)

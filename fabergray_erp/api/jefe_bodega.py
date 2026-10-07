@@ -827,8 +827,9 @@ RESOLVED_SHORTAGE_VALIDATION_ROLES = ("Jefe de Bodega", "System Manager")
 
 @frappe.whitelist(methods=["POST"])
 def validate_resolved_shortage_orders():
-	"""Completes the Pick Lists waiting on Reportes de Faltante resolved
-	today, only where the stock really is there -- one isolated transaction
+	"""Completes the Pick Lists waiting on Reportes de Faltante resolved in
+	the last 3 days (today, yesterday, the day before -- site date), only
+	where the stock really is there -- one isolated transaction
 	per Pick List, at most 50 per run (`remaining_count` says how many are
 	left). Jefe de Bodega / System Manager only; Bodega cannot call it. See
 	fulfillment.resolved_shortage_service for every rule."""

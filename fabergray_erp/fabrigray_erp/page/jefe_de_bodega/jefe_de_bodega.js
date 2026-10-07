@@ -381,7 +381,7 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 		};
 		frappe.confirm(
 			__(
-				"Se revisarán los pedidos con faltantes resueltos de hoy. Solo se completarán los que tengan existencias suficientes en bodega. ¿Deseas continuar?"
+				"Se revisarán los pedidos con faltantes resueltos en los últimos 3 días (hoy, ayer y anteayer). Solo se completarán los que tengan existencias suficientes en bodega. ¿Deseas continuar?"
 			),
 			() => {
 				this.set_busy(true);
@@ -424,7 +424,7 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 						r.status
 					)}">${frappe.utils.escape_html(r.status)}</span></td>
 					<td>${frappe.utils.escape_html(r.material_issue || "—")}</td>
-					<td>${frappe.utils.escape_html(r.detail || "")}</td>
+					<td class="fg-resolved-detail">${frappe.utils.escape_html(r.detail || "")}</td>
 				</tr>`
 			)
 			.join("");
@@ -442,7 +442,7 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 					</tr></thead>
 					<tbody>${rows}</tbody>
 				</table></div>`
-			: `<div class="fg-resolved-empty">${__("No hay pedidos con faltantes resueltos hoy por validar.")}</div>`;
+			: `<div class="fg-resolved-empty">${__("No hay pedidos con faltantes resueltos en los últimos 3 días por validar.")}</div>`;
 
 		const dialog = new frappe.ui.Dialog({
 			title: __("Validación terminada"),

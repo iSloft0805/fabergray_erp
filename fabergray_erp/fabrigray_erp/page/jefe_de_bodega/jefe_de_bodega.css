@@ -296,6 +296,12 @@
 	vertical-align: top;
 }
 
+/* Un problema real por línea (el servidor separa con saltos de línea). */
+.fg-resolved-table td.fg-resolved-detail {
+	white-space: pre-line;
+	min-width: 260px;
+}
+
 .fg-resolved-status {
 	font-weight: 600;
 	white-space: nowrap;
