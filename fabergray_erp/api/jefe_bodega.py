@@ -827,12 +827,13 @@ RESOLVED_SHORTAGE_VALIDATION_ROLES = ("Jefe de Bodega", "System Manager")
 
 @frappe.whitelist(methods=["POST"])
 def validate_resolved_shortage_orders():
-	"""Completes the Pick Lists waiting on Reportes de Faltante resolved in
-	the last 3 days (today, yesterday, the day before -- site date), only
-	where the stock really is there -- one isolated transaction
-	per Pick List, at most 50 per run (`remaining_count` says how many are
-	left). Jefe de Bodega / System Manager only; Bodega cannot call it. See
-	fulfillment.resolved_shortage_service for every rule."""
+	"""Completes the Pick Lists still operationally pending because of a
+	Reporte de Faltante (whenever it was resolved), only where the stock
+	really is there -- one isolated transaction per Pick List, at most 50
+	per run (`remaining_count` says how many are left; legacy errors do not
+	use that quota, `error_remaining_count`). Orders already completed are
+	never listed. Jefe de Bodega / System Manager only; Bodega cannot call
+	it. See fulfillment.resolved_shortage_service for every rule."""
 	from fabergray_erp.fulfillment.resolved_shortage_service import (
 		validate_resolved_shortage_orders as run_validation,
 	)

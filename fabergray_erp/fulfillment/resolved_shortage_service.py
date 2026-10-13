@@ -1,33 +1,48 @@
 # -*- coding: utf-8 -*-
 """Jefe de Bodega -- "Validar pedidos con faltantes resueltos".
 
-Completes, in bulk, the picking of Pick Lists that were waiting on a
-Reporte de Faltante resolved recently, but only where the stock is really
-there. The report being Resuelto is never taken as proof of stock:
+Completes, in bulk, the picking of Pick Lists that are still operationally
+pending because of a Reporte de Faltante, but only where the stock is
+really there. The report being Resuelto is never taken as proof of stock:
 availability is re-read under lock for every Pick List.
 
-Scope (decided, not inferred):
-- reports whose LAST status change to "Resuelto" happened inside the
-  window RESOLVED_SHORTAGE_LOOKBACK_DAYS = 3, site date: today, yesterday
-  and the day before (today - 2 at 00:00:00 .. today 23:59:59); today - 3
-  and earlier are out. Reporte de Faltante has no resolved_on field; the
-  transition is read from Frappe's Version log (track_changes=1, every
-  resolving code path saves the document) with
-  api.reporte_faltantes._resolution_dates() -- the same source the PDF
-  report already uses. Never `modified`, never an unrelated edit. No
-  historical sweep: the window only exists so orders a first, stricter
-  run left short are re-validated after the day changes.
-- target Pick List per report:
-  * original Pick List still a draft -> that same Pick List;
-  * original submitted and fully issued -> its remainder Pick List (draft
-    rows of the same Sales Order line), created through
-    remainder_service.ensure_remaining_pick_list() when missing
-    (idempotent: it subtracts what open Pick Lists already claim);
-  * original submitted WITHOUT a complete Material Issue (legacy) -> it is
-    sent to COMPLETAR PEDIDO's own guard, which refuses with
-    IncompleteStockIssueError: ERROR / revisión administrativa, never
-    repaired here;
-  * cancelled -> ignored.
+Universe (decided, not inferred): orders still in picking or still pending
+because of a shortage -- never "every resolved report in history". The
+date the report was resolved is NOT a criterion (no window, no Version
+log, no `modified`); what matters is whether operational work is left.
+_pending_candidates() reads it in ONE statement:
+- A: a DRAFT Pick List with a Reporte de Faltante Abierto, En Proceso or
+  Resuelto. With an Abierto/En Proceso report it is processed and comes
+  back AÚN CON FALTANTES naming that report (never closed here);
+- B: a DRAFT remainder -- another draft Pick List holding the Sales Order
+  line of a Resuelto report whose original was submitted with a complete
+  Material Issue;
+- C: a Resuelto report whose original was submitted with a complete
+  Material Issue, with no draft remainder, and whose Sales Order line still
+  has real demand: stock_qty - delivered_qty - what open Pick Lists already
+  claim, the exact formula of
+  pick_list_service.create_pick_list_for_remaining_demand() (with the
+  Material Issue flow delivered_qty never grows, so delivered_qty alone
+  would let every historical order in). The remainder is created with
+  remainder_service.ensure_remaining_pick_list() (idempotent) ONLY for the
+  C lines that made it into this run's batch;
+- E: legacy -- a submitted Pick List with a report and picked - delivered
+  - transferred > 0 (no complete Material Issue), not Facturado: ERROR /
+  revisión administrativa, read-only, never repaired.
+A, B and C exclude Sales Orders that are not submitted or are Closed / On
+Hold / Completed (the same block ensure_remaining_pick_list() applies).
+Everything else is left out entirely, without a result row: submitted Pick
+Lists with a complete Material Issue and nothing left (ready for, or
+already through, Facturación), Facturado legacy ones, drafts without any
+report, submitted ones whose shortage is still open (nothing to complete
+until it is resolved: the remainder is born on resolution), cancelled.
+YA COMPLETADO only appears through concurrency: someone else completed the
+Pick List between the selection and its lock.
+
+Batch: at most MAX_PICK_LISTS_PER_RUN processable targets (A/B Pick Lists,
+C Sales Order lines) per run, cut BEFORE any remainder is created;
+`remaining_count` is what is left. E rows do not use that quota: at most
+MAX_ERROR_RESULTS are listed, `error_remaining_count` says how many more.
 
 Per Pick List (one transaction each, committed on its own, deadlock retry
 scoped to it): api.bodega._complete_pick_list() -- the very body of
@@ -41,7 +56,6 @@ refuses -- changing nothing -- unless every line can end up fully picked:
 - operational stock: Bin.actual_qty minus what OTHER draft Pick Lists hold
   physically picked and not yet issued, must cover every pending unit of
   this Pick List, aggregated per item_code + warehouse.
-A line Bodega has not picked yet is no longer a reason to refuse by itself.
 Only when everything fits is every line filled up to its stock_qty (and
 fg_started_by/fg_started_on set to the caller when nobody started the Pick
 List). Then the unchanged COMPLETAR PEDIDO path runs: its guards,
@@ -55,7 +69,7 @@ from collections import defaultdict
 
 import frappe
 from frappe import _
-from frappe.utils import add_days, escape_html, flt, getdate, now_datetime, nowdate
+from frappe.utils import escape_html, flt, now_datetime
 
 from fabergray_erp.api.bodega import OPEN_SHORTAGE_STATUSES, _complete_pick_list, _lock_manual_picking
 from fabergray_erp.fulfillment.remainder_service import ensure_remaining_pick_list
@@ -70,9 +84,13 @@ from fabergray_erp.warehouses import non_picking_warehouses
 ROLES = ("Jefe de Bodega", "System Manager")
 RESOLVED_STATUS = "Resuelto"
 MAX_PICK_LISTS_PER_RUN = 50
-#: Window of the last status change to "Resuelto": today and the 2 previous
-#: days (site date). Internal only -- never taken from the request.
-RESOLVED_SHORTAGE_LOOKBACK_DAYS = 3
+#: Legacy (kind E) rows listed per run; they never use the batch quota.
+MAX_ERROR_RESULTS = 20
+
+KIND_DRAFT = "A"
+KIND_REMAINDER = "B"
+KIND_NEEDS_REMAINDER = "C"
+KIND_LEGACY = "E"
 
 STATUS_COMPLETED = "COMPLETADO"
 STATUS_STILL_SHORT = "AÚN CON FALTANTES"
@@ -100,18 +118,21 @@ class ResolvedShortageStillShortError(frappe.ValidationError):
 
 
 def validate_resolved_shortage_orders(limit=MAX_PICK_LISTS_PER_RUN):
-	"""Process up to `limit` Pick Lists; returns {summary, results,
-	remaining_count}. Commits per Pick List (see module docstring)."""
+	"""Process up to `limit` targets; returns {summary, results,
+	remaining_count, error_remaining_count}. Commits per Pick List (see
+	module docstring)."""
 	frappe.only_for(ROLES)
 	frappe.has_permission("Reporte de Faltante", "read", throw=True)
 
-	targets, early_results = _collect_targets(_reports_resolved_today())
-	names = list(targets)
-	batch, remaining = names[:limit], names[limit:]
+	work, legacy = _plan(_pending_candidates())
+	batch, remaining = work[:limit], work[limit:]
+	shown_legacy, hidden_legacy = legacy[:MAX_ERROR_RESULTS], legacy[MAX_ERROR_RESULTS:]
 
-	results = list(early_results)
-	for name in batch:
-		results.append(_process_isolated(name, targets[name]))
+	# Remainders (C) are created only now, for the batch alone.
+	targets, results = _collect_targets(batch)
+	for name, target in targets.items():
+		results.append(_process_isolated(name, target))
+	results.extend(_legacy_result(name) for name in shown_legacy)
 
 	summary = {
 		"completed": sum(1 for r in results if r["status"] == STATUS_COMPLETED),
@@ -119,108 +140,173 @@ def validate_resolved_shortage_orders(limit=MAX_PICK_LISTS_PER_RUN):
 		"already_completed": sum(1 for r in results if r["status"] == STATUS_ALREADY_COMPLETED),
 		"errors": sum(1 for r in results if r["status"] == STATUS_ERROR),
 	}
-	return {"summary": summary, "results": results, "remaining_count": len(remaining)}
+	return {
+		"summary": summary,
+		"results": results,
+		"remaining_count": len(remaining),
+		"error_remaining_count": len(hidden_legacy),
+	}
 
 
 # ---------------------------------------------------------------------------
 # Candidates
 # ---------------------------------------------------------------------------
 
+#: One statement, four branches. Every branch starts from Reporte de
+#: Faltante.status (indexed) and only follows indexed links (pick_list,
+#: Pick List Item.parent / sales_order_item, Sales Order Item.name), so a
+#: closed historical order costs an index probe, never a scan of its rows.
+_CANDIDATES_SQL = """
+select r.name as report, r.pick_list as pick_list, r.sales_order_item as sales_order_item,
+	'A' as kind
+from `tabReporte de Faltante` r
+join `tabPick List` pl on pl.name = r.pick_list and pl.docstatus = 0
+left join `tabSales Order` so on so.name = r.sales_order
+where r.status in %(active)s
+	and {so_open}
 
-def resolution_window(today=None):
-	"""(first_day, last_day), both inclusive, site date: today and the
-	RESOLVED_SHORTAGE_LOOKBACK_DAYS - 1 previous days."""
-	last_day = getdate(today or nowdate())
-	return getdate(add_days(last_day, -(RESOLVED_SHORTAGE_LOOKBACK_DAYS - 1))), last_day
+union all
 
+select r.name, rem.name, r.sales_order_item, 'B'
+from `tabReporte de Faltante` r
+join `tabPick List` orig on orig.name = r.pick_list and orig.docstatus = 1
+join `tabPick List Item` pli on pli.sales_order_item = r.sales_order_item
+	and pli.parenttype = 'Pick List' and pli.parent != r.pick_list
+join `tabPick List` rem on rem.name = pli.parent and rem.docstatus = 0
+left join `tabSales Order` so on so.name = r.sales_order
+where r.status = %(resolved)s
+	and {so_open}
+	and not exists ({pending_issue})
 
-def _reports_resolved_today():
-	"""Reportes de Faltante (readable by the caller) whose LAST transition to
-	Resuelto falls inside resolution_window(), with their Pick List link.
-	Version.creation only narrows the candidates (some edit in the window);
-	the decision is the date of the last status -> "Resuelto" change, so a
-	report resolved before the window and merely edited inside it stays
-	out."""
-	from fabergray_erp.api.reporte_faltantes import _resolution_dates
+union all
 
-	first_day, last_day = resolution_window()
-	version = frappe.qb.DocType("Version")
-	touched = (
-		frappe.qb.from_(version)
-		.select(version.docname)
-		.distinct()
-		.where(version.ref_doctype == "Reporte de Faltante")
-		.where(version.creation >= f"{first_day.isoformat()} 00:00:00")
-		.where(version.creation <= f"{last_day.isoformat()} 23:59:59.999999")
-		.run(pluck=True)
+select r.name, r.pick_list, r.sales_order_item, 'C'
+from `tabReporte de Faltante` r
+join `tabPick List` orig on orig.name = r.pick_list and orig.docstatus = 1
+join `tabSales Order Item` soi on soi.name = r.sales_order_item
+join `tabSales Order` so on so.name = soi.parent
+join `tabItem` item on item.name = soi.item_code and item.is_stock_item = 1
+where r.status = %(resolved)s
+	and so.docstatus = 1 and so.status not in ('Closed', 'On Hold', 'Completed', 'Cancelled')
+	and ifnull(soi.delivered_by_supplier, 0) = 0
+	and not exists ({pending_issue})
+	and not exists (
+		select 1 from `tabPick List Item` d
+		join `tabPick List` dpl on dpl.name = d.parent and dpl.docstatus = 0
+		where d.sales_order_item = r.sales_order_item and d.parenttype = 'Pick List'
 	)
-	if not touched:
-		return []
+	and round(
+		greatest(soi.stock_qty - soi.delivered_qty, 0) - ifnull((
+			select sum(case when c.picked_qty > 0 and c.docstatus = 1
+				then c.picked_qty - c.delivered_qty else c.stock_qty end)
+			from `tabPick List Item` c
+			join `tabPick List` cpl on cpl.name = c.parent
+			where c.sales_order_item = r.sales_order_item
+				and cpl.status not in ('Completed', 'Cancelled')
+				and c.docstatus != 2
+		), 0), 6) > 0
 
-	resolved_on = _resolution_dates(touched)
-	names = sorted(name for name, ts in resolved_on.items() if first_day <= getdate(ts) <= last_day)
-	if not names:
-		return []
+union all
 
-	return frappe.get_list(
-		"Reporte de Faltante",
-		filters=[
-			["name", "in", names],
-			["status", "=", RESOLVED_STATUS],
-			["pick_list", "is", "set"],
-			["pick_list_item", "is", "set"],
-		],
-		fields=["name", "pick_list", "pick_list_item", "sales_order", "sales_order_item"],
-		order_by="name asc",
-		limit_page_length=0,
+select r.name, r.pick_list, r.sales_order_item, 'E'
+from `tabReporte de Faltante` r
+join `tabPick List` orig on orig.name = r.pick_list and orig.docstatus = 1
+where r.status in %(active)s
+	and ifnull(orig.fg_invoicing_status, '') != 'Facturado'
+	and exists ({pending_issue})
+
+order by report, pick_list
+""".format(
+	# A Sales Order that is gone, cancelled, Closed, On Hold or Completed
+	# leaves nothing to pick (ensure_remaining_pick_list()'s own block).
+	so_open="(r.sales_order is null or r.sales_order = '' or (so.docstatus = 1 "
+	"and so.status not in ('Closed', 'On Hold', 'Completed', 'Cancelled')))",
+	# Same rule as stock_issue_service.pending_issue_rows(): picked and
+	# neither delivered nor issued.
+	pending_issue="select 1 from `tabPick List Item` e where e.parent = orig.name "
+	"and e.parenttype = 'Pick List' and round(e.picked_qty - e.delivered_qty - e.transferred_qty, 6) > 0",
+)
+
+
+def _pending_candidates():
+	"""[{report, pick_list, sales_order_item, kind}] -- see module docstring
+	for A/B/C/E. The raw statement is then narrowed to the reports the
+	caller may read (one get_list, never one call per report)."""
+	rows = frappe.db.sql(
+		_CANDIDATES_SQL,
+		{"active": tuple(OPEN_SHORTAGE_STATUSES) + (RESOLVED_STATUS,), "resolved": RESOLVED_STATUS},
+		as_dict=True,
 	)
+	if not rows:
+		return []
+	readable = set(
+		frappe.get_list(
+			"Reporte de Faltante",
+			filters={"name": ["in", sorted({r.report for r in rows})]},
+			pluck="name",
+			limit_page_length=0,
+		)
+	)
+	return [r for r in rows if r.report in readable]
 
 
-def _collect_targets(reports):
-	"""({pick_list: {"reports": [resolved reports that made it a candidate]}}
-	in first-seen order, [early ERROR results]). Remainder Pick
-	Lists are created here, each in its own committed transaction, BEFORE
-	any Pick List is completed: ensure_remaining_pick_list() locks Sales
-	Order -> Pick List Item, a different order than COMPLETAR PEDIDO's
-	Bin -> Pick List, so the two never nest."""
+def _plan(candidates):
+	"""([(key, entry)] processable A/B/C targets in first-seen order,
+	[legacy Pick List names]). A/B are keyed by their Pick List (several
+	reports of one Pick List are one target), C by its Sales Order line
+	(one remainder each). Nothing is written here."""
+	work = {}
+	legacy = []
+	for row in candidates:
+		if row.kind == KIND_LEGACY:
+			if row.pick_list not in legacy:
+				legacy.append(row.pick_list)
+			continue
+		if row.kind == KIND_NEEDS_REMAINDER:
+			key = ("C", row.sales_order_item)
+		else:
+			key = ("PL", row.pick_list)
+		entry = work.setdefault(key, {"kind": row.kind, "reports": []})
+		if row.report not in entry["reports"]:
+			entry["reports"].append(row.report)
+	return list(work.items()), legacy
+
+
+def _collect_targets(batch):
+	"""({pick_list: {"reports": [...]}} in batch order, [early ERROR
+	results]). C remainders are created here, each in its own committed
+	transaction, BEFORE any Pick List is completed:
+	ensure_remaining_pick_list() locks Sales Order -> Pick List Item, a
+	different order than COMPLETAR PEDIDO's Bin -> Pick List, so the two
+	never nest. A remainder another process created meanwhile is reused; a
+	line whose demand vanished meanwhile simply yields nothing."""
 	targets = {}
 	errors = []
 
-	def add(pick_list, report):
-		targets.setdefault(pick_list, {"reports": []})["reports"].append(report.name)
+	def add(pick_list, reports):
+		bucket = targets.setdefault(pick_list, {"reports": []})["reports"]
+		bucket.extend(r for r in reports if r not in bucket)
 
-	for report in reports:
-		docstatus = frappe.db.get_value("Pick List", report.pick_list, "docstatus")
-		if docstatus == 0:
-			add(report.pick_list, report)
-			continue
-		if docstatus != 1:
-			continue  # cancelled / deleted
-
-		original = frappe.get_doc("Pick List", report.pick_list)
-		if pending_issue_rows(original):
-			# Legacy: submitted without a complete Material Issue. COMPLETAR
-			# PEDIDO's guard refuses it (ERROR); never repaired here.
-			add(report.pick_list, report)
+	for (key_type, key), entry in batch:
+		if key_type == "PL":
+			add(key, entry["reports"])
 			continue
 
-		if not report.sales_order_item:
+		report = frappe.db.get_value(
+			"Reporte de Faltante",
+			entry["reports"][0],
+			["name", "pick_list", "sales_order_item"],
+			as_dict=True,
+		)
+		try:
+			_retrying_on_deadlock(ensure_remaining_pick_list)(report.name)
+			frappe.db.commit()
+		except Exception as e:
+			frappe.db.rollback()
+			errors.append(_result(report.pick_list, STATUS_ERROR, detail=_error_text(e)))
 			continue
-
-		remainders = _draft_remainders(report)
-		if not remainders:
-			try:
-				_retrying_on_deadlock(ensure_remaining_pick_list)(report.name)
-				frappe.db.commit()
-			except Exception as e:
-				frappe.db.rollback()
-				if report.pick_list not in {r["pick_list"] for r in errors}:
-					errors.append(_result(report.pick_list, STATUS_ERROR, detail=_error_text(e)))
-				continue
-			remainders = _draft_remainders(report)
-
-		for pick_list in remainders:
-			add(pick_list, report)
+		for pick_list in _draft_remainders(report):
+			add(pick_list, entry["reports"])
 
 	return targets, errors
 
@@ -241,6 +327,19 @@ def _draft_remainders(report):
 				pluck="parent",
 			)
 		)
+	)
+
+
+def _legacy_result(pick_list):
+	"""Kind E, read-only: no lock, no transaction, nothing repaired."""
+	lines = "".join(
+		"\n{0} — {1}: {2} sin salida de inventario".format(row.item_code, row.warehouse, _units(qty))
+		for row, qty in pending_issue_rows(frappe.get_doc("Pick List", pick_list))
+	)
+	return _result(
+		pick_list,
+		STATUS_ERROR,
+		detail=_("Finalizado sin salida de inventario completa: requiere revisión administrativa.") + lines,
 	)
 
 

@@ -381,7 +381,7 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 		};
 		frappe.confirm(
 			__(
-				"Se revisarán los pedidos con faltantes resueltos en los últimos 3 días (hoy, ayer y anteayer). Solo se completarán los que tengan existencias suficientes en bodega. ¿Deseas continuar?"
+				"Se revisarán todos los pedidos con faltantes resueltos que aún estén pendientes de completar. Solo se completarán los que tengan existencias suficientes en bodega. ¿Deseas continuar?"
 			),
 			() => {
 				this.set_busy(true);
@@ -434,6 +434,14 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 					[cint(result.remaining_count)]
 			  )}</div>`
 			: "";
+		// Errores históricos (revisión administrativa): no ocupan el cupo
+		// del lote; el servidor lista un máximo y dice cuántos más hay.
+		const error_remaining = cint(result.error_remaining_count)
+			? `<div class="fg-resolved-remaining">${__(
+					"Hay {0} errores más que requieren revisión administrativa.",
+					[cint(result.error_remaining_count)]
+			  )}</div>`
+			: "";
 		const table = rows
 			? `<div class="fg-resolved-table-wrap"><table class="fg-resolved-table">
 					<thead><tr>
@@ -442,7 +450,7 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 					</tr></thead>
 					<tbody>${rows}</tbody>
 				</table></div>`
-			: `<div class="fg-resolved-empty">${__("No hay pedidos con faltantes resueltos en los últimos 3 días por validar.")}</div>`;
+			: `<div class="fg-resolved-empty">${__("No hay pedidos pendientes con faltantes resueltos para validar.")}</div>`;
 
 		const dialog = new frappe.ui.Dialog({
 			title: __("Validación terminada"),
@@ -459,6 +467,7 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 							<div>${__("Errores")}: <strong>${cint(s.errors)}</strong></div>
 						</div>
 						${remaining}
+						${error_remaining}
 						${table}
 					`,
 				},

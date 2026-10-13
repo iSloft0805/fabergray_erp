@@ -6,9 +6,10 @@ fulfillment.resolved_shortage_service).
 Real stock (fixtures.stock_up_real()) in this suite's own throwaway
 warehouses, the real Bodega flow for picking/shortage reports, and a real
 .save() to resolve each report (so the Version log records the transition,
-exactly like production). Discovery is scoped to each test's own reports
-(_run()) so a run never touches whatever else the dev site resolved today;
-everything below discovery is the real code path."""
+exactly like production). Discovery runs the real candidate statement and
+is then scoped to each test's own reports (_run()), so a run never touches
+whatever else is pending on the dev site; everything below discovery is
+the real code path."""
 
 import os
 import threading
@@ -18,7 +19,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import flt
 
-from fabergray_erp.api import bodega, jefe_bodega
+from fabergray_erp.api import bodega, facturacion, jefe_bodega
 from fabergray_erp.fulfillment import resolved_shortage_service as rss
 from fabergray_erp.fulfillment import stock_issue_service
 from fabergray_erp.fulfillment.remainder_service import ensure_remaining_pick_list
@@ -39,6 +40,7 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		super().setUpClass()
 		cls._setup_world("FGRSV")
 		cls.jefe = cls.world.user(f"fgrsv-jefe-{cls.tag.lower()}@example.com", ["Jefe de Bodega"])
+		cls.facturacion_user = cls.world.user(f"fgrsv-fact-{cls.tag.lower()}@example.com", ["Facturación"])
 		cls.all_reports = []
 		cls.addClassCleanup(cls._purge_report_versions)
 		# The service commits per Pick List and some tests roll back: the
@@ -76,21 +78,30 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		# by default; production always records them (same as
 		# test_reporte_faltantes.py).
 		doc.save(ignore_version=False)
-		self.my_reports.append(report_name)
-		self.all_reports.append(report_name)
+		self._mine(report_name)
+
+	def _mine(self, report_name):
+		"""Scope discovery to this report (an Abierto one, for instance)."""
+		if report_name not in self.my_reports:
+			self.my_reports.append(report_name)
+			self.all_reports.append(report_name)
+
+	def _scoped_candidates(self):
+		mine = set(self.my_reports)
+		return [r for r in rss._pending_candidates() if r.report in mine]
 
 	def _run(self, user=None, limit=None):
 		# A real request starts with nothing pending: the service rolls back
 		# a refused Pick List, which must never take this test's fixtures
 		# with it.
 		frappe.db.commit()
-		original = rss._reports_resolved_today
+		original = rss._pending_candidates
 		mine = set(self.my_reports)
 
 		def scoped():
-			return [r for r in original() if r.name in mine]
+			return [r for r in original() if r.report in mine]
 
-		with patch.object(rss, "_reports_resolved_today", scoped), fx.as_user(user or self.jefe):
+		with patch.object(rss, "_pending_candidates", scoped), fx.as_user(user or self.jefe):
 			if limit is not None:
 				return rss.validate_resolved_shortage_orders(limit=limit)
 			return jefe_bodega.validate_resolved_shortage_orders()
@@ -163,7 +174,8 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		second = self._run()
 
 		self.assertEqual(self._row(first, pl)["status"], rss.STATUS_COMPLETED)
-		self.assertEqual([r for r in second["results"] if r["status"] == rss.STATUS_COMPLETED], [])
+		# A completed order is no candidate at all: not even YA COMPLETADO.
+		self.assertEqual(second["results"], [])
 		self.assertEqual(len(_stock_issues(pl)), 1)
 		self.assertEqual(_actual(item, self.wh_liq), 0)
 		self.assertEqual(self._pick_lists_of(so.name), {pl})  # no remainder for a fully issued line
@@ -560,25 +572,7 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		self.assertEqual(_actual(item, self.wh_liq), 10)
 
 	def test_legacy_submitted_pick_list_without_issue_is_an_error_never_repaired(self):
-		item = self._item(self.wh_liq, stock=20)
-		so, pl = self._order((item, self.wh_liq, 4))
-		self._pick(pl)
-		with stock_issue_service.controlled_pick_list_submit(pl):
-			frappe.get_doc("Pick List", pl).submit()
-		pl_row = frappe.get_doc("Pick List", pl).locations[0]
-		report = self.world.shortage_report(
-			item_code=item,
-			warehouse=self.wh_liq,
-			sales_order=so.name,
-			sales_order_item=pl_row.sales_order_item,
-			pick_list=pl,
-			pick_list_item=pl_row.name,
-			qty_solicitada=4,
-			qty_disponible=3,
-			detected_by="Bodega",
-			shortage_reason="Stock insuficiente",
-		)
-		self._resolve(report.name)
+		item, so, pl, _report = self._legacy_submitted()
 
 		row = self._row(self._run(), pl)
 
@@ -636,7 +630,13 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 	def test_jefe_de_bodega_can_run_it(self):
 		result = self._run()
 		self.assertEqual(
-			result, {"summary": {"completed": 0, "still_short": 0, "already_completed": 0, "errors": 0}, "results": [], "remaining_count": 0}
+			result,
+			{
+				"summary": {"completed": 0, "still_short": 0, "already_completed": 0, "errors": 0},
+				"results": [],
+				"remaining_count": 0,
+				"error_remaining_count": 0,
+			},
 		)
 
 	def test_bodega_cannot_run_it(self):
@@ -658,7 +658,7 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		self.assertFalse(self._complete(pl)["already_completed"])
 
 	# =====================================================================
-	# "Resuelto" window: the status transition, not any edit
+	# No date window: what counts is pending work, not when it was resolved
 	# =====================================================================
 
 	def _backdate_versions(self, report_name, days=1):
@@ -670,62 +670,307 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 			(days, report_name),
 		)
 
-	def test_window_is_today_and_the_two_previous_days(self):
-		self.assertEqual(rss.RESOLVED_SHORTAGE_LOOKBACK_DAYS, 3)
-		self.assertEqual(
-			rss.resolution_window("2026-10-07"), (frappe.utils.getdate("2026-10-05"), frappe.utils.getdate("2026-10-07"))
+	def _age(self, report_name, days):
+		"""Test-only: the report (and its whole Version log) is `days` old."""
+		self._backdate_versions(report_name, days)
+		frappe.db.sql(
+			"""update `tabReporte de Faltante`
+			set creation = creation - interval %s day, modified = modified - interval %s day
+			where name = %s""",
+			(days, days, report_name),
 		)
 
-	def test_resolved_today_yesterday_and_two_days_ago_are_included(self):
-		for days in (0, 1, 2):
+	def _kinds(self):
+		return sorted((r.kind, r.pick_list) for r in self._scoped_candidates())
+
+	def test_resolved_today_5_and_30_days_ago_enter_while_pending(self):
+		for days in (0, 5, 30):
 			with self.subTest(days=days):
 				item, _so, pl, report = self._draft_with_resolved_shortage()
 				if days:
-					self._backdate_versions(report.name, days)
+					self._age(report.name, days)
 				row = self._row(self._run(), pl)
 				self.assertEqual(row["status"], rss.STATUS_COMPLETED, row)
 				self.assertEqual(_actual(item, self.wh_liq), 0)
 
-	def test_resolved_three_days_ago_is_out_of_the_window(self):
-		_item, _so, pl, report = self._draft_with_resolved_shortage()
-		self._backdate_versions(report.name, 3)
+	def test_old_resolved_report_whose_order_is_covered_never_enters(self):
+		_item, so, pl, report = self._partial_then_resolved()
+		self._run()  # remainder created and completed: 6 + 4 issued
+		remainders = self._pick_lists_of(so.name) - {pl}
+		for name in remainders:
+			self.world.track_existing("Pick List", name)
+		self._age(report.name, 30)
 
-		result = self._run()
+		self.assertEqual(self._kinds(), [])
+		self.assertEqual(self._run()["results"], [])
+		self.assertEqual(self._pick_lists_of(so.name), {pl} | remainders)
 
-		self.assertEqual([r for r in result["results"] if r["pick_list"] == pl], [])
-		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
+	# =====================================================================
+	# Universe: A / B / C / E, and what never enters
+	# =====================================================================
 
-	def test_resolved_before_the_window_and_edited_today_is_not_included(self):
-		_item, _so, pl, report = self._draft_with_resolved_shortage()
-		self._backdate_versions(report.name, 3)
-		doc = frappe.get_doc("Reporte de Faltante", report.name)
-		doc.resolution_note = "Nota editada hoy"
-		doc.save(ignore_version=False)  # a Version row created today, without a status change
-		self.assertTrue(
-			frappe.db.exists(
-				"Version",
-				{"ref_doctype": "Reporte de Faltante", "docname": report.name, "creation": [">=", frappe.utils.nowdate()]},
-			)
+	def test_candidate_a_draft_with_resolved_report(self):
+		_item, _so, pl, _report = self._draft_with_resolved_shortage()
+		self.assertEqual(self._kinds(), [(rss.KIND_DRAFT, pl)])
+
+	def test_candidate_a_draft_with_only_open_report_is_listed_but_blocked(self):
+		for status in ("Abierto", "En Proceso"):
+			with self.subTest(status=status):
+				item = self._item(self.wh_liq)
+				_so, pl = self._order((item, self.wh_liq, 4))
+				self._pick(pl, {item: 0})
+				self.world.stock_up_real(item, self.wh_liq, 4, rate=RATE)
+				report = self._report_for(pl)
+				frappe.db.set_value("Reporte de Faltante", report.name, "status", status)
+				self._mine(report.name)
+				self.assertEqual([k for k in self._kinds() if k[1] == pl], [(rss.KIND_DRAFT, pl)])
+
+				row = self._row(self._run(), pl)
+
+				self.assertEqual(row["status"], rss.STATUS_STILL_SHORT, row)
+				self.assertIn(report.name, row["detail"])
+				self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
+				self.assertEqual(self._picked(pl), [0])
+				self.assertEqual(frappe.db.get_value("Reporte de Faltante", report.name, "status"), status)
+				self.assertEqual(_actual(item, self.wh_liq), 4)
+
+	def test_candidate_b_draft_remainder(self):
+		_item, _so, pl, report = self._partial_then_resolved()
+		remainder = ensure_remaining_pick_list(report.name)
+		self.world.track_existing("Pick List", remainder)
+		self.assertEqual(self._kinds(), [(rss.KIND_REMAINDER, remainder)])
+
+	def test_candidate_c_submitted_with_issue_and_real_demand(self):
+		_item, so, pl, _report = self._partial_then_resolved()
+		self.assertEqual(self._kinds(), [(rss.KIND_NEEDS_REMAINDER, pl)])
+		self.assertEqual(self._pick_lists_of(so.name), {pl})  # discovery creates nothing
+
+	def test_submitted_with_issue_and_no_demand_is_no_candidate(self):
+		item = self._item(self.wh_liq, stock=4)
+		so, pl = self._order((item, self.wh_liq, 4))
+		self._pick(pl)
+		self._complete(pl)
+		row = frappe.get_doc("Pick List", pl).locations[0]
+		report = self.world.shortage_report(
+			item_code=item,
+			warehouse=self.wh_liq,
+			sales_order=so.name,
+			sales_order_item=row.sales_order_item,
+			pick_list=pl,
+			pick_list_item=row.name,
+			qty_solicitada=4,
+			qty_disponible=4,
+			detected_by="Bodega",
+			shortage_reason="Stock insuficiente",
 		)
-
-		result = self._run()
-
-		self.assertEqual([r for r in result["results"] if r["pick_list"] == pl], [])
-		self.assertEqual(frappe.db.get_value("Pick List", pl, "docstatus"), 0)
-		self.assertEqual(self._picked(pl), [0])
-
-	def test_reopened_and_resolved_again_inside_the_window_is_included(self):
-		item, _so, pl, report = self._draft_with_resolved_shortage()
-		self._backdate_versions(report.name, 3)
-		doc = frappe.get_doc("Reporte de Faltante", report.name)
-		doc.status = "Abierto"
-		doc.save(ignore_version=False)
 		self._resolve(report.name)
 
-		row = self._row(self._run(), pl)
+		self.assertEqual(self._kinds(), [])
+		self.assertEqual(self._run()["results"], [])
+		self.assertEqual(self._pick_lists_of(so.name), {pl})
+		self.assertEqual(len(_stock_issues(pl)), 1)
 
-		self.assertEqual(row["status"], rss.STATUS_COMPLETED, row)
+	def test_order_ready_for_facturacion_or_invoiced_is_no_candidate(self):
+		item, so, pl, _report = self._draft_with_resolved_shortage()
+		self._run()
+		before = frappe.db.get_value("Pick List", pl, ["modified", "docstatus"], as_dict=True)
+
+		for invoicing_status in ("Pendiente", "Facturado"):
+			with self.subTest(invoicing_status=invoicing_status):
+				frappe.db.set_value("Pick List", pl, "fg_invoicing_status", invoicing_status, update_modified=False)
+				self.assertEqual(self._kinds(), [])
+				self.assertEqual(self._run()["results"], [])
+				self.assertEqual(frappe.db.get_value("Pick List", pl, ["modified", "docstatus"], as_dict=True), before)
+				self.assertEqual(self._picked(pl), [4])
+				self.assertEqual(len(_stock_issues(pl)), 1)
+				self.assertEqual(_actual(item, self.wh_liq), 0)
+		self.assertEqual(self._pick_lists_of(so.name), {pl})
+
+	def test_concurrent_completion_after_selection_is_already_completed(self):
+		item, _so, pl, _report = self._draft_with_resolved_shortage()
+		original = rss._collect_targets
+
+		def completed_by_bodega_meanwhile(batch):
+			targets, errors = original(batch)
+			row_name = frappe.get_doc("Pick List", pl).locations[0].name
+			with fx.as_user(self.bodega_user):
+				bodega.set_picked_qty(pl, row_name, 4)
+				bodega.finish_picking(pl)
+			frappe.db.commit()
+			return targets, errors
+
+		with patch.object(rss, "_collect_targets", completed_by_bodega_meanwhile):
+			result = self._run()
+
+		row = self._row(result, pl)
+		self.assertEqual(row["status"], rss.STATUS_ALREADY_COMPLETED, row)
+		self.assertEqual(result["summary"]["already_completed"], 1)
+		self.assertEqual(len(_stock_issues(pl)), 1)
 		self.assertEqual(_actual(item, self.wh_liq), 0)
+
+	# =====================================================================
+	# Legacy (E): ERROR, read-only, outside the batch quota
+	# =====================================================================
+
+	def _legacy_submitted(self):
+		"""Submitted without any Material Issue (pre INVENTARIO-OUT-01)."""
+		item = self._item(self.wh_liq, stock=20)
+		so, pl = self._order((item, self.wh_liq, 4))
+		self._pick(pl)
+		with stock_issue_service.controlled_pick_list_submit(pl):
+			frappe.get_doc("Pick List", pl).submit()
+		pl_row = frappe.get_doc("Pick List", pl).locations[0]
+		report = self.world.shortage_report(
+			item_code=item,
+			warehouse=self.wh_liq,
+			sales_order=so.name,
+			sales_order_item=pl_row.sales_order_item,
+			pick_list=pl,
+			pick_list_item=pl_row.name,
+			qty_solicitada=4,
+			qty_disponible=3,
+			detected_by="Bodega",
+			shortage_reason="Stock insuficiente",
+		)
+		self._resolve(report.name)
+		return item, so, pl, report
+
+	def test_legacy_error_does_not_use_the_batch_quota(self):
+		_li, _ls, legacy, legacy_report = self._legacy_submitted()
+		self._age(legacy_report.name, 30)
+		item, _so, draft, _report = self._draft_with_resolved_shortage()
+
+		result = self._run(limit=1)
+
+		self.assertEqual(self._row(result, draft)["status"], rss.STATUS_COMPLETED)
+		error = self._row(result, legacy)
+		self.assertEqual(error["status"], rss.STATUS_ERROR)
+		self.assertIn("revisión administrativa", error["detail"])
+		self.assertEqual((result["remaining_count"], result["error_remaining_count"]), (0, 0))
+		self.assertEqual(frappe.db.count("Stock Entry", {"pick_list": legacy}), 0)
+
+	def test_invoiced_legacy_is_no_candidate(self):
+		_item, _so, pl, _report = self._legacy_submitted()
+		frappe.db.set_value("Pick List", pl, "fg_invoicing_status", "Facturado")
+		self.assertEqual(self._kinds(), [])
+		self.assertEqual(self._run()["results"], [])
+
+	def test_error_rows_are_capped_and_report_the_remaining_count(self):
+		self.assertEqual(rss.MAX_ERROR_RESULTS, 20)
+		legacy = sorted(self._legacy_submitted()[2] for _ in range(3))
+
+		with patch.object(rss, "MAX_ERROR_RESULTS", 2):
+			result = self._run()
+
+		self.assertEqual([r["status"] for r in result["results"]], [rss.STATUS_ERROR] * 2)
+		self.assertEqual(result["error_remaining_count"], 1)
+		self.assertEqual(result["remaining_count"], 0)
+		self.assertEqual(result["summary"]["errors"], 2)
+
+	# =====================================================================
+	# Case C and the batch cut
+	# =====================================================================
+
+	def test_c_outside_the_batch_creates_no_remainder(self):
+		_i1, so_1, pl_1, _r1 = self._partial_then_resolved()
+		_i2, so_2, pl_2, _r2 = self._partial_then_resolved()
+
+		result = self._run(limit=1)
+
+		created = (self._pick_lists_of(so_1.name) - {pl_1}) | (self._pick_lists_of(so_2.name) - {pl_2})
+		for name in created:
+			self.world.track_existing("Pick List", name)
+		self.assertEqual(len(created), 1)
+		self.assertEqual(result["remaining_count"], 1)
+		self.assertEqual([r["status"] for r in result["results"]], [rss.STATUS_COMPLETED])
+
+	def test_c_creates_exactly_one_remainder_across_runs(self):
+		_item, so, pl, _report = self._partial_then_resolved()
+
+		first = self._run()
+		second = self._run()
+
+		remainders = self._pick_lists_of(so.name) - {pl}
+		for name in remainders:
+			self.world.track_existing("Pick List", name)
+		self.assertEqual(len(remainders), 1)
+		self.assertEqual(self._row(first, next(iter(remainders)))["status"], rss.STATUS_COMPLETED)
+		self.assertEqual(second["results"], [])
+
+	# =====================================================================
+	# Facturación: the completed order is really ready, no artificial flag
+	# =====================================================================
+
+	def test_completed_order_appears_pending_in_facturacion(self):
+		"""The very Pick List the button completed is available to
+		Facturación through the real API -- identified by name, never
+		inferred from an aggregate another pending order could satisfy."""
+		_item, so, pl, _report = self._partial_then_resolved()
+		with fx.as_user(self.facturacion_user):
+			pendientes_before = facturacion.get_invoicing_summary()["pendientes"]
+
+		result = self._run()
+
+		remainders = self._pick_lists_of(so.name) - {pl}
+		for name in remainders:
+			self.world.track_existing("Pick List", name)
+		self.assertEqual(len(remainders), 1)
+		remainder = next(iter(remainders))
+		row = self._row(result, remainder)
+		self.assertEqual(row["status"], rss.STATUS_COMPLETED)
+
+		# The real contract: submitted, every unit picked and issued once.
+		doc = frappe.get_doc("Pick List", remainder)
+		self.assertEqual(doc.docstatus, 1)
+		self.assertEqual(doc.fg_invoicing_status, "Pendiente")
+		self.assertTrue(doc.locations)
+		for line in doc.locations:
+			self.assertEqual(
+				(flt(line.transferred_qty), flt(line.picked_qty)), (flt(line.stock_qty), flt(line.stock_qty))
+			)
+		issues = _stock_issues(remainder)
+		self.assertEqual([i.name for i in issues], [row["material_issue"]])
+		self.assertEqual(
+			frappe.db.count(
+				"Stock Entry", {"pick_list": remainder, "purpose": "Material Issue", "docstatus": ["!=", 2]}
+			),
+			1,
+		)
+
+		with fx.as_user(self.facturacion_user):
+			pendiente = facturacion.get_invoicing_queue(status="Pendiente", txt=remainder)
+			facturado = facturacion.get_invoicing_queue(status="Facturado", txt=remainder)
+			detail = facturacion.get_invoicing_detail(remainder)
+			legacy_queue = {r["name"]: r for r in facturacion.get_pending_pick_lists()}
+			pendientes_after = facturacion.get_invoicing_summary()["pendientes"]
+
+		# get_invoicing_queue(): this exact Pick List, once, in Pendiente.
+		entries = [r for r in pendiente["pick_lists"] if r["name"] == remainder]
+		self.assertEqual(len(entries), 1, pendiente)
+		entry = entries[0]
+		self.assertEqual(entry["fg_invoicing_status"], "Pendiente")
+		self.assertEqual(entry["sales_order"], so.name)
+		self.assertEqual(entry["total_qty"], sum(flt(line.picked_qty) for line in doc.locations))
+		self.assertEqual(entry["total_qty"], 4)
+		self.assertEqual(entry["item_count"], len(doc.locations))
+		self.assertEqual([r for r in facturado["pick_lists"] if r["name"] == remainder], [])
+
+		# get_invoicing_detail(): the same document, line by line.
+		self.assertEqual(detail["pick_list"], remainder)
+		self.assertEqual(detail["sales_order"], so.name)
+		self.assertEqual(detail["fg_invoicing_status"], "Pendiente")
+		self.assertEqual(
+			[(i["row_name"], i["item_code"], i["qty"]) for i in detail["items"]],
+			[(line.name, line.item_code, flt(line.picked_qty)) for line in doc.locations],
+		)
+		self.assertEqual(detail["total_qty"], 4)
+
+		# No open shortage left on either Pick List of the order.
+		self.assertFalse(legacy_queue[remainder]["has_open_shortage"])
+		self.assertFalse(legacy_queue[pl]["has_open_shortage"])
+
+		# Complementary only (an aggregate): exactly one new pending order.
+		self.assertEqual(pendientes_after, pendientes_before + 1)
 
 	# =====================================================================
 	# Operational reservation: Bin.actual_qty - held by OTHER draft Pick Lists
@@ -935,7 +1180,10 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 			frappe.set_user(self.jefe)
 			try:
 				barrier.wait(timeout=30)
-				_targets, early = rss._collect_targets([report_row])
+				work, _legacy = rss._plan(
+					[r for r in rss._pending_candidates() if r.report == report_row.name]
+				)
+				_targets, early = rss._collect_targets(work)
 				errors.extend(early)
 			except Exception as e:
 				errors.append(repr(e))
@@ -967,7 +1215,7 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 
 		result = self._run()
 
-		self.assertEqual(set(result), {"summary", "results", "remaining_count"})
+		self.assertEqual(set(result), {"summary", "results", "remaining_count", "error_remaining_count"})
 		allowed = {rss.STATUS_COMPLETED, rss.STATUS_STILL_SHORT, rss.STATUS_ALREADY_COMPLETED, rss.STATUS_ERROR}
 		for row in result["results"]:
 			self.assertEqual(set(row), self.RESULT_KEYS)
@@ -1008,11 +1256,13 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 			js = f.read()
 		self.assertIn('__("Validar pedidos con faltantes resueltos")', js)
 		self.assertIn(
-			"Se revisarán los pedidos con faltantes resueltos en los últimos 3 días (hoy, ayer y anteayer). "
-			"Solo se completarán los que tengan "
-			"existencias suficientes en bodega. ¿Deseas continuar?",
+			"Se revisarán todos los pedidos con faltantes resueltos que aún estén pendientes de completar. "
+			"Solo se completarán los que tengan existencias suficientes en bodega. ¿Deseas continuar?",
 			js,
 		)
+		self.assertIn('__("No hay pedidos pendientes con faltantes resueltos para validar.")', js)
+		self.assertNotIn("últimos 3 días", js)
+		self.assertIn("error_remaining_count", js)
 		self.assertIn("frappe.confirm(", js)
 		self.assertIn('"validate_resolved_shortage_orders"', js)
 		self.assertIn('frappe.user.has_role(["Jefe de Bodega", "System Manager"])', js)
