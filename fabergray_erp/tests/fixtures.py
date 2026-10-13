@@ -38,6 +38,7 @@ here for creation -- ignore_permissions is not needed for setup, only for the
 teardown case documented above.
 """
 
+import itertools
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -79,7 +80,11 @@ class TestWorld:
 		self.real_stock = real_stock
 		self._created = []  # [(doctype, name), ...] in creation order
 		self._shared_group_docs_created = False
+		#: This world's own namespace: isolates its invoice numbering and its
+		#: Reporte de Faltante names from every real document on the site.
+		self.namespace = frappe.generate_hash(length=8).upper()
 		self._isolate_invoice_numbering()
+		self._isolate_shortage_report_names()
 
 	def _isolate_invoice_numbering(self):
 		"""Ajuste numeración por empresa -- facturacion.mark_as_invoiced()
@@ -89,22 +94,80 @@ class TestWorld:
 		FG-FACT-ECOLUMINAR-) of the site it runs on. Every TestWorld swaps
 		invoice_issuers.INVOICE_NUMBERING to series keys unique to itself --
 		same `start` numbers, so a test can still assert 6886/2263 -- and
-		cleanup() restores it and deletes those tabSeries rows."""
+		cleanup() restores it and deletes those tabSeries rows.
+
+		The UNIQUE Pick List.fg_invoice_number_key is isolated the same way:
+		production builds "<issuer>-<number>" (integrandoMAS-6886), so a test
+		number would collide with a real invoice already numbered on the site
+		(e.g. a local smoke invoice). Inside this TestWorld the key is
+		"<test series><number>" (FG-FACT-TEST-<ns>-INTEGRANDOMAS-6886): the
+		number stays deterministic, the key can never equal a real one, and
+		no real invoice is ever read, moved or deleted. Production's own key
+		format stays available as `production_invoice_number_key`."""
 		from unittest.mock import patch
 
 		from fabergray_erp import invoice_issuers
+		from fabergray_erp.api import facturacion
 
-		sfx = frappe.generate_hash(length=8).upper()
+		sfx = self.namespace
 		self.invoice_numbering = {
 			issuer: {"series": f"FG-FACT-TEST-{sfx}-{issuer.upper()}-", "start": config["start"]}
 			for issuer, config in invoice_issuers.INVOICE_NUMBERING.items()
 		}
 		self._invoice_numbering_patch = patch.dict(invoice_issuers.INVOICE_NUMBERING, self.invoice_numbering)
 		self._invoice_numbering_patch.start()
+		self.production_invoice_number_key = facturacion._invoice_number_key
+		self._invoice_number_key_patch = patch.object(
+			facturacion, "_invoice_number_key", self.invoice_number_key
+		)
+		self._invoice_number_key_patch.start()
+
+	def invoice_number_key(self, issuer, number):
+		"""The fg_invoice_number_key FACTURAR writes inside this TestWorld."""
+		return f"{self.invoice_numbering[issuer]['series']}{number}"
+
+	def _isolate_shortage_report_names(self):
+		"""Reporte de Faltante is named by its DocType expression
+		FALT-.YYYY.-.##### -- the site's REAL series. When a test deletes its
+		reports, Frappe reverts that series and the next test reuses the same
+		name, which documents that outlive the report (e.g. a submitted
+		Material Receipt whose fg_shortage_report still points to it) then
+		appear to belong to the new report. Inside this TestWorld a report is
+		named FG-TEST-<ns>-FALT-00001, -00002... instead: deterministic per
+		world, unique across worlds (the namespace), never a real name, and
+		the real FALT- series is never read or advanced. Frappe's naming calls
+		the controller's `autoname` before the DocType expression; the
+		controller has none of its own, so this one exists only while the
+		world is alive (cleanup() removes it). Production naming is untouched."""
+		from unittest.mock import patch
+
+		from fabergray_erp.fabrigray_erp.doctype.reporte_de_faltante.reporte_de_faltante import (
+			ReportedeFaltante,
+		)
+
+		counter = itertools.count(1)
+		self._shortage_report_counter = counter
+
+		def autoname(doc):
+			doc.name = self.shortage_report_name(next(counter))
+
+		self._shortage_report_name_patch = patch.object(ReportedeFaltante, "autoname", autoname, create=True)
+		self._shortage_report_name_patch.start()
+
+	def shortage_report_name(self, seq):
+		"""The name of this world's `seq`-th Reporte de Faltante."""
+		return f"FG-TEST-{self.namespace}-FALT-{seq:05d}"
+
+	def _restore_shortage_report_names(self):
+		if getattr(self, "_shortage_report_name_patch", None):
+			self._shortage_report_name_patch.stop()
+			self._shortage_report_name_patch = None
 
 	def _restore_invoice_numbering(self):
 		if not self._invoice_numbering_patch:
 			return
+		self._invoice_number_key_patch.stop()
+		self._invoice_number_key_patch = None
 		self._invoice_numbering_patch.stop()
 		self._invoice_numbering_patch = None
 		for config in self.invoice_numbering.values():
@@ -597,6 +660,7 @@ class TestWorld:
 				# handles for Warehouse/Stock Ledger Entry).
 				frappe.db.delete("GL Entry", {"account": name})
 			frappe.delete_doc(doctype, name, ignore_permissions=True, force=True, ignore_on_trash=True)
+		self._restore_shortage_report_names()
 		self._restore_invoice_numbering()
 		frappe.db.commit()
 

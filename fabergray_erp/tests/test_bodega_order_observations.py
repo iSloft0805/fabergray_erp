@@ -297,6 +297,9 @@ class TestGetPickListObservations(_ObservationsBodegaWorld):
 				"fg_started_by",
 				"fg_started_on",
 				"order_observations",
+				# Facturación con faltantes (fulfillment.shortage_invoice).
+				"invoiced_with_shortage",
+				"invoiced_with_shortage_message",
 				"rows",
 			},
 		)

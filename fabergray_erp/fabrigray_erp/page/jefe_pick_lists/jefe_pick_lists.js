@@ -346,9 +346,48 @@ fabergray_erp.JefePickLists = class JefePickLists {
 					</div>
 				</div>
 				${finalizado ? `<div class="fg-pl-card-meta fg-pl-card-meta--muted">${finalizado}</div>` : ""}
+				${this.render_shortage_invoice_html(r)}
 				<button type="button" class="fg-btn fg-btn--outline-primary fg-pl-card-btn">${__("VER DETALLE")}</button>
 			</div>
 		`;
+	}
+
+	// Facturación con faltantes (fulfillment.shortage_invoice): insignia
+	// ámbar; ya facturado -> solo un alistamiento COMPLETO lo finaliza;
+	// autorizado sin facturar -> el Jefe puede revocar.
+	render_shortage_invoice_html(r) {
+		if (!r.authorized_with_shortage) return "";
+		const notice = r.invoiced_with_shortage
+			? `<div class="fg-pl-shortage-invoice-notice">${__(
+					"Este pedido ya fue facturado con faltantes. Debe completar físicamente todas las cantidades antes de finalizar el alistamiento."
+			  )}</div>`
+			: `<button type="button" class="fg-btn fg-btn--ghost fg-pl-revoke-btn">${__("Revocar autorización")}</button>`;
+		return `
+			<div class="fg-pl-shortage-invoice">
+				<span class="fg-pl-shortage-invoice-badge">${__("AUTORIZADO CON FALTANTES")}</span>
+				${notice}
+			</div>`;
+	}
+
+	revoke_shortage_invoice(name) {
+		frappe.confirm(
+			__("¿Revocar la autorización para facturar con faltantes de {0}? El pedido saldrá de Facturación hasta completarse.", [
+				frappe.utils.escape_html(name),
+			]),
+			() => {
+				frappe
+					.call({
+						method: this.method_prefix + "revoke_shortage_invoice_authorization",
+						type: "POST",
+						args: { pick_list: name },
+						freeze: true,
+					})
+					.then(() => {
+						frappe.show_alert({ message: __("Autorización revocada."), indicator: "orange" }, 4);
+						this.refresh_list();
+					});
+			}
+		);
 	}
 
 	render_pagination_html() {
@@ -406,6 +445,10 @@ fabergray_erp.JefePickLists = class JefePickLists {
 				this.list_page = 1;
 				this.refresh_list();
 			}, 300);
+		});
+		this.$body.find(".fg-pl-cards").on("click", ".fg-pl-revoke-btn", (e) => {
+			const name = $(e.currentTarget).closest(".fg-pl-card").data("name");
+			this.revoke_shortage_invoice(name);
 		});
 		this.$body.find(".fg-pl-cards").on("click", ".fg-pl-card-btn", (e) => {
 			const name = $(e.currentTarget).closest(".fg-pl-card").data("name");

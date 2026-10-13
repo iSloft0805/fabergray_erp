@@ -268,20 +268,30 @@ doc_events = {
 		# cubre borradores; `before_update_after_submit` el Pick List sometido.
 		# Ajuste numeración por empresa -- fg_invoice_number/_key (y el emisor
 		# ya numerado) solo cambian vía set_invoice_issuer().
+		# Facturación con faltantes -- los 3 campos de autorización solo
+		# cambian vía fulfillment.shortage_invoice; un Draft autorizado y ya
+		# Facturado queda congelado (filas, cantidades contractuales, borrado)
+		# y solo puede someterse con TODAS sus líneas completas.
 		"validate": [
 			"fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
 			"fabergray_erp.api.facturacion.guard_invoice_number_fields",
+			"fabergray_erp.fulfillment.shortage_invoice.guard_shortage_invoice_pick_list",
 		],
 		# INVENTARIO-OUT-01 -- un Pick List de entrega solo se somete con
 		# COMPLETAR PEDIDO (api.bodega.finish_picking()), que crea su Material
 		# Issue. Bodega necesita el permiso submit para ese flujo, así que el
 		# Submit directo (Desk/API/bulk) se bloquea aquí, server-side, para
 		# todo rol. Ver stock_issue_service.guard_pick_list_submit().
-		"before_submit": "fabergray_erp.fulfillment.stock_issue_service.guard_pick_list_submit",
+		"before_submit": [
+			"fabergray_erp.fulfillment.stock_issue_service.guard_pick_list_submit",
+			"fabergray_erp.fulfillment.shortage_invoice.guard_invoiced_shortage_submit",
+		],
 		"before_update_after_submit": [
 			"fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
 			"fabergray_erp.api.facturacion.guard_invoice_number_fields",
+			"fabergray_erp.fulfillment.shortage_invoice.guard_shortage_invoice_pick_list",
 		],
+		"on_trash": "fabergray_erp.fulfillment.shortage_invoice.guard_invoiced_pick_list_delete",
 	},
 	# INVENTARIO-OUT-01 -- un Material Issue vinculado a un Pick List nunca
 	# descuenta más de lo pendiente por Pick List Item (alistado - entregado
@@ -572,6 +582,12 @@ fixtures = [
 					# por emisor. See set_invoice_issuer() in api/facturacion.py.
 					"fg_invoice_number",
 					"fg_invoice_number_key",
+					# Autorización para facturar con faltantes (Jefe de Bodega,
+					# "Validar pedidos con faltantes resueltos", modo 2). See
+					# fulfillment/shortage_invoice.py.
+					"fg_shortage_invoice_authorized",
+					"fg_shortage_invoice_authorized_by",
+					"fg_shortage_invoice_authorized_on",
 					# Commit 25.12 -- mandatory cancellation reason (+ optional
 					# free-text detail) captured by cancel_sales_order().
 					"fg_cancellation_reason",

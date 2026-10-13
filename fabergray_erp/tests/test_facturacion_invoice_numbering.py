@@ -106,7 +106,13 @@ class TestFacturacionInvoiceNumbering(IntegrationTestCase):
 		result = self._facturar(pl_name)
 		self.assertEqual(result["fg_invoice_number"], 6886)
 		self.assertEqual(result["fg_invoice_issuer"], "integrandoMAS")
-		self.assertEqual(frappe.db.get_value("Pick List", pl_name, "fg_invoice_number_key"), "integrandoMAS-6886")
+		# Production key format; inside a TestWorld the key lives in the test
+		# series namespace so it can never collide with a real invoice.
+		self.assertEqual(self.world.production_invoice_number_key("integrandoMAS", 6886), "integrandoMAS-6886")
+		self.assertEqual(
+			frappe.db.get_value("Pick List", pl_name, "fg_invoice_number_key"),
+			self.world.invoice_number_key("integrandoMAS", 6886),
+		)
 		self.assertIsNone(self._series_current("ecoluminar"))
 
 	def test_02_sequence_6887_and_2263_2264_independent(self):

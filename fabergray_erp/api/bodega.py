@@ -15,6 +15,7 @@ from frappe.utils import flt, now_datetime
 
 from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
+from fabergray_erp.fulfillment import shortage_invoice
 from fabergray_erp.fulfillment.stock_issue_service import (
 	IncompleteStockIssueError,
 	controlled_pick_list_submit,
@@ -461,6 +462,7 @@ def get_pick_list(name):
 		)
 
 	sales_order = next((row.sales_order for row in pl.get("locations") if row.sales_order), None)
+	invoiced_with_shortage = shortage_invoice.is_invoiced_with_shortage(pl)
 
 	return {
 		"name": pl.name,
@@ -476,6 +478,12 @@ def get_pick_list(name):
 		"fg_started_on": pl.fg_started_on,
 		# Hotfix 25.26.2 -- read-only; [] when no order has an observation.
 		"order_observations": _order_observations_for(pl),
+		# Facturación con faltantes: already invoiced in full while picking
+		# is pending -- only a COMPLETE picking can finish it.
+		"invoiced_with_shortage": invoiced_with_shortage,
+		"invoiced_with_shortage_message": (
+			_(shortage_invoice.MSG_INVOICED_WITH_SHORTAGE) if invoiced_with_shortage else None
+		),
 		"rows": rows,
 	}
 
@@ -821,6 +829,11 @@ def _complete_pick_list(name, prepare=None, system_action=False):
 
 	if prepare:
 		prepare(pl)
+
+	# Facturación con faltantes: a draft already invoiced in full only
+	# finishes with every line picked -- a partial finish would rebuild the
+	# missing units as a second, separately invoiceable Pick List.
+	shortage_invoice.assert_can_finish(pl)
 
 	if not pl.fg_started_by:
 		frappe.throw(_("No se puede finalizar un alistamiento que no ha sido iniciado."))

@@ -1528,6 +1528,7 @@ fabergray_erp.Bodega = class Bodega {
 				${started_banner}${done_banner}
 			</div>
 
+			${render_invoiced_with_shortage_html(detail)}
 			${render_order_observations_html(detail.order_observations)}
 
 			<div class="fg-progress-card">
@@ -1901,6 +1902,16 @@ fabergray_erp.Bodega = class Bodega {
 // -------------------------------------------------------------------------
 // Small render helpers -- pure presentation, no server calls, no state.
 // -------------------------------------------------------------------------
+// Facturación con faltantes -- the server's own message
+// (get_pick_list().invoiced_with_shortage_message): the order is already
+// invoiced in full, so COMPLETAR PEDIDO only works with every line picked.
+function render_invoiced_with_shortage_html(detail) {
+	if (!detail.invoiced_with_shortage) return "";
+	return `<div class="fg-invoiced-with-shortage">${icon("triangle-alert")} ${frappe.utils.escape_html(
+		detail.invoiced_with_shortage_message || ""
+	)}</div>`;
+}
+
 // Hotfix 25.26.2 -- "OBSERVACIONES DEL PEDIDO" (Sales Order.fg_observations,
 // read-only, from get_pick_list()'s order_observations). One section;
 // each observation labelled with its PEDIDO # only when the Pick List

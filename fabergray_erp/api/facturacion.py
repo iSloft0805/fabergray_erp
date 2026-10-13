@@ -121,6 +121,7 @@ from fabergray_erp.api.cotizaciones import (
 	_resolve_pdf_advisor_name,
 	_resolve_pdf_contact,
 )
+from fabergray_erp.fulfillment import shortage_invoice
 from fabergray_erp.fulfillment.stock_issue_service import get_stock_issue
 from fabergray_erp.invoice_issuers import (
 	INVOICE_ISSUERS,
@@ -620,6 +621,58 @@ def generate_invoice(pick_list_name):
 FG_INVOICING_PENDIENTE = "Pendiente"
 FG_INVOICING_FACTURADO = "Facturado"
 
+# ---------------------------------------------------------------------------
+# Facturación con faltantes -- the ONE "facturable" criterion and the ONE
+# billable-quantity rule of this flow. Every endpoint below goes through
+# them; none keeps a variant of its own.
+#
+# facturable = submitted, OR a draft a Jefe de Bodega authorized to be
+# invoiced with shortages (fulfillment.shortage_invoice). Such a draft
+# bills what was ORDERED (stock_qty) while its picking is still pending;
+# every other Pick List bills what was PICKED. A cancelled Pick List is
+# never facturable. Recorridos keeps its own, stricter rule (submitted AND
+# Facturado): an order invoiced with shortages is not dispatched until it
+# is physically complete.
+# ---------------------------------------------------------------------------
+
+#: List-level form of is_invoiceable(): these filters AND (or_filters) any
+#: of these -- an authorized Pick List is a draft or, once completed, a
+#: submitted one, both already facturable.
+_INVOICEABLE_FILTERS = [["docstatus", "!=", 2]]
+_INVOICEABLE_OR_FILTERS = [["docstatus", "=", 1], [shortage_invoice.FIELD_AUTHORIZED, "=", 1]]
+
+
+def is_invoiceable(pl):
+	"""Facturable Pick List (doc or dict with docstatus + the flag)."""
+	return pl.docstatus == 1 or (pl.docstatus == 0 and shortage_invoice.is_authorized(pl))
+
+
+def _assert_invoiceable(pl, message, exc=None):
+	if not is_invoiceable(pl):
+		frappe.throw(message, exc or PickListNotReadyForInvoicingError)
+
+
+def invoice_qty(pl, row):
+	"""Billable quantity of one Pick List Item row of `pl`: stock_qty for a
+	draft authorized with shortages, picked_qty otherwise."""
+	return flt(row.stock_qty) if shortage_invoice.bills_ordered_qty(pl) else flt(row.picked_qty)
+
+
+def _invoiceable_pick_lists(filters=None, txt_or_filters=None, **kwargs):
+	"""frappe.get_list("Pick List") restricted to facturable Pick Lists.
+	get_list takes a single OR group, already used by the facturable
+	criterion, so a text search (its own OR group) is resolved to names
+	first."""
+	filters = _INVOICEABLE_FILTERS + list(filters or [])
+	if txt_or_filters:
+		matching = frappe.get_list(
+			"Pick List", filters=filters, or_filters=txt_or_filters, pluck="name", limit_page_length=0
+		)
+		if not matching:
+			return []
+		filters = filters + [["name", "in", matching]]
+	return frappe.get_list("Pick List", filters=filters, or_filters=_INVOICEABLE_OR_FILTERS, **kwargs)
+
 
 class PickListNotReadyForInvoicingError(frappe.ValidationError):
 	pass
@@ -687,27 +740,26 @@ def get_invoicing_summary():
 	_require_login()
 	frappe.has_permission("Pick List", "read", throw=True)
 
-	pendientes = frappe.get_list(
-		"Pick List",
-		filters=[["docstatus", "=", 1], ["fg_invoicing_status", "!=", FG_INVOICING_FACTURADO]],
+	pendientes = _invoiceable_pick_lists(
+		filters=[["fg_invoicing_status", "!=", FG_INVOICING_FACTURADO]],
 		pluck="name",
+		limit_page_length=0,
 	)
-	facturados = frappe.get_list(
-		"Pick List",
-		filters={"docstatus": 1, "fg_invoicing_status": FG_INVOICING_FACTURADO},
+	facturados = _invoiceable_pick_lists(
+		filters=[["fg_invoicing_status", "=", FG_INVOICING_FACTURADO]],
 		pluck="name",
+		limit_page_length=0,
 	)
 
 	today = nowdate()
-	facturados_hoy = frappe.get_list(
-		"Pick List",
+	facturados_hoy = _invoiceable_pick_lists(
 		filters=[
-			["docstatus", "=", 1],
 			["fg_invoicing_status", "=", FG_INVOICING_FACTURADO],
 			["fg_invoiced_on", ">=", f"{today} 00:00:00"],
 			["fg_invoiced_on", "<=", f"{today} 23:59:59"],
 		],
 		pluck="name",
+		limit_page_length=0,
 	)
 
 	return {
@@ -748,7 +800,7 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 	txt = (txt or "").strip()
 	status = status if status in (FG_INVOICING_PENDIENTE, FG_INVOICING_FACTURADO) else None
 
-	filters = [["docstatus", "=", 1]]
+	filters = []
 	if status == FG_INVOICING_FACTURADO:
 		filters.append(["fg_invoicing_status", "=", FG_INVOICING_FACTURADO])
 	elif status == FG_INVOICING_PENDIENTE:
@@ -780,12 +832,13 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 				["fg_invoiced_on", "between", [f"{date_query} 00:00:00", f"{date_query} 23:59:59"]]
 			)
 
-	page_rows = frappe.get_list(
-		"Pick List",
+	page_rows = _invoiceable_pick_lists(
 		filters=filters,
-		or_filters=or_filters,
+		txt_or_filters=or_filters,
 		fields=[
 			"name",
+			"docstatus",
+			shortage_invoice.FIELD_AUTHORIZED,
 			"customer",
 			"customer_name",
 			"fg_invoicing_status",
@@ -800,21 +853,24 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 		limit_start=start,
 		limit_page_length=page_length,
 	)
-	total = len(frappe.get_list("Pick List", filters=filters, or_filters=or_filters, pluck="name"))
+	total = len(
+		_invoiceable_pick_lists(filters=filters, txt_or_filters=or_filters, pluck="name", limit_page_length=0)
+	)
 
 	names = [r.name for r in page_rows]
+	pl_by_name = {r.name: r for r in page_rows}
 	item_counts, checked_counts, total_qtys, sales_order_by_pl = {}, {}, {}, {}
 	if names:
 		for row in frappe.get_list(
 			"Pick List Item",
 			filters={"parent": ["in", names]},
-			fields=["parent", "sales_order", "picked_qty", "fg_invoicing_checked"],
+			fields=["parent", "sales_order", "picked_qty", "stock_qty", "fg_invoicing_checked"],
 			parent_doctype="Pick List",
 		):
 			item_counts[row.parent] = item_counts.get(row.parent, 0) + 1
 			if cint(row.fg_invoicing_checked):
 				checked_counts[row.parent] = checked_counts.get(row.parent, 0) + 1
-			total_qtys[row.parent] = total_qtys.get(row.parent, 0.0) + flt(row.picked_qty)
+			total_qtys[row.parent] = total_qtys.get(row.parent, 0.0) + invoice_qty(pl_by_name[row.parent], row)
 			if row.sales_order and row.parent not in sales_order_by_pl:
 				sales_order_by_pl[row.parent] = row.sales_order
 
@@ -851,6 +907,9 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 				"total_items": total_items,
 				"progress_percent": progress_percent,
 				"fg_invoicing_status": pl.fg_invoicing_status or FG_INVOICING_PENDIENTE,
+				# Draft invoiced (or to be invoiced) with shortages: the
+				# "AUTORIZADO CON FALTANTES" badge -- never shown as complete.
+				"authorized_with_shortage": shortage_invoice.bills_ordered_qty(pl),
 				"fg_invoiced_on": pl.fg_invoiced_on,
 				"fg_invoiced_by": pl.fg_invoiced_by,
 				"fg_invoiced_by_fullname": (
@@ -883,16 +942,23 @@ def get_invoicing_detail(pick_list):
 
 	pl = frappe.get_doc("Pick List", pick_list)
 	pl.check_permission("read")
+	_assert_invoiceable(pl, _("Este Pick List todavía no está disponible para Facturación."))
 
 	sales_order = _sales_order_of(pl)
 	total_items, checked_items, progress_percent = _checklist_counts(pl)
+	authorized_with_shortage = shortage_invoice.bills_ordered_qty(pl)
 
 	items = [
 		{
 			"row_name": r.name,
 			"item_code": r.item_code,
 			"item_name": r.item_name,
-			"qty": flt(r.picked_qty),
+			"qty": invoice_qty(pl, r),
+			# Pedido | Alistado | Pendiente: an order invoiced with shortages
+			# is never shown as physically complete.
+			"ordered_qty": flt(r.stock_qty),
+			"picked_qty": flt(r.picked_qty),
+			"pending_qty": max(flt(r.stock_qty) - flt(r.picked_qty), 0.0) if authorized_with_shortage else 0.0,
 			"uom": r.uom,
 			"checked": cint(r.fg_invoicing_checked),
 			"checked_on": r.fg_invoicing_checked_on,
@@ -911,6 +977,9 @@ def get_invoicing_detail(pick_list):
 		"fg_invoicing_status": pl.fg_invoicing_status or FG_INVOICING_PENDIENTE,
 		"fg_invoice_issuer": pl.fg_invoice_issuer or None,
 		"fg_invoice_number": cint(pl.fg_invoice_number) or None,
+		"authorized_with_shortage": authorized_with_shortage,
+		"shortage_authorized_by": pl.get(shortage_invoice.FIELD_AUTHORIZED_BY) if authorized_with_shortage else None,
+		"shortage_authorized_on": pl.get(shortage_invoice.FIELD_AUTHORIZED_ON) if authorized_with_shortage else None,
 		# Hotfix 25.26.1 -- read-only; "" when the order has none.
 		"order_observations": _order_observations(sales_order),
 		"total_items": total_items,
@@ -958,6 +1027,8 @@ def set_invoicing_item_checked(pick_list, pick_list_item, checked):
 			_("La línea {0} no pertenece al Pick List {1}.").format(pick_list_item, pick_list),
 			frappe.DoesNotExistError,
 		)
+
+	_assert_invoiceable(pl, _("Este Pick List todavía no está disponible para Facturación."))
 
 	if pl.fg_invoicing_status == FG_INVOICING_FACTURADO:
 		frappe.throw(
@@ -1077,11 +1148,7 @@ def mark_as_invoiced(pick_list_name, issuer=None):
 	pl = frappe.get_doc("Pick List", pick_list_name)
 	pl.check_permission("write")
 
-	if pl.docstatus != 1:
-		frappe.throw(
-			_("Este Pick List no está sometido; no puede marcarse como facturado todavía."),
-			PickListNotReadyForInvoicingError,
-		)
+	_assert_invoiceable(pl, _("Este Pick List no está sometido; no puede marcarse como facturado todavía."))
 
 	locked = frappe.db.get_value(
 		"Pick List",
@@ -1094,6 +1161,9 @@ def mark_as_invoiced(pick_list_name, issuer=None):
 		frappe.throw(_("Este pedido ya fue marcado como facturado."), AlreadyInvoicedError)
 	# Locking read: every field saved below starts from the latest committed row.
 	pl = frappe.get_doc("Pick List", pl.name, for_update=True)
+	# Re-checked on the locked row: an authorization revoked meanwhile
+	# leaves an unsubmitted draft that is no longer facturable.
+	_assert_invoiceable(pl, _("Este Pick List no está sometido; no puede marcarse como facturado todavía."))
 
 	total_items, checked_items, _progress = _checklist_counts(pl)
 	if total_items == 0 or checked_items != total_items:
@@ -1245,11 +1315,9 @@ def _assert_invoiced_pick_list(pl, ptype="read"):
 	pl.check_permission(ptype)
 	assert_same_company(pl)
 
-	if pl.docstatus != 1:
-		frappe.throw(
-			_("Este Pick List no está sometido; no puede generarse su factura."),
-			InvoicePdfNotEligibleError,
-		)
+	_assert_invoiceable(
+		pl, _("Este Pick List no está sometido; no puede generarse su factura."), InvoicePdfNotEligibleError
+	)
 	if pl.fg_invoicing_status != FG_INVOICING_FACTURADO:
 		frappe.throw(
 			_("El pedido debe estar marcado como facturado antes de generar la factura."),
@@ -1264,11 +1332,11 @@ def _assert_issuer_selectable(pl):
 	_require_facturacion_role()
 	pl.check_permission("write")
 	assert_same_company(pl)
-	if pl.docstatus != 1:
-		frappe.throw(
-			_("Este Pick List no está sometido; no puede elegirse su empresa emisora todavía."),
-			InvoicePdfNotEligibleError,
-		)
+	_assert_invoiceable(
+		pl,
+		_("Este Pick List no está sometido; no puede elegirse su empresa emisora todavía."),
+		InvoicePdfNotEligibleError,
+	)
 
 
 def _invoice_sales_order(pl):
@@ -1480,8 +1548,9 @@ def _build_invoice_lines_and_totals(pl, so):
 	lines = []
 	picked_by_so_item = {}
 	prices_adjusted = False
-	for row in frappe.get_doc("Pick List", pl.name).get("locations") or []:
-		qty = flt(row.picked_qty)
+	fresh = frappe.get_doc("Pick List", pl.name)
+	for row in fresh.get("locations") or []:
+		qty = invoice_qty(fresh, row)
 		if qty <= 0:
 			continue
 		so_item = so_items.get(row.sales_order_item)
@@ -1839,11 +1908,7 @@ def _load_pricing_pick_list(pick_list_name, ptype):
 	pl = frappe.get_doc("Pick List", pick_list_name)
 	pl.check_permission(ptype)
 	assert_same_company(pl)
-	if pl.docstatus != 1:
-		frappe.throw(
-			_("Este Pick List no está sometido; todavía no se pueden definir sus precios."),
-			PickListNotReadyForInvoicingError,
-		)
+	_assert_invoiceable(pl, _("Este Pick List no está sometido; todavía no se pueden definir sus precios."))
 	return pl, _invoice_pricing_sales_orders(pl)
 
 
@@ -1909,7 +1974,7 @@ def _resolve_invoice_lines(pl, sales_orders, public_by_row=None):
 			price_mode = row.fg_invoice_price_mode
 		else:
 			price_mode = _detect_price_mode(final_rate, public_rate, precision)
-		qty = flt(row.picked_qty)
+		qty = invoice_qty(pl, row)
 		lines.append(
 			frappe._dict(
 				row_name=row.name,

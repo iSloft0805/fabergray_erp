@@ -34,13 +34,13 @@ _PAGE_JS = os.path.join(
 )
 
 
-class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
+class _ResolvedShortageMixin(_StockIssueMixin):
+	"""World + helpers shared with test_shortage_invoice_authorization.py."""
+
 	@classmethod
-	def setUpClass(cls):
-		super().setUpClass()
-		cls._setup_world("FGRSV")
-		cls.jefe = cls.world.user(f"fgrsv-jefe-{cls.tag.lower()}@example.com", ["Jefe de Bodega"])
-		cls.facturacion_user = cls.world.user(f"fgrsv-fact-{cls.tag.lower()}@example.com", ["Facturación"])
+	def _setup_resolved_world(cls, prefix):
+		cls._setup_world(prefix)
+		cls.jefe = cls.world.user(f"{prefix.lower()}-jefe-{cls.tag.lower()}@example.com", ["Jefe de Bodega"])
 		cls.all_reports = []
 		cls.addClassCleanup(cls._purge_report_versions)
 		# The service commits per Pick List and some tests roll back: the
@@ -90,7 +90,7 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		mine = set(self.my_reports)
 		return [r for r in rss._pending_candidates() if r.report in mine]
 
-	def _run(self, user=None, limit=None):
+	def _run(self, user=None, limit=None, mode=None):
 		# A real request starts with nothing pending: the service rolls back
 		# a refused Pick List, which must never take this test's fixtures
 		# with it.
@@ -103,8 +103,8 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 
 		with patch.object(rss, "_pending_candidates", scoped), fx.as_user(user or self.jefe):
 			if limit is not None:
-				return rss.validate_resolved_shortage_orders(limit=limit)
-			return jefe_bodega.validate_resolved_shortage_orders()
+				return rss.validate_resolved_shortage_orders(mode=mode or rss.MODE_STRICT_STOCK, limit=limit)
+			return jefe_bodega.validate_resolved_shortage_orders(mode=mode)
 
 	def _row(self, result, pick_list):
 		rows = [r for r in result["results"] if r["pick_list"] == pick_list]
@@ -135,6 +135,25 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 
 	def _picked(self, pick_list):
 		return [flt(r.picked_qty) for r in frappe.get_doc("Pick List", pick_list).locations]
+
+	def _partial_then_resolved(self):
+		"""Pedido 10, Bodega alista 6 y completa (sale 6), faltante 4
+		resuelto: quedan 14 en bodega."""
+		item = self._item(self.wh_liq, stock=20)
+		so, pl = self._order((item, self.wh_liq, 10))
+		self._pick(pl, {item: 6})
+		self._complete(pl)
+		self.assertEqual(_actual(item, self.wh_liq), 14)
+		report = self._report_for(pl)
+		self._resolve(report.name)
+		return item, so, pl, report
+
+
+class TestResolvedShortageValidation(_ResolvedShortageMixin, IntegrationTestCase):
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		cls._setup_resolved_world("FGRSV")
 
 	# =====================================================================
 	# Original Pick List still a draft
@@ -525,18 +544,6 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 	# Original Pick List submitted (partial) -> remainder
 	# =====================================================================
 
-	def _partial_then_resolved(self):
-		"""Pedido 10, Bodega alista 6 y completa (sale 6), faltante 4
-		resuelto: quedan 14 en bodega."""
-		item = self._item(self.wh_liq, stock=20)
-		so, pl = self._order((item, self.wh_liq, 10))
-		self._pick(pl, {item: 6})
-		self._complete(pl)
-		self.assertEqual(_actual(item, self.wh_liq), 14)
-		report = self._report_for(pl)
-		self._resolve(report.name)
-		return item, so, pl, report
-
 	def test_partial_original_creates_the_remainder_and_completes_it(self):
 		item, so, pl, _report = self._partial_then_resolved()
 
@@ -612,7 +619,7 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Pick List", pl_b, "docstatus"), 0)
 		self.assertEqual(_stock_issues(pl_b), [])
 		self.assertEqual(_actual(item_b, self.wh_liq), 4)
-		self.assertEqual(result["summary"], {"completed": 1, "still_short": 0, "already_completed": 0, "errors": 1})
+		self.assertEqual(result["summary"], {"completed": 1, "authorized_with_shortage": 0, "still_short": 0, "already_completed": 0, "errors": 1})
 
 	def test_batch_is_capped_and_reports_the_remaining_count(self):
 		self.assertEqual(rss.MAX_PICK_LISTS_PER_RUN, 50)
@@ -632,7 +639,13 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		self.assertEqual(
 			result,
 			{
-				"summary": {"completed": 0, "still_short": 0, "already_completed": 0, "errors": 0},
+				"summary": {
+					"completed": 0,
+					"authorized_with_shortage": 0,
+					"still_short": 0,
+					"already_completed": 0,
+					"errors": 0,
+				},
 				"results": [],
 				"remaining_count": 0,
 				"error_remaining_count": 0,
@@ -1216,12 +1229,19 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		result = self._run()
 
 		self.assertEqual(set(result), {"summary", "results", "remaining_count", "error_remaining_count"})
-		allowed = {rss.STATUS_COMPLETED, rss.STATUS_STILL_SHORT, rss.STATUS_ALREADY_COMPLETED, rss.STATUS_ERROR}
+		allowed = {
+			rss.STATUS_COMPLETED,
+			rss.STATUS_AUTHORIZED,
+			rss.STATUS_STILL_SHORT,
+			rss.STATUS_ALREADY_COMPLETED,
+			rss.STATUS_ERROR,
+		}
 		for row in result["results"]:
 			self.assertEqual(set(row), self.RESULT_KEYS)
 			self.assertIn(row["status"], allowed)
 		counts = {
 			"completed": rss.STATUS_COMPLETED,
+			"authorized_with_shortage": rss.STATUS_AUTHORIZED,
 			"still_short": rss.STATUS_STILL_SHORT,
 			"already_completed": rss.STATUS_ALREADY_COMPLETED,
 			"errors": rss.STATUS_ERROR,
@@ -1255,22 +1275,34 @@ class TestResolvedShortageValidation(_StockIssueMixin, IntegrationTestCase):
 		with open(_PAGE_JS, encoding="utf-8") as f:
 			js = f.read()
 		self.assertIn('__("Validar pedidos con faltantes resueltos")', js)
-		self.assertIn(
-			"Se revisarán todos los pedidos con faltantes resueltos que aún estén pendientes de completar. "
-			"Solo se completarán los que tengan existencias suficientes en bodega. ¿Deseas continuar?",
-			js,
-		)
+		# The button opens a modal with two modes -- nothing runs on click.
+		body = js.split("	validate_resolved_shortages($btn) {", 1)[1].split("	run_resolved_validation(", 1)[0]
+		self.assertIn("new frappe.ui.Dialog(", body)
+		self.assertNotIn("frappe.call(", body)
+		self.assertIn('title: __("Validar pedidos con faltantes resueltos")', body)
+		for text in (
+			"Completar solo si hay inventario suficiente",
+			"Solo se finalizarán pedidos con stock completo.",
+			"Permitir facturación aunque falte inventario",
+			"Los pedidos podrán pasar a Facturación con faltantes físicos pendientes. "
+			"No se generarán salidas de inventario por cantidades inexistentes.",
+			"Procesar pedidos",
+			"Cancelar",
+		):
+			self.assertIn(f'"{text}"', body)
+		self.assertIn('value: "strict_stock"', body)
+		self.assertIn('value: "allow_invoice_with_shortage"', body)
+		self.assertIn("args: { mode }", js)
 		self.assertIn('__("No hay pedidos pendientes con faltantes resueltos para validar.")', js)
 		self.assertNotIn("últimos 3 días", js)
 		self.assertIn("error_remaining_count", js)
-		self.assertIn("frappe.confirm(", js)
 		self.assertIn('"validate_resolved_shortage_orders"', js)
 		self.assertIn('frappe.user.has_role(["Jefe de Bodega", "System Manager"])', js)
 		self.assertIn('__("Validación terminada")', js)
-		for label in ("Completados", "Aún con faltantes", "Ya completados", "Errores"):
+		for label in ("Completados", "Autorizados con faltantes", "Aún con faltantes", "Ya completados", "Errores"):
 			self.assertIn(f'__("{label}")', js)
 		for column in ("Pick List", "Pedido", "Cliente", "Estado", "Material Issue", "Detalle"):
 			self.assertIn(f'__("{column}")', js)
 		self.assertIn("remaining_count", js)
-		body = js.split("show_resolved_validation_result((r && r.message) || {});", 1)[1][:80]
-		self.assertIn("this.load_all();", body)
+		after = js.split("show_resolved_validation_result((r && r.message) || {});", 1)[1][:80]
+		self.assertIn("this.load_all();", after)

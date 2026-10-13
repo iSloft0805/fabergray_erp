@@ -454,9 +454,15 @@ fabergray_erp.Facturacion = class Facturacion {
 		const pedido_label = r.commercial_name || r.sales_order || r.name;
 		const customer_label = frappe.utils.escape_html(r.customer_name || r.customer || __("Sin cliente"));
 
-		const status_html = is_facturado
-			? `<span class="fg-badge fg-badge--fact-facturado">${icon("check", "fg-icon-sm")} ${__("FACTURADO")}</span>`
-			: `<span class="fg-badge fg-badge--fact-pendiente">${__("Pendiente")}</span>`;
+		// Facturación con faltantes: Draft autorizado por Jefe de Bodega --
+		// se factura lo pedido, pero el alistamiento físico sigue pendiente.
+		const shortage_html = r.authorized_with_shortage
+			? ` <span class="fg-badge fg-badge--fact-shortage">${__("AUTORIZADO CON FALTANTES")}</span>`
+			: "";
+		const status_html =
+			(is_facturado
+				? `<span class="fg-badge fg-badge--fact-facturado">${icon("check", "fg-icon-sm")} ${__("FACTURADO")}</span>`
+				: `<span class="fg-badge fg-badge--fact-pendiente">${__("Pendiente")}</span>`) + shortage_html;
 
 		const total_items = r.total_items ?? r.item_count ?? 0;
 		const checked_items = r.checked_items ?? 0;
@@ -750,8 +756,20 @@ fabergray_erp.Facturacion = class Facturacion {
 				</div>`
 			: "";
 
+		// Facturación con faltantes: se factura lo pedido; cada línea muestra
+		// Pedido | Alistado | Pendiente -- nunca como físicamente completo.
+		const shortage_html = d.authorized_with_shortage
+			? `<div class="fg-fact-review-shortage">
+					<span class="fg-badge fg-badge--fact-shortage">${__("AUTORIZADO CON FALTANTES")}</span>
+					<span>${__("Autorizado por {0} el {1}. Las cantidades pendientes siguen por alistar físicamente.", [
+						frappe.utils.escape_html(d.shortage_authorized_by || "—"),
+						d.shortage_authorized_on ? frappe.datetime.str_to_user(d.shortage_authorized_on) : "—",
+					])}</span>
+				</div>`
+			: "";
+
 		const items_html = (d.items || []).length
-			? `<div class="fg-fact-review-table">
+			? `${shortage_html}<div class="fg-fact-review-table">
 					<div class="fg-fact-review-table-head">
 						<span class="fg-fact-review-col-idx">#</span>
 						<span class="fg-fact-review-col-product">${__("Producto")}</span>
@@ -1084,6 +1102,13 @@ fabergray_erp.Facturacion = class Facturacion {
 
 	render_review_item_row(item, idx, is_readonly) {
 		const checked = !!cint(item.checked);
+		const shortage_qty_html = this._review_detail && this._review_detail.authorized_with_shortage
+			? `<span class="fg-fact-review-shortage-qty">
+					<span>${__("Pedido")}: ${format_qty(item.ordered_qty)}</span>
+					<span>${__("Alistado")}: ${format_qty(item.picked_qty)}</span>
+					<span>${__("Pendiente")}: ${format_qty(item.pending_qty)}</span>
+				</span>`
+			: "";
 		return `
 			<div class="fg-fact-review-row ${checked ? "is-checked" : ""}" data-row="${frappe.utils.escape_html(item.row_name)}">
 				<span class="fg-fact-review-col-idx">${idx}</span>
@@ -1096,7 +1121,7 @@ fabergray_erp.Facturacion = class Facturacion {
 					<span class="fg-fact-review-item-name">${frappe.utils.escape_html(item.item_name || item.item_code)}</span>
 				</span>
 				<span class="fg-fact-review-col-code" data-label="${__("Código")}">${frappe.utils.escape_html(item.item_code)}</span>
-				<span class="fg-fact-review-col-qty" data-label="${__("Cantidad")}">${format_qty(item.qty)}</span>
+				<span class="fg-fact-review-col-qty" data-label="${__("Cantidad")}">${format_qty(item.qty)}${shortage_qty_html}</span>
 				<span class="fg-fact-review-col-uom" data-label="${__("Unidad")}">${frappe.utils.escape_html(item.uom || "—")}</span>
 				${this.render_review_price_cells_html(item.row_name)}
 				<span class="fg-fact-review-col-status" data-label="${__("Estado")}">

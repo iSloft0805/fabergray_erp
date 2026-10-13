@@ -371,44 +371,86 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 	// =====================================================================
 	validate_resolved_shortages($btn) {
 		// Un solo intento a la vez: el flag cubre también la ventana del
-		// diálogo de confirmación (dos clics no abren dos confirmaciones).
+		// diálogo (dos clics no abren dos diálogos). Nada se ejecuta hasta
+		// elegir un modo y pulsar "Procesar pedidos".
 		if (this.validating_resolved) return;
 		this.validating_resolved = true;
 		$btn.prop("disabled", true);
+		let processing = false;
 		const release = () => {
 			this.validating_resolved = false;
 			$btn.prop("disabled", false);
 		};
-		frappe.confirm(
-			__(
-				"Se revisarán todos los pedidos con faltantes resueltos que aún estén pendientes de completar. Solo se completarán los que tengan existencias suficientes en bodega. ¿Deseas continuar?"
-			),
-			() => {
-				this.set_busy(true);
-				// Promise.resolve(): frappe.call() devuelve un jqXHR; así
-				// .finally() siempre corre, también si el endpoint falla.
-				Promise.resolve(
-					frappe.call({
-						method: this.method_prefix + "validate_resolved_shortage_orders",
-						type: "POST",
-						freeze: true,
-						freeze_message: __("Validando pedidos..."),
-					})
-				)
-					.then((r) => {
-						this.show_resolved_validation_result((r && r.message) || {});
-						this.load_all();
-					})
-					.catch(() => {
-						// frappe.call() ya mostró su propio diálogo de error real.
-					})
-					.finally(() => {
-						release();
-						this.set_busy(false);
-					});
+		const modes = [
+			{
+				value: "strict_stock",
+				label: __("Completar solo si hay inventario suficiente"),
+				help: __("Solo se finalizarán pedidos con stock completo."),
 			},
-			release
-		);
+			{
+				value: "allow_invoice_with_shortage",
+				label: __("Permitir facturación aunque falte inventario"),
+				help: __(
+					"Los pedidos podrán pasar a Facturación con faltantes físicos pendientes. No se generarán salidas de inventario por cantidades inexistentes."
+				),
+			},
+		];
+		const options_html = modes
+			.map(
+				(m, i) => `
+				<label class="fg-resolved-mode">
+					<input type="radio" name="fg_resolved_mode" value="${m.value}" ${i === 0 ? "checked" : ""}>
+					<span class="fg-resolved-mode-text">
+						<strong>${m.label}</strong>
+						<span class="fg-resolved-mode-help">${m.help}</span>
+					</span>
+				</label>`
+			)
+			.join("");
+		const dialog = new frappe.ui.Dialog({
+			title: __("Validar pedidos con faltantes resueltos"),
+			fields: [{ fieldtype: "HTML", fieldname: "modes_html", options: `<div class="fg-resolved-modes">${options_html}</div>` }],
+			primary_action_label: __("Procesar pedidos"),
+			primary_action: () => {
+				const mode = dialog.$wrapper.find('input[name="fg_resolved_mode"]:checked').val() || "strict_stock";
+				processing = true;
+				dialog.hide();
+				this.run_resolved_validation(mode, release);
+			},
+			secondary_action_label: __("Cancelar"),
+			secondary_action: () => dialog.hide(),
+		});
+		dialog.onhide = () => {
+			if (!processing) release();
+		};
+		dialog.$wrapper.addClass("fg-resolved-mode-dialog");
+		dialog.show();
+	}
+
+	run_resolved_validation(mode, release) {
+		this.set_busy(true);
+		// Promise.resolve(): frappe.call() devuelve un jqXHR; así
+		// .finally() siempre corre, también si el endpoint falla.
+		Promise.resolve(
+			frappe.call({
+				method: this.method_prefix + "validate_resolved_shortage_orders",
+				type: "POST",
+				args: { mode },
+				freeze: true,
+				freeze_message: __("Validando pedidos..."),
+			})
+		)
+			.then((r) => {
+				this.show_resolved_validation_result((r && r.message) || {});
+				this.load_all();
+			})
+			.catch(() => {
+				// frappe.call() ya mostró su propio diálogo de error real.
+			})
+			.finally(() => {
+				release();
+				this.set_busy(false);
+			});
 	}
 
 	show_resolved_validation_result(result) {
@@ -462,6 +504,7 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 					options: `
 						<div class="fg-resolved-summary">
 							<div>${__("Completados")}: <strong>${cint(s.completed)}</strong></div>
+							<div>${__("Autorizados con faltantes")}: <strong>${cint(s.authorized_with_shortage)}</strong></div>
 							<div>${__("Aún con faltantes")}: <strong>${cint(s.still_short)}</strong></div>
 							<div>${__("Ya completados")}: <strong>${cint(s.already_completed)}</strong></div>
 							<div>${__("Errores")}: <strong>${cint(s.errors)}</strong></div>

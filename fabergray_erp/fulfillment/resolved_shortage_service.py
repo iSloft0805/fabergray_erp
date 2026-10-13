@@ -62,6 +62,21 @@ List). Then the unchanged COMPLETAR PEDIDO path runs: its guards,
 validate_stock_for_issue(), submit + ONE Material Issue under its savepoint.
 A note on the Pick List lists the lines the system filled, so Bodega knows
 what to collect physically. Reportes de Faltante are never modified.
+
+Modes (`mode`, validated server-side, nothing else accepted):
+- MODE_STRICT_STOCK ("strict_stock"): exactly the above. Short -> AÚN CON
+  FALTANTES, nothing changes.
+- MODE_ALLOW_INVOICE_WITH_SHORTAGE ("allow_invoice_with_shortage"): the
+  same attempt first -- with complete stock the Pick List is COMPLETADO
+  normally and gets no special authorization. Only when stock is what is
+  missing, in a separate transaction on the re-read, locked draft, it is
+  authorized to be invoiced in full (fulfillment.shortage_invoice):
+  AUTORIZADO CON FALTANTES. Refused (AÚN CON FALTANTES, nothing written)
+  while a Reporte de Faltante is Abierto/En Proceso or a line still to
+  fill sits in a non-picking warehouse; an invoice needs a single Sales
+  Order. The authorization never touches picked_qty, never submits, never
+  issues stock. An already authorized Pick List is reported again without
+  writing anything.
 """
 
 import re
@@ -72,6 +87,7 @@ from frappe import _
 from frappe.utils import escape_html, flt, now_datetime
 
 from fabergray_erp.api.bodega import OPEN_SHORTAGE_STATUSES, _complete_pick_list, _lock_manual_picking
+from fabergray_erp.fulfillment import shortage_invoice
 from fabergray_erp.fulfillment.remainder_service import ensure_remaining_pick_list
 from fabergray_erp.fulfillment.stock_issue_service import (
 	IncompleteStockIssueError,
@@ -92,7 +108,12 @@ KIND_REMAINDER = "B"
 KIND_NEEDS_REMAINDER = "C"
 KIND_LEGACY = "E"
 
+MODE_STRICT_STOCK = "strict_stock"
+MODE_ALLOW_INVOICE_WITH_SHORTAGE = "allow_invoice_with_shortage"
+MODES = (MODE_STRICT_STOCK, MODE_ALLOW_INVOICE_WITH_SHORTAGE)
+
 STATUS_COMPLETED = "COMPLETADO"
+STATUS_AUTHORIZED = "AUTORIZADO CON FALTANTES"
 STATUS_STILL_SHORT = "AÚN CON FALTANTES"
 STATUS_ALREADY_COMPLETED = "YA COMPLETADO"
 STATUS_ERROR = "ERROR"
@@ -106,10 +127,12 @@ class ResolvedShortageStillShortError(frappe.ValidationError):
 	"""The Pick List cannot be fully completed yet; nothing was written.
 	`shortages` = [{item_code, warehouse, required_qty, available_qty,
 	shortage_qty}] (same shape as validate_stock_for_issue()), `reasons` =
-	readable non-stock causes."""
+	readable non-stock causes, `open_reports` = the Abierto/En Proceso
+	reports among them."""
 
 	shortages = ()
 	reasons = ()
+	open_reports = ()
 
 
 # ---------------------------------------------------------------------------
@@ -117,12 +140,14 @@ class ResolvedShortageStillShortError(frappe.ValidationError):
 # ---------------------------------------------------------------------------
 
 
-def validate_resolved_shortage_orders(limit=MAX_PICK_LISTS_PER_RUN):
+def validate_resolved_shortage_orders(mode=MODE_STRICT_STOCK, limit=MAX_PICK_LISTS_PER_RUN):
 	"""Process up to `limit` targets; returns {summary, results,
 	remaining_count, error_remaining_count}. Commits per Pick List (see
 	module docstring)."""
 	frappe.only_for(ROLES)
 	frappe.has_permission("Reporte de Faltante", "read", throw=True)
+	if mode not in MODES:
+		frappe.throw(_("Modo de validación no válido."), frappe.ValidationError)
 
 	work, legacy = _plan(_pending_candidates())
 	batch, remaining = work[:limit], work[limit:]
@@ -131,11 +156,12 @@ def validate_resolved_shortage_orders(limit=MAX_PICK_LISTS_PER_RUN):
 	# Remainders (C) are created only now, for the batch alone.
 	targets, results = _collect_targets(batch)
 	for name, target in targets.items():
-		results.append(_process_isolated(name, target))
+		results.append(_process_isolated(name, target, mode))
 	results.extend(_legacy_result(name) for name in shown_legacy)
 
 	summary = {
 		"completed": sum(1 for r in results if r["status"] == STATUS_COMPLETED),
+		"authorized_with_shortage": sum(1 for r in results if r["status"] == STATUS_AUTHORIZED),
 		"still_short": sum(1 for r in results if r["status"] == STATUS_STILL_SHORT),
 		"already_completed": sum(1 for r in results if r["status"] == STATUS_ALREADY_COMPLETED),
 		"errors": sum(1 for r in results if r["status"] == STATUS_ERROR),
@@ -348,9 +374,11 @@ def _legacy_result(pick_list):
 # ---------------------------------------------------------------------------
 
 
-def _process_isolated(pick_list, target):
+def _process_isolated(pick_list, target, mode=MODE_STRICT_STOCK):
 	"""One Pick List in its own transaction: commit on success, rollback on
-	any refusal, and never let its messages leak into the bulk response."""
+	any refusal, and never let its messages leak into the bulk response.
+	In MODE_ALLOW_INVOICE_WITH_SHORTAGE a refusal for stock alone goes on
+	to _authorize_isolated()."""
 	message_log = frappe.local.message_log
 	logged = len(message_log)
 	try:
@@ -359,9 +387,13 @@ def _process_isolated(pick_list, target):
 		return result
 	except ResolvedShortageStillShortError as e:
 		frappe.db.rollback()
-		return _result(pick_list, STATUS_STILL_SHORT, shortages=list(e.shortages), detail="\n".join(e.reasons))
+		if mode == MODE_ALLOW_INVOICE_WITH_SHORTAGE and not e.reasons:
+			return _authorize_isolated(pick_list, target)
+		return _still_short(pick_list, e, mode)
 	except InsufficientStockForIssueError as e:
 		frappe.db.rollback()
+		if mode == MODE_ALLOW_INVOICE_WITH_SHORTAGE:
+			return _authorize_isolated(pick_list, target)
 		return _result(pick_list, STATUS_STILL_SHORT, shortages=list(getattr(e, "shortages", ()) or ()))
 	except IncompleteStockIssueError as e:
 		frappe.db.rollback()
@@ -379,6 +411,148 @@ def _process_isolated(pick_list, target):
 		del message_log[logged:]
 		for key in _RESPONSE_SIDE_CHANNELS:
 			frappe.local.response.pop(key, None)
+
+
+def _still_short(pick_list, exc, mode):
+	"""AÚN CON FALTANTES row. In mode 2 an open report reads as what blocks
+	the authorization."""
+	reasons = list(exc.reasons)
+	if mode == MODE_ALLOW_INVOICE_WITH_SHORTAGE and exc.open_reports:
+		open_lines = {_open_report_reason(name) for name in exc.open_reports}
+		reasons = [
+			_("{0} sigue Abierto/En Proceso. Resuélvelo antes de autorizar Facturación.").format(name)
+			for name in exc.open_reports
+		] + [r for r in reasons if r not in open_lines]
+	return _result(pick_list, STATUS_STILL_SHORT, shortages=list(exc.shortages), detail="\n".join(reasons))
+
+
+def _open_report_reason(name):
+	return _("{0} — faltante todavía Abierto/En Proceso").format(name)
+
+
+def _authorize_isolated(pick_list, target):
+	"""Mode 2, after the completion attempt was refused for stock: the
+	authorization in its own transaction (commit on success, rollback on
+	any refusal)."""
+	message_log = frappe.local.message_log
+	logged = len(message_log)
+	try:
+		result = _retrying_on_deadlock(_authorize_pick_list)(pick_list, target)
+		frappe.db.commit()
+		return result
+	except ResolvedShortageStillShortError as e:
+		frappe.db.rollback()
+		return _still_short(pick_list, e, MODE_ALLOW_INVOICE_WITH_SHORTAGE)
+	except Exception as e:
+		frappe.db.rollback()
+		return _result(pick_list, STATUS_ERROR, detail=_error_text(e))
+	finally:
+		del message_log[logged:]
+		for key in _RESPONSE_SIDE_CHANNELS:
+			frappe.local.response.pop(key, None)
+
+
+def _authorize_pick_list(pick_list, target):
+	"""Re-read and lock the Pick List, re-check every condition, authorize
+	it. Writes only the three authorization fields (+ a visible comment)."""
+	pl = frappe.get_doc("Pick List", pick_list, for_update=True)
+	pl.check_permission("read")
+
+	if pl.docstatus == 1:
+		return _result(pick_list, STATUS_ALREADY_COMPLETED)  # completed meanwhile
+	if pl.docstatus != 0:
+		frappe.throw(_("Este Pick List fue cancelado."))
+	if shortage_invoice.is_authorized(pl):
+		return _result(
+			pick_list,
+			STATUS_AUTHORIZED,
+			detail=_("Ya estaba autorizado por {0} el {1}.").format(
+				pl.get(shortage_invoice.FIELD_AUTHORIZED_BY),
+				frappe.utils.format_datetime(pl.get(shortage_invoice.FIELD_AUTHORIZED_ON)),
+			),
+		)
+	if pl.get("fg_invoicing_status") == shortage_invoice.FACTURADO:
+		frappe.throw(_("Este Pick List ya fue facturado."))
+
+	open_reports = sorted(_open_reports_for(pl))
+	excluded = non_picking_warehouses(pl.company)
+	reasons = [_open_report_reason(name) for name in open_reports]
+	reasons += [
+		_("{0} — {1}: almacén no válido para alistamiento").format(row.item_code, row.warehouse)
+		for row, _pending in shortage_invoice.pending_lines(pl)
+		if row.warehouse in excluded
+	]
+	if reasons:
+		exc = ResolvedShortageStillShortError("\n".join(reasons))
+		exc.reasons = reasons
+		exc.open_reports = open_reports
+		raise exc
+
+	sales_orders = {row.sales_order for row in pl.get("locations") or []}
+	if not pl.get("locations") or len(sales_orders) != 1 or None in sales_orders or "" in sales_orders:
+		frappe.throw(
+			_("El Pick List no corresponde a una única Orden de Venta; no puede autorizarse para Facturación.")
+		)
+
+	lines = _authorization_lines(pl)
+	shortage_invoice.set_authorization(pl)
+	pl.add_comment("Comment", _authorization_note(pl, next(iter(sales_orders)), lines))
+	pending = [line for line in lines if line["pending"] > 0]
+	return _result(
+		pick_list,
+		STATUS_AUTHORIZED,
+		detail="\n".join(
+			_("{0} — Pendiente: {1} · Disponible: {2}").format(
+				line["item_code"], _qty(line["pending"]), _qty(line["available"])
+			)
+			for line in pending
+		),
+	)
+
+
+def _authorization_lines(pl):
+	"""Per row: pedido / alistado / pendiente / disponible (operational:
+	Bin.actual_qty minus what OTHER draft Pick Lists hold)."""
+	available = {}
+	lines = []
+	for row in pl.get("locations") or []:
+		key = (row.item_code, row.warehouse)
+		if key not in available:
+			actual = flt(frappe.db.get_value("Bin", {"item_code": row.item_code, "warehouse": row.warehouse}, "actual_qty"))
+			available[key] = max(actual - _held_by_other_draft_pick_lists(row.item_code, row.warehouse, pl.name), 0.0)
+		lines.append(
+			{
+				"item_code": row.item_code,
+				"ordered": flt(row.stock_qty),
+				"picked": flt(row.picked_qty),
+				"pending": max(flt(row.stock_qty) - flt(row.picked_qty), 0.0),
+				"available": available[key],
+			}
+		)
+	return lines
+
+
+def _authorization_note(pl, sales_order, lines):
+	rows = "".join(
+		"<br>- {0} — Pedido: {1} · Alistado: {2} · Pendiente: {3} · Disponible: {4}".format(
+			escape_html(line["item_code"]),
+			_qty(line["ordered"]),
+			_qty(line["picked"]),
+			_qty(line["pending"]),
+			_qty(line["available"]),
+		)
+		for line in lines
+	)
+	return _(
+		"Autorizado para facturar con faltantes por {0} el {1} («Validar pedidos con faltantes resueltos»)."
+		"<br>Pick List: {2} · Orden de Venta: {3}{4}"
+	).format(
+		escape_html(frappe.session.user),
+		frappe.utils.format_datetime(pl.get(shortage_invoice.FIELD_AUTHORIZED_ON)),
+		escape_html(pl.name),
+		escape_html(sales_order),
+		rows,
+	)
 
 
 def _process_pick_list(pick_list, target):
@@ -437,9 +611,8 @@ def _prepare(pl):
 	warehouse)] for the lines it completed."""
 	precision = frappe.get_precision("Pick List Item", "picked_qty") or 6
 	locations = pl.get("locations") or []
-	reasons = [
-		_("{0} — faltante todavía Abierto/En Proceso").format(name) for name in sorted(_open_reports_for(pl))
-	]
+	open_reports = sorted(_open_reports_for(pl))
+	reasons = [_open_report_reason(name) for name in open_reports]
 
 	excluded = non_picking_warehouses(pl.company)
 	target_qty = {}
@@ -462,6 +635,7 @@ def _prepare(pl):
 		)
 		exc.shortages = shortages
 		exc.reasons = reasons
+		exc.open_reports = open_reports
 		raise exc
 
 	filled = []

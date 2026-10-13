@@ -318,3 +318,42 @@
 .fg-resolved-status[data-status="AÚN CON FALTANTES"] {
 	color: var(--orange-600, #ea580c);
 }
+
+.fg-resolved-status[data-status="AUTORIZADO CON FALTANTES"] {
+	color: var(--yellow-700, #a16207);
+}
+
+/* Modal de modos -- se renderiza fuera de .fg-jefe-bodega (frappe.ui.Dialog). */
+.fg-resolved-mode-dialog .fg-resolved-modes {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.fg-resolved-mode-dialog .fg-resolved-mode {
+	display: flex;
+	gap: 10px;
+	align-items: flex-start;
+	padding: 10px 12px;
+	border: 1px solid var(--border-color);
+	border-radius: 8px;
+	cursor: pointer;
+	margin: 0;
+	font-weight: normal;
+}
+
+.fg-resolved-mode-dialog .fg-resolved-mode input {
+	flex: 0 0 auto;
+	margin-top: 3px;
+}
+
+.fg-resolved-mode-dialog .fg-resolved-mode-text {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.fg-resolved-mode-dialog .fg-resolved-mode-help {
+	color: var(--text-muted);
+	font-size: 0.85rem;
+}

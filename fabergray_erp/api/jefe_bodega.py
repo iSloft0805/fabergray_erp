@@ -72,6 +72,7 @@ from fabergray_erp.api.bodega import (
 )
 from fabergray_erp import production_service
 from fabergray_erp.api.inventario import PRICE_LIST_BUYING, _selling_rates, _upsert_item_price
+from fabergray_erp.fulfillment import shortage_invoice
 from fabergray_erp.fulfillment.remainder_service import ensure_remaining_pick_list
 from fabergray_erp.sales_order_naming import root_commercial_name
 from fabergray_erp.search_utils import normalize_search_date
@@ -148,6 +149,9 @@ PICK_LIST_HISTORY_FIELDS = [
 	"modified",
 	"modified_by",
 	"creation",
+	# Facturación con faltantes (fulfillment.shortage_invoice).
+	"fg_invoicing_status",
+	"fg_shortage_invoice_authorized",
 ]
 
 
@@ -826,21 +830,36 @@ RESOLVED_SHORTAGE_VALIDATION_ROLES = ("Jefe de Bodega", "System Manager")
 
 
 @frappe.whitelist(methods=["POST"])
-def validate_resolved_shortage_orders():
+def validate_resolved_shortage_orders(mode=None):
 	"""Completes the Pick Lists still operationally pending because of a
 	Reporte de Faltante (whenever it was resolved), only where the stock
 	really is there -- one isolated transaction per Pick List, at most 50
 	per run (`remaining_count` says how many are left; legacy errors do not
 	use that quota, `error_remaining_count`). Orders already completed are
-	never listed. Jefe de Bodega / System Manager only; Bodega cannot call
-	it. See fulfillment.resolved_shortage_service for every rule."""
-	from fabergray_erp.fulfillment.resolved_shortage_service import (
-		validate_resolved_shortage_orders as run_validation,
-	)
+	never listed. `mode`: "strict_stock" (default) or
+	"allow_invoice_with_shortage" -- the latter authorizes, without moving
+	any stock, the drafts short of stock to be invoiced in full; any other
+	value is refused. Jefe de Bodega / System Manager only; Bodega cannot
+	call it. See fulfillment.resolved_shortage_service for every rule."""
+	from fabergray_erp.fulfillment import resolved_shortage_service
 
 	_require_login()
 	frappe.only_for(RESOLVED_SHORTAGE_VALIDATION_ROLES)
-	return run_validation()
+	mode = mode or resolved_shortage_service.MODE_STRICT_STOCK
+	if mode not in resolved_shortage_service.MODES:
+		frappe.throw(_("Modo de validación no válido."), frappe.ValidationError)
+	return resolved_shortage_service.validate_resolved_shortage_orders(mode=mode)
+
+
+@frappe.whitelist(methods=["POST"])
+def revoke_shortage_invoice_authorization(pick_list):
+	"""Clears a Pick List's authorization to be invoiced with shortages
+	while it is not Facturado yet (refused afterwards). Jefe de Bodega /
+	System Manager only. Never touches picked_qty or stock. See
+	fulfillment.shortage_invoice.revoke()."""
+	_require_login()
+	frappe.only_for(RESOLVED_SHORTAGE_VALIDATION_ROLES)
+	return {"pick_list": shortage_invoice.revoke(pick_list)}
 
 
 # ---------------------------------------------------------------------------
@@ -1080,6 +1099,11 @@ def get_pick_list_history(status=None, date_from=None, date_to=None, warehouse=N
 				"fg_started_on": pl.fg_started_on,
 				"modified": pl.modified,
 				"modified_by": pl.modified_by,
+				# Draft authorized to be invoiced with shortages: revocable
+				# until Facturado; once Facturado, only a COMPLETE picking
+				# finishes it.
+				"authorized_with_shortage": shortage_invoice.bills_ordered_qty(pl),
+				"invoiced_with_shortage": shortage_invoice.is_invoiced_with_shortage(pl),
 			}
 		)
 
