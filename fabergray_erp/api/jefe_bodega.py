@@ -863,6 +863,35 @@ def revoke_shortage_invoice_authorization(pick_list):
 
 
 # ---------------------------------------------------------------------------
+# "Completar pedidos sin importar inventario" (fulfillment.bodega_settings)
+# ---------------------------------------------------------------------------
+
+
+@frappe.whitelist()
+def get_force_complete_without_stock():
+	"""Current global Bodega policy: {enabled, label, warning, can_change}.
+	Readable by whoever may read the settings (Bodega, Jefe de Bodega,
+	System Manager)."""
+	from fabergray_erp.fulfillment import bodega_settings
+
+	_require_login()
+	frappe.has_permission(bodega_settings.DOCTYPE, "read", throw=True)
+	return bodega_settings.state()
+
+
+@frappe.whitelist(methods=["POST"])
+def set_force_complete_without_stock(enabled):
+	"""Turn the policy ON/OFF. Jefe de Bodega / System Manager only;
+	`enabled` is validated strictly. Audited in the Single's Version log
+	(user, date/time, previous -> new) plus a readable Comment."""
+	from fabergray_erp.fulfillment import bodega_settings
+
+	_require_login()
+	frappe.only_for(bodega_settings.CHANGE_ROLES)
+	return bodega_settings.set_force_complete(enabled)
+
+
+# ---------------------------------------------------------------------------
 # Commit 22.9 -- Módulos visuales de Jefe de Bodega: Pick Lists (resumen
 # operativo/historial), Reportes de Faltante (centro de faltantes/compras),
 # Almacenes. Inventario reuses /app/inventario as-is (api/inventario.py),

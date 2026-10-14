@@ -42,13 +42,13 @@ class TestBodegaWarehousePermissions(IntegrationTestCase):
 	def test_bodega_sees_pick_lists_from_own_warehouse(self):
 		with fx.as_user(self.bodega_user):
 			queue = bodega.get_queue()
-			all_names = [pl["name"] for bucket in queue.values() for pl in bucket]
+			all_names = [pl["name"] for bucket in bodega.QUEUE_BUCKETS for pl in queue[bucket]]
 		self.assertIn(self.pl_a.name, all_names)
 
 	def test_bodega_does_not_see_pick_lists_from_other_warehouse(self):
 		with fx.as_user(self.bodega_user):
 			queue = bodega.get_queue()
-			all_names = [pl["name"] for bucket in queue.values() for pl in bucket]
+			all_names = [pl["name"] for bucket in bodega.QUEUE_BUCKETS for pl in queue[bucket]]
 		self.assertNotIn(self.pl_b.name, all_names)
 
 	def test_bodega_cannot_read_other_warehouse_pick_list_directly(self):

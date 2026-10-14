@@ -53,11 +53,13 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 			this.call("get_summary"),
 			this.call("get_open_shortage_reports"),
 			this.call("get_active_pick_lists"),
+			this.call("get_force_complete_without_stock"),
 		])
-			.then(([summary, shortage_reports, active_pick_lists]) => {
+			.then(([summary, shortage_reports, active_pick_lists, force_policy]) => {
 				this.summary = summary;
 				this.shortage_reports = shortage_reports;
 				this.active_pick_lists = active_pick_lists;
+				this.force_policy = force_policy;
 				this.render_body();
 			})
 			.finally(() => this.set_busy(false));
@@ -110,6 +112,7 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 
 	render_body() {
 		this.$body.html(`
+			${this.render_force_policy()}
 			${this.render_kpis()}
 			${this.render_attention_section()}
 			${this.render_active_section()}
@@ -323,7 +326,50 @@ fabergray_erp.JefeDeBodega = class JefeDeBodega {
 	// only a single document is opened as a native Form. Nothing is
 	// duplicated.
 	// -------------------------------------------------------------------
+	// "Completar pedidos sin importar inventario" -- política global de
+	// Bodega (fulfillment.bodega_settings). El servidor decide `can_change`
+	// (Jefe de Bodega / System Manager) y vuelve a exigirlo al cambiarla.
+	render_force_policy() {
+		const p = this.force_policy;
+		if (!p) return "";
+		return `
+			<div class="fg-force-policy ${p.enabled ? "is-on" : "is-off"}">
+				<div class="fg-force-policy-row">
+					<span class="fg-force-policy-label">${frappe.utils.escape_html(p.label)}</span>
+					${
+						p.can_change
+							? `<button type="button" class="fg-force-policy-toggle">${p.enabled ? __("Desactivar") : __("Activar")}</button>`
+							: ""
+					}
+				</div>
+				${p.enabled ? `<div class="fg-force-policy-warning">${icon("triangle-alert")} ${frappe.utils.escape_html(p.warning || "")}</div>` : ""}
+			</div>`;
+	}
+
+	toggle_force_policy($btn) {
+		const p = this.force_policy;
+		if (!p) return;
+		const enable = !p.enabled;
+		$btn.prop("disabled", true);
+		frappe.confirm(
+			enable
+				? __("¿Activar 'Completar pedidos sin importar inventario'? Los pedidos podrán finalizarse aunque no exista inventario suficiente.")
+				: __("¿Desactivar 'Completar pedidos sin importar inventario'? Los pedidos volverán a exigir inventario suficiente."),
+			() => {
+				this.call("set_force_complete_without_stock", { enabled: enable ? 1 : 0 })
+					.then((fresh) => {
+						this.force_policy = fresh;
+						frappe.show_alert({ message: enable ? __("Modo ACTIVADO.") : __("Modo DESACTIVADO."), indicator: enable ? "orange" : "green" }, 4);
+						this.render_body();
+					})
+					.catch(() => $btn.prop("disabled", false));
+			},
+			() => $btn.prop("disabled", false)
+		);
+	}
+
 	bind_events() {
+		this.$body.find(".fg-force-policy-toggle").on("click", (e) => this.toggle_force_policy($(e.currentTarget)));
 		// Listos abre jefe-pick-lists en su pestaña "Listos", sin filtro de
 		// fecha: el KPI sale de get_queue()["listos"] (todo Pick List sometido,
 		// de cualquier fecha), el mismo _pick_list_bucket() que usa esa Page.

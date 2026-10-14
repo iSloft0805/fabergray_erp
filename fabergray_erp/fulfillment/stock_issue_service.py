@@ -34,6 +34,9 @@ service._qty_already_claimed_by_open_pick_lists_for_so_item() is untouched:
 the 6 issued units are never offered again to a remainder Pick List).
 """
 
+import functools
+import sys
+import threading
 from collections import defaultdict
 from contextlib import contextmanager
 
@@ -60,6 +63,11 @@ class IncompleteStockIssueError(frappe.ValidationError):
 	historical review's job. `detail` carries the structured state."""
 
 	detail = None
+
+
+class MissingValuationRateForForcedIssueError(frappe.ValidationError):
+	"""Forced issue (stock short): ERPNext has no valid valuation rate for a
+	line, so nothing is issued -- never valued at 0 or at an invented rate."""
 
 
 class PickListStockIssueOverflowError(frappe.ValidationError):
@@ -213,7 +221,162 @@ def validate_stock_for_issue(rows):
 	)
 
 
-def create_stock_issue(pick_list_doc, rows=None):
+# ---------------------------------------------------------------------------
+# Negative stock for ONE forced Material Issue (Bodega's "Completar pedidos
+# sin importar inventario") -- concurrency-safe.
+#
+# ERPNext decides negative stock in ONE function,
+# erpnext.stock.stock_ledger.is_negative_stock_allowed(item_code=...)
+# (Stock Settings.allow_negative_stock or Item.allow_negative_stock), looked
+# up at call time on a Material Issue submit by StockEntry.set_actual_qty()
+# and by the stock ledger (update_entries_after, validate_negative_qty_in_
+# future_sle). install_negative_stock_policy() wraps it ONCE per process
+# (at this module's import; idempotent, lock-protected, never re-wrapped,
+# never restored). The wrapper is a pure function of request-local state:
+# with no Bodega authorization in frappe.local it returns the original
+# answer, so every other request, worker, thread and Stock Entry behaves
+# exactly as ERPNext does. allow_negative_stock_for_bodega() only puts the
+# authorization into frappe.local and always takes it out again -- it never
+# touches the global reference, so two concurrent completions cannot undo
+# each other's state. The authorization matches only when ALL hold: this
+# flow, an item of the authorized Stock Entry, and the stock voucher ERPNext
+# is processing right now IS that Stock Entry (read from the calling frames;
+# unknown voucher -> original answer, i.e. fail closed).
+# ---------------------------------------------------------------------------
+
+FORCED_ISSUE_FLOW = "bodega_force_complete"
+#: frappe.local attribute holding the request-local authorization.
+_NEGATIVE_STOCK_SCOPE = "fg_negative_stock_scope"
+#: Marks the installed wrapper and keeps the original implementation.
+_POLICY_MARKER = "_fabrigray_negative_stock_policy"
+_POLICY_ORIGINAL = "_fabrigray_original"
+_INSTALL_LOCK = threading.Lock()
+_VOUCHER_FRAME_DEPTH = 40
+
+
+class NegativeStockPolicyNotInstalledError(frappe.ValidationError):
+	pass
+
+
+def _current_stock_voucher():
+	"""(voucher_type, voucher_no) ERPNext is processing for the caller of
+	is_negative_stock_allowed(), read from the nearest calling frame that
+	carries it -- or None."""
+	frame = sys._getframe(2)
+	for _ in range(_VOUCHER_FRAME_DEPTH):
+		if frame is None:
+			return None
+		local_vars = frame.f_locals
+		owner = local_vars.get("self")
+		doctype = getattr(owner, "doctype", None)
+		if doctype == "Stock Entry" and getattr(owner, "name", None):
+			return ("Stock Entry", owner.name)
+		if doctype == "Stock Ledger Entry" and getattr(owner, "voucher_no", None):
+			return (owner.voucher_type, owner.voucher_no)
+		for key in ("args", "sle"):
+			data = local_vars.get(key)
+			if data is not None and hasattr(data, "get") and data.get("voucher_no"):
+				return (data.get("voucher_type"), data.get("voucher_no"))
+		frame = frame.f_back
+	return None
+
+
+def _authorized_by_bodega(item_code):
+	scope = getattr(frappe.local, _NEGATIVE_STOCK_SCOPE, None)
+	if not scope or scope.get("flow") != FORCED_ISSUE_FLOW or item_code not in scope["items"]:
+		return False
+	return _current_stock_voucher() == ("Stock Entry", scope["stock_entry"])
+
+
+def install_negative_stock_policy():
+	"""Wrap ERPNext's is_negative_stock_allowed ONCE per process. Idempotent:
+	an already installed wrapper (even after a reload of this module) is
+	detected by its marker and kept as is -- never wrapped twice, never
+	restored. Returns the installed wrapper."""
+	from erpnext.stock import stock_ledger
+
+	current = stock_ledger.is_negative_stock_allowed
+	if getattr(current, _POLICY_MARKER, False):
+		return current
+	with _INSTALL_LOCK:
+		current = stock_ledger.is_negative_stock_allowed
+		if getattr(current, _POLICY_MARKER, False):
+			return current
+		original = current
+
+		@functools.wraps(original)
+		def fabrigray_negative_stock_policy(*args, **kwargs):
+			item_code = kwargs.get("item_code", args[0] if args else None)
+			if _authorized_by_bodega(item_code):
+				return True
+			return original(*args, **kwargs)
+
+		setattr(fabrigray_negative_stock_policy, _POLICY_MARKER, True)
+		setattr(fabrigray_negative_stock_policy, _POLICY_ORIGINAL, original)
+		stock_ledger.is_negative_stock_allowed = fabrigray_negative_stock_policy
+		return fabrigray_negative_stock_policy
+
+
+def negative_stock_policy_installed():
+	from erpnext.stock import stock_ledger
+
+	return bool(getattr(stock_ledger.is_negative_stock_allowed, _POLICY_MARKER, False))
+
+
+@contextmanager
+def allow_negative_stock_for_bodega(stock_entry):
+	"""Request-local authorization for `stock_entry`'s own items, only while
+	this block runs. Only frappe.local changes here; the previous value is
+	put back in `finally`, whatever happens."""
+	if not negative_stock_policy_installed():
+		# Fail closed: without the wrapper ERPNext refuses the negative issue.
+		frappe.throw(
+			_("La política de stock de Bodega no está activa en este proceso; no se descontó nada."),
+			exc=NegativeStockPolicyNotInstalledError,
+		)
+	previous = getattr(frappe.local, _NEGATIVE_STOCK_SCOPE, None)
+	setattr(
+		frappe.local,
+		_NEGATIVE_STOCK_SCOPE,
+		{
+			"flow": FORCED_ISSUE_FLOW,
+			"stock_entry": stock_entry.name,
+			"items": frozenset(d.item_code for d in stock_entry.get("items")),
+		},
+	)
+	try:
+		yield
+	finally:
+		setattr(frappe.local, _NEGATIVE_STOCK_SCOPE, previous)
+
+
+def _validate_valuation_rates_for_forced_issue(company, shortages):
+	"""All or nothing: every short item/warehouse needs a valid (> 0)
+	valuation rate through ERPNext's own chain (last SLE of that item and
+	warehouse -> Item valuation/standard rate -> buying Item Price)."""
+	from erpnext.stock.stock_ledger import get_valuation_rate
+
+	for shortage in shortages:
+		rate = get_valuation_rate(
+			shortage["item_code"],
+			shortage["warehouse"],
+			"Stock Entry",
+			"",
+			company=company,
+			raise_error_if_no_rate=False,
+		)
+		if flt(rate) <= 0:
+			frappe.throw(
+				_(
+					"No se puede completar el pedido sin inventario porque el artículo {0} "
+					"no tiene una tasa de valoración válida."
+				).format(shortage["item_code"]),
+				title=_("Sin tasa de valoración"),
+				exc=MissingValuationRateForForcedIssueError,
+			)
+
+
+def create_stock_issue(pick_list_doc, rows=None, allow_shortage=False):
 	"""Create and submit the Material Issue of a SUBMITTED Pick List -- one
 	line per pending row, each from that row's own warehouse. Returns the
 	Stock Entry, or None when nothing is pending. The caller holds the Pick
@@ -223,7 +386,15 @@ def create_stock_issue(pick_list_doc, rows=None):
 	submit (that would let it issue arbitrary stock from Desk/API); the
 	caller already checked Pick List write + submit permission, and this is
 	the consequence of that authorized action -- same pattern as the
-	Fulfillment Engine's Pick List inserts."""
+	Fulfillment Engine's Pick List inserts.
+
+	allow_shortage (Bodega's "Completar pedidos sin importar inventario",
+	fulfillment.bodega_settings): False keeps the flow exactly as it was.
+	True does not refuse for missing Bin.actual_qty: when something is short
+	it first requires a valid valuation rate for every short line (all or
+	nothing), then submits under allow_negative_stock_for_bodega() so THIS
+	issue may take the stock negative. The short lines travel on
+	entry.flags.fg_forced_shortages ([] when the stock was enough)."""
 	rows = pending_issue_rows(pick_list_doc) if rows is None else rows
 	if not rows:
 		return None
@@ -236,7 +407,12 @@ def create_stock_issue(pick_list_doc, rows=None):
 				_("Fila #{0}: artículos con lote/serie no están soportados en la salida automática.").format(row.idx)
 			)
 
-	validate_stock_for_issue(rows)
+	shortages = []
+	if allow_shortage:
+		shortages = stock_shortages_for_issue(rows)
+		_validate_valuation_rates_for_forced_issue(pick_list_doc.company, shortages)
+	else:
+		validate_stock_for_issue(rows)
 
 	sales_orders = sorted({row.sales_order for row, _qty in rows if row.sales_order})
 	entry = frappe.new_doc("Stock Entry")
@@ -247,6 +423,15 @@ def create_stock_issue(pick_list_doc, rows=None):
 	entry.remarks = _("Salida de inventario al completar el pedido {0} (Pick List {1}).").format(
 		", ".join(sales_orders) or "-", pick_list_doc.name
 	)
+	if shortages:
+		entry.remarks += " " + _(
+			"Salida sin inventario suficiente (modo 'Completar pedidos sin importar inventario' ACTIVADO): {0}."
+		).format(
+			"; ".join(
+				_("{0} en {1}: faltaban {2}").format(s["item_code"], s["warehouse"], s["shortage_qty"])
+				for s in shortages
+			)
+		)
 	for row, qty in rows:
 		entry.append(
 			"items",
@@ -267,7 +452,11 @@ def create_stock_issue(pick_list_doc, rows=None):
 	entry.flags.ignore_permissions = True
 	try:
 		entry.insert()
-		entry.submit()
+		if shortages:
+			with allow_negative_stock_for_bodega(entry):
+				entry.submit()
+		else:
+			entry.submit()
 	except NegativeStockError:
 		frappe.throw(
 			_(
@@ -277,6 +466,7 @@ def create_stock_issue(pick_list_doc, rows=None):
 			title=_("Stock insuficiente"),
 			exc=InsufficientStockForIssueError,
 		)
+	entry.flags.fg_forced_shortages = shortages
 	return entry
 
 
@@ -520,3 +710,9 @@ def issued_pending_delivery_qty(item_codes=None):
 		as_dict=True,
 	)
 	return {(r.item_code, r.warehouse): flt(r.qty) for r in rows if flt(r.qty) > 0}
+
+
+# Installed when this module is first imported -- before any code path that
+# can authorize a forced issue (that code lives here) runs, in web and
+# background workers alike.
+install_negative_stock_policy()

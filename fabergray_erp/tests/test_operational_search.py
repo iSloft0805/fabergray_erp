@@ -80,7 +80,7 @@ class TestBodegaQueueCustomerName(IntegrationTestCase):
 		pl = self._pick_list()
 		with fx.as_user(self.bodega_user):
 			queue = bodega.get_queue()
-		row = next(r for bucket in queue.values() for r in bucket if r["name"] == pl.name)
+		row = next(r for bucket in bodega.QUEUE_BUCKETS for r in queue[bucket] if r["name"] == pl.name)
 		self.assertEqual(row["customer_name"], "FG2520 ABC Fumiservices")
 		self.assertEqual(row["customer"], self.customer.name)
 		self.assertIsNotNone(row["creation"])

@@ -227,7 +227,7 @@ class TestMultiWarehouseFulfillment(IntegrationTestCase):
 
 		with fx.as_user(self.bodega_user):
 			queue = bodega.get_queue()
-			entry = next(e for bucket in queue.values() for e in bucket if e["name"] == pl.name)
+			entry = next(e for bucket in bodega.QUEUE_BUCKETS for e in queue[bucket] if e["name"] == pl.name)
 			detail = bodega.get_pick_list(pl.name)
 		self.assertIsNone(entry["parent_warehouse"])
 		self.assertEqual(entry["warehouses"], expected)

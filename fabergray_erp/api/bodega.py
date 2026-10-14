@@ -15,7 +15,7 @@ from frappe.utils import flt, now_datetime
 
 from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
-from fabergray_erp.fulfillment import shortage_invoice
+from fabergray_erp.fulfillment import bodega_settings, shortage_invoice
 from fabergray_erp.fulfillment.stock_issue_service import (
 	IncompleteStockIssueError,
 	controlled_pick_list_submit,
@@ -227,6 +227,12 @@ def _create_shortage_report(pick_list_doc, row, qty_disponible, shortage_reason=
 	)
 
 
+#: The Pick List buckets get_queue() returns. Its result also carries
+#: "force_complete_without_stock" (the global Bodega policy), which is not a
+#: bucket: iterate these keys, never every value of the response.
+QUEUE_BUCKETS = ("listos", "con_faltantes", "en_alistamiento", "pendientes")
+
+
 @frappe.whitelist()
 def get_queue():
 	"""Pick Lists the current user may read, bucketed for the future Bodega Page.
@@ -313,7 +319,7 @@ def get_queue():
 			commercial_name_cache[sales_order] = root_commercial_name(sales_order)
 		return commercial_name_cache[sales_order]
 
-	buckets = {"listos": [], "con_faltantes": [], "en_alistamiento": [], "pendientes": []}
+	buckets = {bucket: [] for bucket in QUEUE_BUCKETS}
 	for pl in pick_lists:
 		sales_order = sales_order_by_pick_list.get(pl.name)
 		entry = {
@@ -343,6 +349,8 @@ def get_queue():
 		}
 		buckets[_pick_list_bucket(pl, shortage_pick_lists)].append(entry)
 
+	# Global Bodega policy (fulfillment.bodega_settings), shown on every screen.
+	buckets["force_complete_without_stock"] = bodega_settings.state()
 	return buckets
 
 
@@ -481,6 +489,7 @@ def get_pick_list(name):
 		# Facturación con faltantes: already invoiced in full while picking
 		# is pending -- only a COMPLETE picking can finish it.
 		"invoiced_with_shortage": invoiced_with_shortage,
+		"force_complete_without_stock": bodega_settings.state(),
 		"invoiced_with_shortage_message": (
 			_(shortage_invoice.MSG_INVOICED_WITH_SHORTAGE) if invoiced_with_shortage else None
 		),
@@ -786,10 +795,17 @@ def _finish_picking(name):
 
 	frappe.get_doc("Pick List", name).check_permission("write")
 
-	return _complete_pick_list(name)
+	return _complete_pick_list(name, honor_force_policy=True)
 
 
-def _complete_pick_list(name, prepare=None, system_action=False):
+#: Comment on a Pick List whose Material Issue really used the exception.
+FORCED_COMPLETION_NOTE = (
+	"Pedido completado sin inventario suficiente porque el modo 'Completar pedidos sin importar "
+	"inventario' estaba ACTIVADO por política de Bodega."
+)
+
+
+def _complete_pick_list(name, prepare=None, system_action=False, honor_force_policy=False):
 	"""The body of COMPLETAR PEDIDO, shared by finish_picking() (Bodega) and
 	fulfillment.resolved_shortage_service (Jefe de Bodega's "Validar pedidos
 	con faltantes resueltos") -- one implementation of lock -> re-read ->
@@ -874,8 +890,15 @@ def _complete_pick_list(name, prepare=None, system_action=False):
 			).format(", ".join(str(idx) for idx in zero_qty_rows))
 		)
 
-	# Fail before writing anything when the picked units are not in stock.
-	validate_stock_for_issue(pending_issue_rows(pl))
+	# "Completar pedidos sin importar inventario" (fulfillment.bodega_settings):
+	# only Bodega's own COMPLETAR PEDIDO honors it (honor_force_policy), read
+	# fresh from the DB right here -- after the locks and every picking
+	# guard above, which still apply in full. ON only lifts the "not enough
+	# Bin.actual_qty" refusal; the Material Issue itself is still real.
+	forced = honor_force_policy and bodega_settings.force_complete_enabled()
+	if not forced:
+		# Fail before writing anything when the picked units are not in stock.
+		validate_stock_for_issue(pending_issue_rows(pl))
 
 	frappe.db.savepoint(FINISH_PICKING_SAVEPOINT)
 	if system_action:
@@ -883,7 +906,9 @@ def _complete_pick_list(name, prepare=None, system_action=False):
 	try:
 		with controlled_pick_list_submit(pl.name):
 			pl.submit()
-		stock_entry = create_stock_issue(pl)
+		stock_entry = create_stock_issue(pl, allow_shortage=forced)
+		if stock_entry and stock_entry.flags.get("fg_forced_shortages"):
+			pl.add_comment("Comment", _(FORCED_COMPLETION_NOTE))
 	except frappe.QueryDeadlockError:
 		raise  # InnoDB already aborted the whole transaction (savepoint gone): finish_picking() retries it
 	except frappe.exceptions.TimestampMismatchError:
@@ -896,7 +921,9 @@ def _complete_pick_list(name, prepare=None, system_action=False):
 		frappe.db.rollback(save_point=FINISH_PICKING_SAVEPOINT)
 		raise
 
-	return _finish_picking_result(pl, stock_entry.name if stock_entry else None, already_completed=False)
+	result = _finish_picking_result(pl, stock_entry.name if stock_entry else None, already_completed=False)
+	result["completed_without_stock"] = bool(stock_entry and stock_entry.flags.get("fg_forced_shortages"))
+	return result
 
 
 def _throw_incomplete_stock_issue(pl, pending):

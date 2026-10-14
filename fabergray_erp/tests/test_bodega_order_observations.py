@@ -300,6 +300,8 @@ class TestGetPickListObservations(_ObservationsBodegaWorld):
 				# Facturación con faltantes (fulfillment.shortage_invoice).
 				"invoiced_with_shortage",
 				"invoiced_with_shortage_message",
+				# Global Bodega policy (fulfillment.bodega_settings).
+				"force_complete_without_stock",
 				"rows",
 			},
 		)

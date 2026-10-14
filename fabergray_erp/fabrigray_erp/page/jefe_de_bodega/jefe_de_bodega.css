@@ -357,3 +357,54 @@
 	color: var(--text-muted);
 	font-size: 0.85rem;
 }
+/* "Completar pedidos sin importar inventario" -- política global de Bodega. */
+.fg-jefe-bodega .fg-force-policy {
+	margin: 0 0 12px;
+	padding: 10px 12px;
+	border-radius: 8px;
+	border: 1px solid var(--border-color);
+	background: var(--fg-surface, var(--card-bg));
+}
+
+.fg-jefe-bodega .fg-force-policy.is-on {
+	background: var(--red-50, #fef2f2);
+	border-color: var(--red-300, #fca5a5);
+}
+
+.fg-jefe-bodega .fg-force-policy-row {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+}
+
+.fg-jefe-bodega .fg-force-policy-label {
+	font-weight: 700;
+	font-size: 0.85rem;
+	letter-spacing: 0.02em;
+}
+
+.fg-jefe-bodega .fg-force-policy.is-on .fg-force-policy-label {
+	color: var(--red-700, #b91c1c);
+}
+
+.fg-jefe-bodega .fg-force-policy-toggle {
+	padding: 4px 12px;
+	border-radius: 6px;
+	border: 1px solid var(--border-color);
+	background: var(--card-bg, #fff);
+	font-weight: 600;
+	font-size: 0.8rem;
+	cursor: pointer;
+}
+
+.fg-jefe-bodega .fg-force-policy-warning {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-top: 6px;
+	font-size: 0.85rem;
+	font-weight: 600;
+	color: var(--red-700, #b91c1c);
+}

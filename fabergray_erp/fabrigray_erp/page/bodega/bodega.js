@@ -281,6 +281,72 @@ fabergray_erp.Bodega = class Bodega {
 	// The bottom nav itself is appended here, unconditionally, so it is
 	// never lost switching sections or opening/closing a detail.
 	// -------------------------------------------------------------------
+	// "Completar pedidos sin importar inventario" -- política global de
+	// Bodega, guardada en el servidor (fulfillment.bodega_settings). Todos la
+	// ven; solo Jefe de Bodega / System Manager (`can_change`, decidido en el
+	// servidor) ven el botón, y el servidor vuelve a exigirlo al cambiarla.
+	force_policy() {
+		const source = this.state.view === "detail" ? this.state.detail : this.state.queue;
+		return (source && source.force_complete_without_stock) || null;
+	}
+
+	render_force_policy_html() {
+		const policy = this.force_policy();
+		if (!policy) return "";
+		const toggle = policy.can_change
+			? `<button type="button" class="fg-force-policy-toggle">${
+					policy.enabled ? __("Desactivar") : __("Activar")
+			  }</button>`
+			: "";
+		const warning = policy.enabled
+			? `<div class="fg-force-policy-warning">${icon("triangle-alert")} ${frappe.utils.escape_html(
+					policy.warning || ""
+			  )}</div>`
+			: "";
+		return `
+			<div class="fg-force-policy ${policy.enabled ? "is-on" : "is-off"}">
+				<div class="fg-force-policy-row">
+					<span class="fg-force-policy-label">${frappe.utils.escape_html(policy.label)}</span>
+					${toggle}
+				</div>
+				${warning}
+			</div>`;
+	}
+
+	bind_force_policy_events() {
+		this.$body.find(".fg-force-policy-toggle").on("click", (e) => {
+			const policy = this.force_policy();
+			if (!policy || this.busy) return;
+			const enable = !policy.enabled;
+			const $btn = $(e.currentTarget).prop("disabled", true);
+			frappe.confirm(
+				enable
+					? __("¿Activar 'Completar pedidos sin importar inventario'? Los pedidos podrán finalizarse aunque no exista inventario suficiente.")
+					: __("¿Desactivar 'Completar pedidos sin importar inventario'? Los pedidos volverán a exigir inventario suficiente."),
+				() => {
+					frappe
+						.call({
+							method: "fabergray_erp.api.jefe_bodega.set_force_complete_without_stock",
+							type: "POST",
+							args: { enabled: enable ? 1 : 0 },
+							freeze: true,
+						})
+						.then((r) => {
+							const fresh = r && r.message;
+							if (fresh) {
+								if (this.state.queue) this.state.queue.force_complete_without_stock = fresh;
+								if (this.state.detail) this.state.detail.force_complete_without_stock = fresh;
+							}
+							frappe.show_alert({ message: enable ? __("Modo ACTIVADO.") : __("Modo DESACTIVADO."), indicator: enable ? "orange" : "green" }, 4);
+							return this.state.view === "detail" ? this.load_detail(this.state.pick_list) : this.load_queue();
+						})
+						.always(() => $btn.prop("disabled", false));
+				},
+				() => $btn.prop("disabled", false)
+			);
+		});
+	}
+
 	render_body() {
 		let content_html;
 		if (this.state.view === "detail") {
@@ -304,8 +370,9 @@ fabergray_erp.Bodega = class Bodega {
 			}
 		}
 
-		this.$body.html(content_html + this.render_bottom_nav_html());
+		this.$body.html(this.render_force_policy_html() + content_html + this.render_bottom_nav_html());
 		this.bind_bottom_nav_events();
+		this.bind_force_policy_events();
 
 		if (this.state.view === "detail") {
 			this.bind_detail_events();
