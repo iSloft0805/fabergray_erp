@@ -680,8 +680,16 @@ fixtures = [
 		# in this Print Format's own HTML/CSS, which is pure presentation).
 		# Commit 25.23 -- "Fabrigray Factura Comercial" (Pick List), same
 		# design: pure presentation, logic in api/facturacion.py.
+		# "3CORAZONESCAFES Factura" (Sales Invoice) -- same layout, but fully
+		# native: reads only standard Sales Invoice fields, no before_print.
 		"dt": "Print Format",
-		"filters": [["name", "in", ["Fabrigray Cotización Comercial", "Fabrigray Factura Comercial"]]],
+		"filters": [
+			[
+				"name",
+				"in",
+				["Fabrigray Cotización Comercial", "Fabrigray Factura Comercial", "3CORAZONESCAFES Factura"],
+			]
+		],
 	},
 ]
 
