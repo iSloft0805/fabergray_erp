@@ -86,7 +86,10 @@ class TestFacturacionInvoiceNumbering(IntegrationTestCase):
 		self.assertEqual(set(invoice_issuers.INVOICE_NUMBERING), set(invoice_issuers.INVOICE_ISSUERS))
 		self.assertEqual(self.invoice_numbering["integrandoMAS"]["start"], 6886)
 		self.assertEqual(self.invoice_numbering["ecoluminar"]["start"], 2263)
-		self.assertEqual(len({c["series"] for c in self.invoice_numbering.values()}), 2)
+		# 3CORAZONESCAFES: serie propia desde 1, impresa con 4 dígitos (0001).
+		self.assertEqual(self.invoice_numbering["3CORAZONESCAFES"]["start"], 1)
+		self.assertEqual(self.invoice_numbering["3CORAZONESCAFES"]["width"], 4)
+		self.assertEqual(len({c["series"] for c in self.invoice_numbering.values()}), 3)
 
 	# =====================================================================
 	# Elegir emisor antes de facturar: nunca consume la serie

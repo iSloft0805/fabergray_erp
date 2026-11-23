@@ -370,8 +370,9 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 		"""Datos reales entregados por el negocio; la ruta del logo está
 		configurada, pero mientras el PNG no exista en disco es lo único
 		faltante -- nunca un logo inventado ni reutilizado."""
-		self.assertEqual(invoice_issuers.INVOICE_ISSUERS, ("integrandoMAS", "ecoluminar"))
-		for issuer in invoice_issuers.INVOICE_ISSUERS:
+		self.assertEqual(invoice_issuers.INVOICE_ISSUERS, ("integrandoMAS", "ecoluminar", "3CORAZONESCAFES"))
+		# 3CORAZONESCAFES: ver test_facturacion_invoice_tres_corazones.py.
+		for issuer in ("integrandoMAS", "ecoluminar"):
 			self.assertTrue(invoice_issuers.ISSUER_CONFIG[issuer]["logo"], issuer)
 			expected = [] if invoice_issuers.logo_available(issuer) else ["logo"]
 			self.assertEqual(invoice_issuers.missing_issuer_fields(issuer), expected, issuer)
@@ -661,7 +662,8 @@ class TestFacturacionInvoicePdfUiContract(IntegrationTestCase):
 		self.assertNotIn("printview", body)
 
 	def test_issuer_selector_and_required_message(self):
-		self.assertIn('const INVOICE_ISSUERS = ["integrandoMAS", "ecoluminar"];', self.source)
+		self.assertIn('const INVOICE_ISSUERS = ["integrandoMAS", "ecoluminar", "3CORAZONESCAFES"];', self.source)
+		self.assertIn('const INVOICE_ISSUER_LABELS = { "3CORAZONESCAFES": "3CORAZONESCAFÉS" };', self.source)
 		self.assertIn("EMPRESA EMISORA", self.source)
 		self.assertIn("Selecciona la empresa emisora de la factura.", self.source)
 		self.assertIn('this.call("set_invoice_issuer"', self.source)

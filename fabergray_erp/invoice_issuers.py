@@ -27,17 +27,35 @@ faltante, sin error. Copiar el PNG basta -- no hay que tocar el Print
 Format ni este archivo.
 
 Claves de ISSUER_CONFIG == valores del Select Pick List.fg_invoice_issuer
-(fixtures/custom_field.json) -- el mismo conjunto cerrado que ya usa
-Customer.fg_customer_company_type para estas dos empresas.
+(fixtures/custom_field.json). integrandoMAS/ecoluminar coinciden con
+Customer.fg_customer_company_type; 3CORAZONESCAFES es la tercera emisora y
+tiene Print Format propio ("3CORAZONESCAFES Factura Comercial", ver
+invoice_print_format()), pero el mismo flujo: selector, serie propia,
+validaciones y contexto `doc.fg_pdf_*`.
 """
 
 import os
 
 INVOICE_ISSUER_INTEGRANDOMAS = "integrandoMAS"
 INVOICE_ISSUER_ECOLUMINAR = "ecoluminar"
+INVOICE_ISSUER_TRES_CORAZONES = "3CORAZONESCAFES"
 
 #: Whitelist estricta, en el orden en que se muestran en la UI.
-INVOICE_ISSUERS = (INVOICE_ISSUER_INTEGRANDOMAS, INVOICE_ISSUER_ECOLUMINAR)
+INVOICE_ISSUERS = (INVOICE_ISSUER_INTEGRANDOMAS, INVOICE_ISSUER_ECOLUMINAR, INVOICE_ISSUER_TRES_CORAZONES)
+
+#: Texto visible en el selector de Facturación (facturacion.js lo replica).
+#: La clave guardada es ASCII (sirve de nombre de archivo y de serie); solo
+#: la etiqueta lleva la tilde de la marca.
+INVOICE_ISSUER_LABELS = {
+	INVOICE_ISSUER_INTEGRANDOMAS: "integrandoMAS",
+	INVOICE_ISSUER_ECOLUMINAR: "ecoluminar",
+	INVOICE_ISSUER_TRES_CORAZONES: "3CORAZONESCAFÉS",
+}
+
+#: Print Format (Pick List) que imprime la factura de cada emisor. Los dos
+#: emisores originales comparten "Fabrigray Factura Comercial"; un emisor
+#: con identidad visual propia declara `print_format` en ISSUER_CONFIG.
+DEFAULT_INVOICE_PRINT_FORMAT = "Fabrigray Factura Comercial"
 
 #: Carpeta pública de assets de facturación (ver docstring del módulo).
 INVOICE_ASSETS_URL_PREFIX = "/assets/fabergray_erp/images/invoice/"
@@ -106,6 +124,48 @@ ISSUER_CONFIG = {
 		"bank_account_number": "09036542699",
 		"bank_account_holder": "JUAN ANDRES LOZANO GARCIA",
 	},
+	# 3CORAZONESCAFÉS -- misma regla: nada se inventa. Solo el nombre
+	# comercial y el logo fueron entregados; todo `None` está PENDIENTE de
+	# que el negocio lo entregue. Mientras falte un REQUIRED_ISSUER_FIELDS el
+	# PDF sale BORRADOR y lo lista ("faltan datos del emisor: ..."); los
+	# campos opcionales vacíos (razón social, resolución DIAN, banco) se
+	# marcan "[pendiente]" en su propio formato. Completar = llenar estos
+	# valores, sin tocar el HTML.
+	INVOICE_ISSUER_TRES_CORAZONES: {
+		"display_name": "3CORAZONESCAFÉS",
+		"legal_name": None,  # pendiente: razón social
+		"nit": None,  # pendiente
+		"tax_regime": None,  # pendiente: régimen / responsabilidad tributaria
+		"address": None,  # pendiente
+		"city": None,  # pendiente
+		"phones": (),  # pendiente
+		"email": None,  # pendiente
+		"logo": INVOICE_ASSETS_URL_PREFIX + "3corazonescafes-logo.png",
+		# Pendiente: resolución de facturación DIAN (número, fecha, rango,
+		# vigencia). No se imprime ninguna resolución hasta tenerla.
+		"dian_resolution": None,
+		# Texto genérico del Art. 774 del Código de Comercio, SIN la
+		# autorización de reporte a centrales de riesgo de los otros dos
+		# emisores: esa autorización es propia de cada empresa y debe
+		# entregarla el negocio si aplica.
+		"legal_footer": (
+			"Esta factura de venta se asimila en sus efectos a la letra de cambio, conforme al Art. 774 del "
+			"Código de Comercio. Declaro haber recibido real y materialmente las mercancías descritas en este "
+			"título valor. Adeudo a 3CORAZONESCAFÉS el monto neto indicado; en caso de mora se causarán los "
+			"intereses al máximo permitido legalmente."
+		),
+		"payment_instruction": None,  # pendiente (se arma con los bank_* cuando existan)
+		"bank_name": None,  # pendiente
+		"bank_account_type": None,  # pendiente
+		"bank_account_number": None,  # pendiente
+		"bank_account_holder": None,  # pendiente
+		"bank_account_holder_id": None,  # pendiente: NIT/CC del titular
+		"print_format": "3CORAZONESCAFES Factura Comercial",
+		# La línea "Impreso por: LITO CARIBE" corresponde a los talonarios de
+		# los otros dos emisores; no se imprime aquí hasta que el negocio
+		# confirme la imprenta de esta empresa.
+		"show_print_provider": False,
+	},
 }
 
 #: Numeración INTERNA de factura, independiente por emisor (no es numeración
@@ -115,9 +175,17 @@ ISSUER_CONFIG = {
 #: emisor nunca avanza la serie del otro. `start` es el PRIMER número que
 #: emite la serie la primera vez que se usa; si la fila ya existe nunca se
 #: reinicia ni retrocede. Ver api/facturacion.py::_next_invoice_number().
+#: `start: None` = número inicial aún NO entregado por el negocio: el emisor
+#: puede elegirse, pero FACTURAR con él se bloquea con un mensaje claro
+#: (api/facturacion.py::_next_invoice_number) -- nunca se inventa uno.
+#: `width` (opcional) es SOLO presentación: el número se guarda entero
+#: (fg_invoice_number = 1, clave "3CORAZONESCAFES-1") y se imprime con ceros
+#: a la izquierda (0001) -- ver format_invoice_number().
 INVOICE_NUMBERING = {
 	INVOICE_ISSUER_INTEGRANDOMAS: {"series": "FG-FACT-INTEGRANDOMAS-", "start": 6886},
 	INVOICE_ISSUER_ECOLUMINAR: {"series": "FG-FACT-ECOLUMINAR-", "start": 2263},
+	# Entregado por el negocio: la primera factura es la 0001.
+	INVOICE_ISSUER_TRES_CORAZONES: {"series": "FG-FACT-3CORAZONESCAFES-", "start": 1, "width": 4},
 }
 
 #: Sin estos datos el PDF sale marcado como BORRADOR (además de la falta de
@@ -181,7 +249,43 @@ def get_issuer_config(issuer):
 	context["phones_display"] = " - ".join(context["phones"]) or None
 	context["logo_configured"] = config.get("logo")
 	context["logo"] = config.get("logo") if logo_available(issuer) else None
+	context["label"] = INVOICE_ISSUER_LABELS.get(issuer, issuer)
+	context["print_format"] = invoice_print_format(issuer)
+	context.setdefault("show_print_provider", True)
 	return context
+
+
+def invoice_print_format(issuer):
+	"""Print Format de Pick List que imprime la factura de `issuer` (None si
+	no está en la whitelist). Fijo en el servidor -- nunca viene del cliente."""
+	if issuer not in INVOICE_ISSUERS:
+		return None
+	return ISSUER_CONFIG[issuer].get("print_format") or DEFAULT_INVOICE_PRINT_FORMAT
+
+
+def invoice_print_formats():
+	"""Todos los formatos de factura (los que el before_print debe custodiar)."""
+	return {invoice_print_format(issuer) for issuer in INVOICE_ISSUERS}
+
+
+def format_invoice_number(issuer, number):
+	"""Número de factura tal como se muestra/imprime: con ceros a la
+	izquierda hasta `width` si el emisor lo define (3CORAZONESCAFES: 0001),
+	o tal cual (6886). None si no hay número."""
+	try:
+		number = int(number or 0)
+	except (TypeError, ValueError):
+		number = 0
+	if number <= 0:
+		return None
+	width = (INVOICE_NUMBERING.get(issuer) or {}).get("width") or 0
+	return str(number).zfill(width)
+
+
+def invoice_numbering_configured(issuer):
+	"""True si la serie de `issuer` ya tiene número inicial entregado."""
+	start = (INVOICE_NUMBERING.get(issuer) or {}).get("start")
+	return isinstance(start, int) and start > 0
 
 
 def get_print_provider():
@@ -199,3 +303,16 @@ def missing_issuer_fields(issuer):
 		if not present:
 			missing.append(REQUIRED_ISSUER_FIELD_LABELS[field])
 	return missing
+
+
+
+def get_tres_corazones_issuer():
+	"""Contexto del emisor para el Print Format "3CORAZONESCAFES Factura"
+	(Sales Invoice, sales_invoice_print.py). Se arma desde la MISMA entrada
+	ISSUER_CONFIG[INVOICE_ISSUER_TRES_CORAZONES] que usa el flujo de
+	Facturación -- una sola fuente de datos de la empresa. Conserva la URL
+	relativa del logo (ese formato la usa tal cual) y `legal_text`."""
+	context = get_issuer_config(INVOICE_ISSUER_TRES_CORAZONES)
+	context["logo"] = context["logo_configured"]
+	context["legal_text"] = context.get("legal_footer")
+	return context

@@ -2274,7 +2274,7 @@
   "name": "Pick List-fg_invoice_issuer",
   "no_copy": 1,
   "non_negative": 0,
-  "options": "\nintegrandoMAS\necoluminar",
+  "options": "\nintegrandoMAS\necoluminar\n3CORAZONESCAFES",
   "permlevel": 0,
   "placeholder": null,
   "precision": "",

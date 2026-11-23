@@ -529,12 +529,12 @@ fabergray_erp.Facturacion = class Facturacion {
 	// (SIN NUMERAR) -- elegir emisor nunca consume la serie.
 	render_invoice_pdf_html(r) {
 		const current = r.fg_invoice_issuer || "";
-		const number = r.fg_invoice_number || null;
+		const number = invoice_number_text(r);
 		const options = [`<option value="" ${current ? "" : "selected"}>${__("Selecciona...")}</option>`]
 			.concat(
 				INVOICE_ISSUERS.map(
 					(issuer) =>
-						`<option value="${issuer}" ${issuer === current ? "selected" : ""}>${issuer}</option>`
+						`<option value="${issuer}" ${issuer === current ? "selected" : ""}>${invoice_issuer_label(issuer)}</option>`
 				)
 			)
 			.join("");
@@ -575,8 +575,9 @@ fabergray_erp.Facturacion = class Facturacion {
 				if (row) {
 					row.fg_invoice_issuer = result.fg_invoice_issuer;
 					row.fg_invoice_number = result.fg_invoice_number;
+					row.fg_invoice_number_display = result.fg_invoice_number_display;
 				}
-				frappe.show_alert({ message: __("Empresa emisora guardada: {0}", [result.fg_invoice_issuer]), indicator: "green" }, 4);
+				frappe.show_alert({ message: __("Empresa emisora guardada: {0}", [invoice_issuer_label(result.fg_invoice_issuer)]), indicator: "green" }, 4);
 			})
 			.catch(() => revert())
 			.finally(() => {
@@ -1272,15 +1273,16 @@ fabergray_erp.Facturacion = class Facturacion {
 	// number is consumed); once the Pick List is Facturado it is read-only.
 	render_review_issuer_html(d, is_facturado) {
 		if (is_facturado || d.fg_invoice_number) {
-			return `${frappe.utils.escape_html(d.fg_invoice_issuer || "—")}${
-				d.fg_invoice_number ? ` · ${__("FACTURA No.")} <strong>${frappe.utils.escape_html(String(d.fg_invoice_number))}</strong>` : ""
+			return `${frappe.utils.escape_html(d.fg_invoice_issuer ? invoice_issuer_label(d.fg_invoice_issuer) : "—")}${
+				d.fg_invoice_number ? ` · ${__("FACTURA No.")} <strong>${frappe.utils.escape_html(String(invoice_number_text(d)))}</strong>` : ""
 			}`;
 		}
 		const current = this._review_issuer || "";
 		const options = [`<option value="" ${current ? "" : "selected"}>${__("Selecciona...")}</option>`]
 			.concat(
 				INVOICE_ISSUERS.map(
-					(issuer) => `<option value="${issuer}" ${issuer === current ? "selected" : ""}>${issuer}</option>`
+					(issuer) =>
+						`<option value="${issuer}" ${issuer === current ? "selected" : ""}>${invoice_issuer_label(issuer)}</option>`
 				)
 			)
 			.join("");
@@ -1346,6 +1348,7 @@ fabergray_erp.Facturacion = class Facturacion {
 					row.fg_invoiced_by_fullname = result.fg_invoiced_by_fullname;
 					row.fg_invoice_issuer = result.fg_invoice_issuer;
 					row.fg_invoice_number = result.fg_invoice_number;
+					row.fg_invoice_number_display = result.fg_invoice_number_display;
 					this.$body
 						.find(`.fg-fact-queue-card[data-name="${frappe.utils.escape_html(pick_list_name)}"]`)
 						.replaceWith(this.render_queue_card(row));
@@ -1355,7 +1358,7 @@ fabergray_erp.Facturacion = class Facturacion {
 						message:
 							"✓ " +
 							__("Pedido marcado como facturado correctamente.") +
-							(result.fg_invoice_number ? " " + __("Factura No. {0}", [result.fg_invoice_number]) : ""),
+							(result.fg_invoice_number ? " " + __("Factura No. {0}", [invoice_number_text(result)]) : ""),
 						indicator: "green",
 					},
 					5
@@ -2045,7 +2048,20 @@ function open_fabrigray_quotation_pdf(name) {
 // Commit 25.23 -- whitelist de emisores para el select. El servidor
 // (fabergray_erp/invoice_issuers.py::INVOICE_ISSUERS) es la fuente de verdad
 // y rechaza cualquier otro valor; esta copia solo pinta las opciones.
-const INVOICE_ISSUERS = ["integrandoMAS", "ecoluminar"];
+const INVOICE_ISSUERS = ["integrandoMAS", "ecoluminar", "3CORAZONESCAFES"];
+// Etiqueta visible (invoice_issuers.py::INVOICE_ISSUER_LABELS); el valor
+// guardado/enviado sigue siendo la clave ASCII de INVOICE_ISSUERS.
+const INVOICE_ISSUER_LABELS = { "3CORAZONESCAFES": "3CORAZONESCAFÉS" };
+
+function invoice_issuer_label(issuer) {
+	return INVOICE_ISSUER_LABELS[issuer] || issuer;
+}
+
+// Número tal como lo formatea el servidor (invoice_issuers.format_invoice_number:
+// 0001 para 3CORAZONESCAFES); el entero solo como respaldo.
+function invoice_number_text(row) {
+	return (row && (row.fg_invoice_number_display || row.fg_invoice_number)) || null;
+}
 
 // Ajuste numeración por empresa -- número interno ya asignado (o nada).
 function invoice_number_badge_html(number) {

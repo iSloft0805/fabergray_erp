@@ -124,10 +124,16 @@ from fabergray_erp.api.cotizaciones import (
 from fabergray_erp.fulfillment import shortage_invoice
 from fabergray_erp.fulfillment.stock_issue_service import get_stock_issue
 from fabergray_erp.invoice_issuers import (
+	DEFAULT_INVOICE_PRINT_FORMAT,
+	INVOICE_ISSUER_LABELS,
 	INVOICE_ISSUERS,
 	INVOICE_NUMBERING,
 	get_issuer_config,
+	format_invoice_number,
 	get_print_provider,
+	invoice_numbering_configured,
+	invoice_print_format,
+	invoice_print_formats,
 	missing_issuer_fields,
 )
 from fabergray_erp.permission_conditions import assert_same_company
@@ -917,6 +923,7 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 				),
 				"fg_invoice_issuer": pl.fg_invoice_issuer or None,
 				"fg_invoice_number": cint(pl.fg_invoice_number) or None,
+				"fg_invoice_number_display": format_invoice_number(pl.fg_invoice_issuer, pl.fg_invoice_number),
 			}
 		)
 
@@ -977,6 +984,7 @@ def get_invoicing_detail(pick_list):
 		"fg_invoicing_status": pl.fg_invoicing_status or FG_INVOICING_PENDIENTE,
 		"fg_invoice_issuer": pl.fg_invoice_issuer or None,
 		"fg_invoice_number": cint(pl.fg_invoice_number) or None,
+		"fg_invoice_number_display": format_invoice_number(pl.fg_invoice_issuer, pl.fg_invoice_number),
 		"authorized_with_shortage": authorized_with_shortage,
 		"shortage_authorized_by": pl.get(shortage_invoice.FIELD_AUTHORIZED_BY) if authorized_with_shortage else None,
 		"shortage_authorized_on": pl.get(shortage_invoice.FIELD_AUTHORIZED_ON) if authorized_with_shortage else None,
@@ -1213,6 +1221,7 @@ def mark_as_invoiced(pick_list_name, issuer=None):
 		"fg_invoiced_by_fullname": frappe.utils.get_fullname(pl.fg_invoiced_by),
 		"fg_invoice_issuer": pl.fg_invoice_issuer,
 		"fg_invoice_number": cint(pl.fg_invoice_number),
+		"fg_invoice_number_display": format_invoice_number(pl.fg_invoice_issuer, pl.fg_invoice_number),
 	}
 
 
@@ -1266,7 +1275,10 @@ def mark_as_invoiced(pick_list_name, issuer=None):
 # El PDF sigue marcado BORRADOR en esta fase (sin resolución DIAN).
 # =============================================================================
 
-INVOICE_PDF_PRINT_FORMAT_NAME = "Fabrigray Factura Comercial"
+#: Formato de integrandoMAS/ecoluminar. Cada emisor imprime con
+#: invoice_issuers.invoice_print_format(issuer) -- 3CORAZONESCAFES con
+#: "3CORAZONESCAFES Factura Comercial" --, siempre fijo en el servidor.
+INVOICE_PDF_PRINT_FORMAT_NAME = DEFAULT_INVOICE_PRINT_FORMAT
 
 MSG_SELECT_INVOICE_ISSUER = "Selecciona la empresa emisora de la factura."
 
@@ -1284,6 +1296,10 @@ class InvoicePdfNotEligibleError(frappe.ValidationError):
 
 
 class InvoiceIssuerLockedError(frappe.ValidationError):
+	pass
+
+
+class InvoiceNumberingNotConfiguredError(frappe.ValidationError):
 	pass
 
 
@@ -1416,6 +1432,16 @@ def _next_invoice_number(issuer):
 	transacción del request confirma número y Pick List juntos, o ninguno."""
 	from frappe.model.naming import getseries
 
+	if not invoice_numbering_configured(issuer):
+		# Emisor elegible pero sin número inicial entregado por el negocio
+		# (invoice_issuers.INVOICE_NUMBERING): nunca se inventa uno.
+		frappe.throw(
+			_(
+				"La serie de facturación de {0} aún no tiene número inicial configurado; "
+				"no puede facturarse con esta empresa todavía."
+			).format(INVOICE_ISSUER_LABELS.get(issuer, issuer)),
+			InvoiceNumberingNotConfiguredError,
+		)
 	config = INVOICE_NUMBERING[issuer]
 	frappe.db.sql(
 		"INSERT IGNORE INTO `tabSeries` (`name`, `current`) VALUES (%s, %s)",
@@ -1567,16 +1593,25 @@ def _build_invoice_lines_and_totals(pl, so):
 		if flt(rate, precision) != flt(so_item.rate, precision):
 			prices_adjusted = True
 		amount = flt(qty * rate, precision)
+		# Precio de lista/público y descuento de la línea: solo informativos
+		# (el formato de 3CORAZONESCAFES los muestra); rate/amount -- los
+		# que suman -- no cambian. Público congelado en Facturación o, si no
+		# hay, el price_list_rate del pedido.
+		list_rate = flt(row.get("fg_invoice_public_rate"), precision) or flt(so_item.price_list_rate, precision)
+		discount_pct = flt((1 - rate / list_rate) * 100, 2) if list_rate > rate > 0 else 0
 		lines.append(
 			{
 				"qty": qty,
 				"qty_display": f"{qty:g}",
+				"uom": so_item.uom or row.get("uom") or "",
 				"description": so_item.item_name or row.item_name or row.item_code,
 				"item_code": row.item_code,
 				"rate": rate,
 				"rate_display": _format_money_co(rate),
 				"amount": amount,
 				"amount_display": _format_money_co(amount),
+				"list_rate_display": _format_money_co(list_rate) if discount_pct else "",
+				"discount_display": f"{discount_pct:g}%" if discount_pct else "",
 			}
 		)
 
@@ -1591,6 +1626,10 @@ def _build_invoice_lines_and_totals(pl, so):
 	has_order_adjustments = bool(flt(so.total_taxes_and_charges) or flt(so.discount_amount))
 
 	breakdown = []
+	# `detail`: desglose fila a fila (subtotal, descuento, cada impuesto,
+	# ajuste al peso) que suma exactamente el TOTAL. Lo usa el formato de
+	# 3CORAZONESCAFES; `breakdown` -- el de integrandoMAS/ecoluminar -- no cambia.
+	detail = []
 	if prices_adjusted and has_order_adjustments:
 		# Commit 25.25 -- precios de Facturación distintos a los del pedido +
 		# impuestos/descuento global del Sales Order: recalcularlos exigiría
@@ -1604,6 +1643,7 @@ def _build_invoice_lines_and_totals(pl, so):
 		)
 	if covers_whole_order and not prices_adjusted:
 		total = flt(so.rounded_total) or flt(so.grand_total)
+		detail = _order_totals_detail(so)
 		if has_order_adjustments:
 			breakdown.append({"label": "Subtotal", "amount_display": _format_money_co(so.total)})
 			if flt(so.discount_amount):
@@ -1624,13 +1664,39 @@ def _build_invoice_lines_and_totals(pl, so):
 		)
 	else:
 		total = flt(sum(line["amount"] for line in lines), precision)
+		detail = [{"label": "Subtotal", "amount_display": _format_money_co(total)}]
 
 	return lines, {
 		"total": total,
 		"total_display": _format_money_co(total),
 		"total_in_words": _amount_in_words_es(total),
 		"breakdown": breakdown,
+		"detail": detail,
+		"has_line_discounts": any(line["discount_display"] for line in lines),
 	}
+
+
+def _order_totals_detail(so):
+	"""Filas Subtotal / Descuento / impuesto por impuesto / Ajuste al peso,
+	leídas tal cual del Sales Order (taxes_and_totals nativo) -- nada se
+	recalcula. Impuestos incluidos en el precio (included_in_print_rate) ya
+	están dentro del subtotal y no se repiten."""
+	rows = [{"label": "Subtotal", "amount_display": _format_money_co(so.total)}]
+	discount = flt(so.discount_amount)
+	if discount:
+		pct = flt(so.additional_discount_percentage)
+		label = f"Descuento ({pct:g}%)" if pct else "Descuento"
+		rows.append({"label": label, "amount_display": _format_money_co(-discount)})
+	for tax in so.get("taxes") or []:
+		amount = flt(tax.tax_amount_after_discount_amount) or flt(tax.tax_amount)
+		if not amount or tax.included_in_print_rate:
+			continue
+		label = frappe.utils.strip_html(tax.description or "").strip() or tax.account_head
+		rows.append({"label": label, "amount_display": _format_money_co(amount)})
+	rounding = flt(so.rounding_adjustment) if flt(so.rounded_total) else 0
+	if rounding:
+		rows.append({"label": "Ajuste al peso", "amount_display": _format_money_co(rounding)})
+	return rows
 
 
 def _build_invoice_pdf_context(pl, so):
@@ -1642,11 +1708,13 @@ def _build_invoice_pdf_context(pl, so):
 	if issuer.get("logo") and issuer["logo"].startswith("/"):
 		issuer["logo"] = frappe.utils.get_url(issuer["logo"])
 	pl.fg_pdf_issuer = issuer
-	# Imprenta: común a todos los emisores (invoice_issuers.INVOICE_PRINT_PROVIDER).
-	pl.fg_pdf_print_provider = get_print_provider()
+	# Imprenta: común a integrandoMAS/ecoluminar (invoice_issuers.INVOICE_PRINT_PROVIDER);
+	# un emisor con show_print_provider=False no la imprime.
+	pl.fg_pdf_print_provider = get_print_provider() if issuer.get("show_print_provider") else {}
 
 	number = _resolve_invoice_number(pl)
-	pl.fg_pdf_number = number
+	# Número impreso: 0001 para 3CORAZONESCAFES, 6886 tal cual para los demás.
+	pl.fg_pdf_number = format_invoice_number(issuer_key, number)
 	pl.fg_pdf_internal_reference = pl.name
 
 	# Fase actual: el PDF SIEMPRE es borrador -- la numeración es interna y
@@ -1687,10 +1755,21 @@ def prepare_and_guard_invoice_pdf(pl, method=None, print_settings=None):
 	de Bodega) retorna de inmediato sin calcular ni bloquear nada. Mismo
 	razonamiento que cotizaciones.prepare_and_guard_quotation_pdf(): get_
 	print() fija form_dict.format antes de renderizar en todos los caminos."""
-	if frappe.form_dict.get("format") != INVOICE_PDF_PRINT_FORMAT_NAME:
+	print_format = frappe.form_dict.get("format")
+	if print_format not in invoice_print_formats():
 		return
 
 	so = _assert_invoice_pdf_eligible(pl)
+	# Cada emisor solo se imprime con SU formato: el de 3CORAZONESCAFES
+	# lleva su marca en el HTML, así que imprimir un Pick List de otro
+	# emisor con él (p. ej. desde Desk) mezclaría identidades.
+	if print_format != invoice_print_format(pl.fg_invoice_issuer):
+		frappe.throw(
+			_("El formato {0} no corresponde a la empresa emisora de esta factura ({1}).").format(
+				print_format, INVOICE_ISSUER_LABELS.get(pl.fg_invoice_issuer, pl.fg_invoice_issuer)
+			),
+			InvoicePdfNotEligibleError,
+		)
 	_build_invoice_pdf_context(pl, so)
 
 
@@ -1732,6 +1811,7 @@ def set_invoice_issuer(pick_list_name, issuer):
 		"pick_list": pl.name,
 		"fg_invoice_issuer": pl.fg_invoice_issuer,
 		"fg_invoice_number": cint(pl.fg_invoice_number) or None,
+		"fg_invoice_number_display": format_invoice_number(pl.fg_invoice_issuer, pl.fg_invoice_number),
 	}
 
 
@@ -1749,7 +1829,7 @@ def get_invoice_pdf_view_url(pick_list_name):
 		"/printview?doctype=Pick%20List&name="
 		+ quote(pl.name)
 		+ "&format="
-		+ quote(INVOICE_PDF_PRINT_FORMAT_NAME)
+		+ quote(invoice_print_format(pl.fg_invoice_issuer))
 		+ "&no_letterhead=1&trigger_print=0"
 	)
 
@@ -1764,7 +1844,9 @@ def download_invoice_pdf(pick_list_name):
 	_assert_invoice_pdf_eligible(pl)
 	from frappe.utils.print_format import download_pdf
 
-	download_pdf(doctype="Pick List", name=pl.name, format=INVOICE_PDF_PRINT_FORMAT_NAME, no_letterhead=1)
+	download_pdf(
+		doctype="Pick List", name=pl.name, format=invoice_print_format(pl.fg_invoice_issuer), no_letterhead=1
+	)
 
 	safe_name = pl.name.replace(" ", "-").replace("/", "-")
 	frappe.local.response.filename = f"Factura-{pl.fg_invoice_issuer}-{safe_name}.pdf"

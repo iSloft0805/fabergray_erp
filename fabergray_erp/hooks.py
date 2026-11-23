@@ -131,10 +131,11 @@ boot_session = "fabergray_erp.boot.set_home_page"
 # ----------
 
 # add methods and filters to jinja environment
-# jinja = {
-# 	"methods": "fabergray_erp.utils.jinja_methods",
-# 	"filters": "fabergray_erp.utils.jinja_filters"
-# }
+# Read-only print context for "3CORAZONESCAFES Factura" (Sales Invoice) --
+# see fabergray_erp/sales_invoice_print.py.
+jinja = {
+	"methods": ["fabergray_erp.sales_invoice_print.get_sales_invoice_print_context"],
+}
 
 # Installation
 # ------------
@@ -680,6 +681,9 @@ fixtures = [
 		# in this Print Format's own HTML/CSS, which is pure presentation).
 		# Commit 25.23 -- "Fabrigray Factura Comercial" (Pick List), same
 		# design: pure presentation, logic in api/facturacion.py.
+		# "3CORAZONESCAFES Factura Comercial" (Pick List) -- the third
+		# issuer's own layout, fed by the SAME api/facturacion.py context
+		# (invoice_issuers.invoice_print_format() maps issuer -> format).
 		# "3CORAZONESCAFES Factura" (Sales Invoice) -- same layout, but fully
 		# native: reads only standard Sales Invoice fields, no before_print.
 		"dt": "Print Format",
@@ -687,7 +691,12 @@ fixtures = [
 			[
 				"name",
 				"in",
-				["Fabrigray Cotización Comercial", "Fabrigray Factura Comercial", "3CORAZONESCAFES Factura"],
+				[
+					"Fabrigray Cotización Comercial",
+					"Fabrigray Factura Comercial",
+					"3CORAZONESCAFES Factura Comercial",
+					"3CORAZONESCAFES Factura",
+				],
 			]
 		],
 	},

@@ -111,7 +111,8 @@ class TestWorld:
 
 		sfx = self.namespace
 		self.invoice_numbering = {
-			issuer: {"series": f"FG-FACT-TEST-{sfx}-{issuer.upper()}-", "start": config["start"]}
+			# Same config (start, width...) -- only the series key is test-only.
+			issuer: {**config, "series": f"FG-FACT-TEST-{sfx}-{issuer.upper()}-"}
 			for issuer, config in invoice_issuers.INVOICE_NUMBERING.items()
 		}
 		self._invoice_numbering_patch = patch.dict(invoice_issuers.INVOICE_NUMBERING, self.invoice_numbering)
