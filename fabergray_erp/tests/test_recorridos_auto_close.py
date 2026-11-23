@@ -31,19 +31,19 @@ class TestRecorridosAutoClose(IntegrationTestCase):
 		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
-		cls.wh = cls.world.warehouse("FG28H WH")
-		cls.item = cls.world.item("FG28H-ITEM")
-		cls.item2 = cls.world.item("FG28H-ITEM-2")
-		cls.customer = cls.world.customer("FG28H Customer")
+		cls.wh = cls.world.warehouse(f"FG28H WH {cls.world.namespace}")
+		cls.item = cls.world.item(f"FG28H-ITEM-{cls.world.namespace}")
+		cls.item2 = cls.world.item(f"FG28H-ITEM-2-{cls.world.namespace}")
+		cls.customer = cls.world.customer(f"FG28H Customer {cls.world.namespace}")
 		cls.world.stock_up(cls.item.name, cls.wh.name, 1000, rate=50)
 		cls.world.stock_up(cls.item2.name, cls.wh.name, 1000, rate=50)
 
-		cls.bodega_user = cls.world.user("fg28h-bodega@example.com", ["Bodega"])
+		cls.bodega_user = cls.world.user(f"fg28h-bodega-{cls.world.namespace.lower()}@example.com", ["Bodega"])
 		cls.world.warehouse_user_permission(cls.bodega_user, cls.wh.name)
-		cls.facturacion_user = cls.world.user("fg28h-facturacion@example.com", ["Facturación"])
-		cls.recorrido_user = cls.world.user("fg28h-recorrido@example.com", ["Recorrido"])
-		cls.recorrido_user_b = cls.world.user("fg28h-recorrido-b@example.com", ["Recorrido"])
-		cls.system_manager_user = cls.world.user("fg28h-sysmanager@example.com", ["System Manager"])
+		cls.facturacion_user = cls.world.user(f"fg28h-facturacion-{cls.world.namespace.lower()}@example.com", ["Facturación"])
+		cls.recorrido_user = cls.world.user(f"fg28h-recorrido-{cls.world.namespace.lower()}@example.com", ["Recorrido"])
+		cls.recorrido_user_b = cls.world.user(f"fg28h-recorrido-b-{cls.world.namespace.lower()}@example.com", ["Recorrido"])
+		cls.system_manager_user = cls.world.user(f"fg28h-sysmanager-{cls.world.namespace.lower()}@example.com", ["System Manager"])
 		cls._seq = 0
 
 		cls._evidence_file_names = []

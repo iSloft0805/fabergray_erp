@@ -34,21 +34,21 @@ class TestRecorridosStartRoute(IntegrationTestCase):
 		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
-		cls.wh = cls.world.warehouse("FG262 WH")
-		cls.item = cls.world.item("FG262-ITEM")
-		cls.item2 = cls.world.item("FG262-ITEM-2")
-		cls.customer = cls.world.customer("FG262 Customer")
+		cls.wh = cls.world.warehouse(f"FG262 WH {cls.world.namespace}")
+		cls.item = cls.world.item(f"FG262-ITEM-{cls.world.namespace}")
+		cls.item2 = cls.world.item(f"FG262-ITEM-2-{cls.world.namespace}")
+		cls.customer = cls.world.customer(f"FG262 Customer {cls.world.namespace}")
 		cls.world.stock_up(cls.item.name, cls.wh.name, 1000, rate=50)
 		cls.world.stock_up(cls.item2.name, cls.wh.name, 1000, rate=50)
 
-		cls.bodega_user = cls.world.user("fg262-bodega@example.com", ["Bodega"])
+		cls.bodega_user = cls.world.user(f"fg262-bodega-{cls.world.namespace.lower()}@example.com", ["Bodega"])
 		cls.world.warehouse_user_permission(cls.bodega_user, cls.wh.name)
-		cls.facturacion_user = cls.world.user("fg262-facturacion@example.com", ["Facturación"])
-		cls.recorrido_user = cls.world.user("fg262-recorrido@example.com", ["Recorrido"])
-		cls.recorrido_user_b = cls.world.user("fg262-recorrido-b@example.com", ["Recorrido"])
-		cls.no_role_user = cls.world.user("fg262-norole@example.com", [])
-		cls.gestion_clientes_user = cls.world.user("fg262-gestion@example.com", ["Gestión de Clientes"])
-		cls.system_manager_user = cls.world.user("fg262-sysmanager@example.com", ["System Manager"])
+		cls.facturacion_user = cls.world.user(f"fg262-facturacion-{cls.world.namespace.lower()}@example.com", ["Facturación"])
+		cls.recorrido_user = cls.world.user(f"fg262-recorrido-{cls.world.namespace.lower()}@example.com", ["Recorrido"])
+		cls.recorrido_user_b = cls.world.user(f"fg262-recorrido-b-{cls.world.namespace.lower()}@example.com", ["Recorrido"])
+		cls.no_role_user = cls.world.user(f"fg262-norole-{cls.world.namespace.lower()}@example.com", [])
+		cls.gestion_clientes_user = cls.world.user(f"fg262-gestion-{cls.world.namespace.lower()}@example.com", ["Gestión de Clientes"])
+		cls.system_manager_user = cls.world.user(f"fg262-sysmanager-{cls.world.namespace.lower()}@example.com", ["System Manager"])
 		cls._seq = 0
 
 	# -- Borrowed helpers (functions only, see module docstring) -------------

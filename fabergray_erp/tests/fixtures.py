@@ -186,8 +186,11 @@ class TestWorld:
 
 	# -- Masters ---------------------------------------------------------
 
-	def warehouse(self, name):
-		doc = frappe.get_doc({"doctype": "Warehouse", "warehouse_name": name, "company": COMPANY})
+	def warehouse(self, name, company=COMPANY):
+		"""`company` (Recorridos isolation): a throwaway warehouse of another
+		Company (e.g. "_Test Company") so a cross-company test can seed REAL
+		stock it owns -- cleanup() purges only warehouses this world created."""
+		doc = frappe.get_doc({"doctype": "Warehouse", "warehouse_name": name, "company": company})
 		doc.insert()
 		return self._track(doc)
 
@@ -333,17 +336,18 @@ class TestWorld:
 		00138). _pin_seed_creation() makes the seed unambiguously older --
 		test fixture only, production documents are never touched.
 		"""
+		company, expense_account, cost_center = self._stock_seed_accounts(warehouse)
 		posting = self._seed_posting_datetime(item_code, warehouse)
 		doc = frappe.get_doc(
 			{
 				"doctype": "Stock Reconciliation",
-				"company": COMPANY,
+				"company": company,
 				"purpose": "Stock Reconciliation",
 				"set_posting_time": 1,
 				"posting_date": posting.date(),
 				"posting_time": posting.time(),
-				"expense_account": STOCK_ADJUSTMENT_ACCOUNT,
-				"cost_center": COST_CENTER,
+				"expense_account": expense_account,
+				"cost_center": cost_center,
 				"items": [
 					{
 						"item_code": item_code,
@@ -360,6 +364,26 @@ class TestWorld:
 		doc.submit()
 		self._pin_seed_creation(doc, posting)
 		return self._track(doc)
+
+	def _stock_seed_accounts(self, warehouse):
+		"""(company, expense_account, cost_center) for a real stock seed.
+		COMPANY keeps its fixed accounts. Any OTHER company is allowed only
+		for a warehouse this same TestWorld created -- so the seed, and the
+		purge of its ledger rows in cleanup(), can never touch a pre-existing
+		warehouse ("Finished Goods - _TC" etc.) -- and uses that company's
+		own "Stock Adjustment - <abbr>" account and default cost center.
+		Nothing about the Company itself is changed."""
+		company = frappe.db.get_value("Warehouse", warehouse, "company")
+		if company == COMPANY:
+			return COMPANY, STOCK_ADJUSTMENT_ACCOUNT, COST_CENTER
+		if ("Warehouse", warehouse) not in self._created:
+			raise AssertionError(
+				f"stock_up_real() fuera de {COMPANY} solo en una bodega creada por este TestWorld: {warehouse}"
+			)
+		abbr, cost_center, adjustment = frappe.db.get_value(
+			"Company", company, ["abbr", "cost_center", "stock_adjustment_account"]
+		)
+		return company, adjustment or f"Stock Adjustment - {abbr}", cost_center
 
 	@staticmethod
 	def _pin_seed_creation(doc, posting):
@@ -595,6 +619,14 @@ class TestWorld:
 		doc.save()
 		self._track(doc)
 		return doc.name
+
+	def company_user_permission(self, user, company):
+		"""Scope a test user to `company` (permission_conditions.
+		_allowed_companies() reads User Permission "Company") -- e.g. a
+		Facturación user of "_Test Company" for cross-company tests."""
+		doc = frappe.get_doc({"doctype": "User Permission", "user": user, "allow": "Company", "for_value": company})
+		doc.insert()
+		return self._track(doc)
 
 	def warehouse_user_permission(self, user, warehouse):
 		doc = frappe.get_doc(

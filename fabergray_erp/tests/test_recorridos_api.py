@@ -105,30 +105,30 @@ class TestRecorridosApi(IntegrationTestCase):
 		cls.world = fx.TestWorld(real_stock=True)
 		cls.addClassCleanup(cls.world.cleanup)
 
-		cls.wh = cls.world.warehouse("FG241 WH")
-		cls.item = cls.world.item("FG241-ITEM")
-		cls.item2 = cls.world.item("FG241-ITEM-2")
-		cls.customer = cls.world.customer("FG241 Customer")
+		cls.wh = cls.world.warehouse(f"FG241 WH {cls.world.namespace}")
+		cls.item = cls.world.item(f"FG241-ITEM-{cls.world.namespace}")
+		cls.item2 = cls.world.item(f"FG241-ITEM-2-{cls.world.namespace}")
+		cls.customer = cls.world.customer(f"FG241 Customer {cls.world.namespace}")
 		cls.world.stock_up(cls.item.name, cls.wh.name, 1000, rate=50)
 		cls.world.stock_up(cls.item2.name, cls.wh.name, 1000, rate=50)
 
-		cls.bodega_user = cls.world.user("fg241-bodega@example.com", ["Bodega"])
+		cls.bodega_user = cls.world.user(f"fg241-bodega-{cls.world.namespace.lower()}@example.com", ["Bodega"])
 		cls.world.warehouse_user_permission(cls.bodega_user, cls.wh.name)
-		cls.facturacion_user = cls.world.user("fg241-facturacion@example.com", ["Facturación"])
-		cls.recorrido_user = cls.world.user("fg241-recorrido@example.com", ["Recorrido"])
-		cls.recorrido_user_b = cls.world.user("fg241-recorrido-b@example.com", ["Recorrido"])
-		cls.no_role_user = cls.world.user("fg241-norole@example.com", [])
+		cls.facturacion_user = cls.world.user(f"fg241-facturacion-{cls.world.namespace.lower()}@example.com", ["Facturación"])
+		cls.recorrido_user = cls.world.user(f"fg241-recorrido-{cls.world.namespace.lower()}@example.com", ["Recorrido"])
+		cls.recorrido_user_b = cls.world.user(f"fg241-recorrido-b-{cls.world.namespace.lower()}@example.com", ["Recorrido"])
+		cls.no_role_user = cls.world.user(f"fg241-norole-{cls.world.namespace.lower()}@example.com", [])
 		# Turn-4 security audit -- Recorrido is a CONSUMER of geolocation,
 		# never an ADMINISTRATOR of Address; "Gestión de Clientes" already
 		# owns Address write natively since Commit 22.7 and is the one role
 		# whose set_address_geolocation() calls must actually succeed.
-		cls.gestion_clientes_user = cls.world.user("fg243-gestion@example.com", ["Gestión de Clientes"])
+		cls.gestion_clientes_user = cls.world.user(f"fg243-gestion-{cls.world.namespace.lower()}@example.com", ["Gestión de Clientes"])
 		# Commit 24.4 -- a real, non-Administrator System Manager user:
 		# Administrator itself bypasses every permission check outright
 		# (frappe.has_permission() always True for it), so it can never
 		# stand in for "the System Manager ROLE actually grants this" --
 		# only a genuine System Manager user proves that.
-		cls.system_manager_user = cls.world.user("fg244-sysmanager@example.com", ["System Manager"])
+		cls.system_manager_user = cls.world.user(f"fg244-sysmanager-{cls.world.namespace.lower()}@example.com", ["System Manager"])
 
 		# Commit 24.4 -- geocode_address()'s own _google_api_key() check
 		# runs before this suite's own patch.object(geocoding,
@@ -146,19 +146,34 @@ class TestRecorridosApi(IntegrationTestCase):
 		# hard way when a first draft of this file re-created the same
 		# fixed-name User in two different tests and hit a real
 		# DuplicateEntryError on the second one.
-		cls.other_wh = "Finished Goods - _TC"
-		cls.other_customer = cls.world.customer("FG241 Other Company Customer")
-		cls.other_bodega_user = cls.world.user("fg241-other-bodega@example.com", ["Bodega"])
+		# Throwaway warehouse OF "_Test Company", created by this world (unique
+		# per run): completing the picking posts a real Material Issue since
+		# INVENTARIO-OUT-01, so the other-company stock must be real SLE, and a
+		# pre-existing demo warehouse ("Finished Goods - _TC") must never get
+		# -- or have purged -- test ledger rows. No Company/Stock Settings
+		# change: _Test Company keeps its own accounts and negative stock
+		# stays disabled.
+		cls.other_wh = cls.world.warehouse(f"FG241 Other WH {cls.world.namespace}", company="_Test Company").name
+		cls.other_customer = cls.world.customer(f"FG241 Other Company Customer {cls.world.namespace}")
+		cls.other_bodega_user = cls.world.user(f"fg241-other-bodega-{cls.world.namespace.lower()}@example.com", ["Bodega"])
 		cls.world.warehouse_user_permission(cls.other_bodega_user, cls.other_wh)
+		# Facturación de ESA empresa: mark_as_invoiced() valida la Company del
+		# pedido (assert_same_company, Commit 25.25) -- un usuario de
+		# fabrigraysas no puede facturarlo, y así debe seguir.
+		cls.other_facturacion_user = cls.world.user(
+			f"fg241-other-facturacion-{cls.world.namespace.lower()}@example.com", ["Facturación"]
+		)
+		cls.world.company_user_permission(cls.other_facturacion_user, "_Test Company")
 		# Pick List.set_item_locations() (called by ERPNext's own native
 		# create_pick_list() mapper, see world.pick_list_for()) allocates
 		# from REAL Bin.actual_qty -- with none stocked here, it silently
 		# produced zero Pick List Item rows (confirmed empirically: a
 		# first draft of this fixture hit "El Pick List no tiene líneas
 		# para alistar" from bodega.start_picking() for exactly this
-		# reason). stock_up() only touches this one Warehouse's own Bin,
-		# same as every other fixture in this suite.
-		cls.world.stock_up(cls.item.name, cls.other_wh, 1000, rate=50)
+		# reason). Real Stock Reconciliation into this world's own warehouse
+		# (stock_up_real(); cleanup() cancels it and purges only this
+		# warehouse's ledger rows).
+		cls.world.stock_up_real(cls.item.name, cls.other_wh, 1000, rate=50)
 
 	# -- Shared setup helpers --------------------------------------------------
 
@@ -353,9 +368,9 @@ class TestRecorridosApi(IntegrationTestCase):
 		""""_Test Company" is a pre-existing ERPNext demo company on this
 		site (confirmed live, same convention test_inventario_api.py's own
 		test_warehouse_from_another_company_rejected() established) --
-		"Finished Goods - _TC" is its own real Warehouse, self.other_wh
-		(class fixture -- see setUpClass for why these are shared, not
-		created fresh per test). Built through the exact same real
+		self.other_wh is a throwaway warehouse of that company created by this
+		TestWorld with real seeded stock (class fixture -- see setUpClass for
+		why these are shared, not created fresh per test). Built through the exact same real
 		Bodega+Facturación chain as every other fixture in this suite,
 		just against a different Company, to prove eligibility is
 		genuinely company-scoped end to end, not just at one layer.
@@ -395,7 +410,7 @@ class TestRecorridosApi(IntegrationTestCase):
 			for row in bodega.get_pick_list(pl.name)["rows"]:
 				bodega.set_picked_qty(pl.name, row["row_name"], row["qty_solicitada"])
 			bodega.finish_picking(pl.name)
-		with fx.as_user(self.facturacion_user):
+		with fx.as_user(self.other_facturacion_user):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for it in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, it["row_name"], 1)
@@ -464,7 +479,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		self.assertEqual(stop["sales_order"], so.name)
 
 	def test_primary_address_resolved_correctly(self):
-		customer = self.world.customer("FG241 Address Customer")
+		customer = self.world.customer(f"FG241 Address Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Cra 7 # 20-15", city="Medellín")
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -475,7 +490,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		self.assertEqual(stop["customer_address"], expected_address)
 
 	def test_address_display_is_text_snapshot(self):
-		customer = self.world.customer("FG241 Snapshot Customer")
+		customer = self.world.customer(f"FG241 Snapshot Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Av Siempre Viva 742", city="Cali")
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -911,7 +926,7 @@ class TestRecorridosApi(IntegrationTestCase):
 	# =====================================================================
 
 	def test_available_orders_includes_address_preview(self):
-		customer = self.world.customer("FG242 Preview Customer")
+		customer = self.world.customer(f"FG242 Preview Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Preview 1", city="Manizales")
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -932,7 +947,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		realistic "many Pick Lists, one repeat customer" shape) must cost
 		exactly one Customer query plus one get_address_display() call --
 		never five of either."""
-		customer = self.world.customer("FG242 Bounded Customer")
+		customer = self.world.customer(f"FG242 Bounded Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Bounded 1", city="Pereira")
 
 		with _count_queries() as counted:
@@ -1120,7 +1135,7 @@ class TestRecorridosApi(IntegrationTestCase):
 	# =====================================================================
 
 	def test_create_route_snapshot_pendiente_without_coordinates(self):
-		customer = self.world.customer("FG243 No Geo Customer")
+		customer = self.world.customer(f"FG243 No Geo Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Sin Geo 1", city="Bogotá")
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -1137,7 +1152,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		self.assertEqual(flt(stop["longitude"]), 0)
 
 	def test_create_route_snapshot_geolocalizado_with_valid_coordinates(self):
-		customer = self.world.customer("FG243 Geo Customer")
+		customer = self.world.customer(f"FG243 Geo Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Con Geo 1", city="Bogotá")
 		self._geocode_customer_address(customer, latitude=4.710989, longitude=-74.072092)
 		so, pl = self._facturado_pick_list(customer=customer)
@@ -1152,7 +1167,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		"""Brief section 8's own explicit requirement -- a customer with NO
 		primary address at all (not even a text one) must still let
 		create_route() succeed, parada simply Pendiente."""
-		customer = self.world.customer("FG243 No Address At All")
+		customer = self.world.customer(f"FG243 No Address At All {self.world.namespace}")
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
 			route = self._create_route(pick_lists=[pl.name])
@@ -1164,7 +1179,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		already-created parada's own snapshot (only refresh_route_
 		geolocation() -- an explicit, Borrador-only call -- may do that;
 		see the dedicated tests for it below)."""
-		customer = self.world.customer("FG243 Snapshot Frozen Customer")
+		customer = self.world.customer(f"FG243 Snapshot Frozen Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Frozen 1", city="Bogotá")
 		address_name = self._geocode_customer_address(customer, latitude=4.1, longitude=-74.1)
 		so, pl = self._facturado_pick_list(customer=customer)
@@ -1188,7 +1203,7 @@ class TestRecorridosApi(IntegrationTestCase):
 	def test_set_address_geolocation_saves_valid_coordinates(self):
 		"""Section 5a -- an authorized user (Gestión de Clientes) can edit
 		valid geolocation for real."""
-		customer = self.world.customer("FG243 Set Geo Customer")
+		customer = self.world.customer(f"FG243 Set Geo Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Set Geo 1", city="Bogotá")
 		self._facturado_pick_list(customer=customer)
 		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
@@ -1205,7 +1220,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		self.assertEqual(address.fg_geocoding_note, "Frente al parque")
 
 	def test_set_address_geolocation_rejects_invalid_latitude(self):
-		customer = self.world.customer("FG243 Bad Lat Customer")
+		customer = self.world.customer(f"FG243 Bad Lat Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer)
 		self._facturado_pick_list(customer=customer)
 		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
@@ -1214,7 +1229,7 @@ class TestRecorridosApi(IntegrationTestCase):
 				recorridos.set_address_geolocation(address_name, 91, -74)
 
 	def test_set_address_geolocation_rejects_null_island(self):
-		customer = self.world.customer("FG243 Null Island Customer")
+		customer = self.world.customer(f"FG243 Null Island Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer)
 		self._facturado_pick_list(customer=customer)
 		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
@@ -1223,7 +1238,7 @@ class TestRecorridosApi(IntegrationTestCase):
 				recorridos.set_address_geolocation(address_name, 0, 0)
 
 	def test_set_address_geolocation_rejects_invalid_source(self):
-		customer = self.world.customer("FG243 Bad Source Customer")
+		customer = self.world.customer(f"FG243 Bad Source Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer)
 		self._facturado_pick_list(customer=customer)
 		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
@@ -1240,7 +1255,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		"""A no-role user has neither Recorrido nor Gestión de Clientes --
 		frappe.has_permission("Address", "write") must reject it before any
 		other check runs."""
-		customer = self.world.customer("FG243 No Perm Customer")
+		customer = self.world.customer(f"FG243 No Perm Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer)
 		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
 		with fx.as_user(self.no_role_user):
@@ -1253,7 +1268,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		never an ADMINISTRATOR of Address: it must be rejected here exactly
 		like any other unauthorized role, now that its own Address `write`
 		Custom DocPerm is back to 0."""
-		customer = self.world.customer("FG243 Recorrido Denied Customer")
+		customer = self.world.customer(f"FG243 Recorrido Denied Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer)
 		self._facturado_pick_list(customer=customer)
 		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
@@ -1276,7 +1291,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		rejected -- this is never a set_address_geolocation()-specific
 		restriction, it is Recorrido's real, DocType-level Address
 		permission."""
-		customer = self.world.customer("FG243 Line1 Security Customer")
+		customer = self.world.customer(f"FG243 Line1 Security Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Original Line 1")
 		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
 
@@ -1292,7 +1307,7 @@ class TestRecorridosApi(IntegrationTestCase):
 	def test_recorrido_role_cannot_edit_other_address_master_fields(self):
 		"""Section 5c -- the same DocType-level rejection extends to any
 		other Address field, not just address_line1 (city here)."""
-		customer = self.world.customer("FG243 City Security Customer")
+		customer = self.world.customer(f"FG243 City Security Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, city="Bogotá")
 		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
 
@@ -1326,7 +1341,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		"""Section 5d -- a valid customer with a real Sales Order in this
 		site's own default company (fabrigraysas) works for an authorized
 		user, the ordinary/expected path."""
-		customer = self.world.customer("FG243 Fabrigray Context Customer")
+		customer = self.world.customer(f"FG243 Fabrigray Context Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Fabrigray Context 1")
 		self._facturado_pick_list(customer=customer)
 		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
@@ -1342,7 +1357,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		evidence the Customer belongs to a DIFFERENT company. Only
 		positive evidence of exclusive ties elsewhere (test right below)
 		is grounds for rejection."""
-		customer = self.world.customer("FG243 Brand New No SO Customer")
+		customer = self.world.customer(f"FG243 Brand New No SO Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Brand New 1")
 		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
 		self.assertIsNone(frappe.db.get_value("Sales Order", {"customer": customer.name}, "name"))
@@ -1568,7 +1583,7 @@ class TestRecorridosApi(IntegrationTestCase):
 	def test_geocode_route_pending_addresses_batch_deduplicates_address(self):
 		"""3 stops sharing the SAME Address -- exactly 1 Google call, not
 		3 (brief section 14)."""
-		customer = self.world.customer("FG244 Batch Dedup Customer")
+		customer = self.world.customer(f"FG244 Batch Dedup Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Dedup 1", city="Bogotá")
 		address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
 
@@ -1596,7 +1611,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		self.assertEqual(result["ready_for_routing"], True)
 
 	def test_geocode_route_pending_addresses_skips_already_geolocated(self):
-		customer = self.world.customer("FG244 Batch Skip Customer")
+		customer = self.world.customer(f"FG244 Batch Skip Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Skip 1", city="Bogotá")
 		with fx.as_user(self.gestion_clientes_user):
 			address_name = frappe.db.get_value("Customer", customer.name, "customer_primary_address")
@@ -1621,7 +1636,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		self.assertEqual(result["geocoded"], 0)
 
 	def test_geocode_route_pending_addresses_borrador_refreshes_snapshot(self):
-		customer = self.world.customer("FG244 Batch Refresh Customer")
+		customer = self.world.customer(f"FG244 Batch Refresh Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Refresh Batch 1", city="Bogotá")
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -1641,7 +1656,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		"""A Planificado route is rejected outright (brief section 15's
 		own "NO mutar snapshot del Recorrido Planificado") -- same
 		guarantee refresh_route_geolocation() already makes."""
-		customer = self.world.customer("FG244 Batch Planificado Customer")
+		customer = self.world.customer(f"FG244 Batch Planificado Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Batch Plan 1", city="Bogotá")
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -1655,7 +1670,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		"""Gestión de Clientes alone (Address write, no Recorrido grant)
 		must be rejected -- this endpoint also needs Recorrido-write to
 		touch the route's own Paradas, see its own docstring."""
-		customer = self.world.customer("FG244 Batch Perm Customer")
+		customer = self.world.customer(f"FG244 Batch Perm Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Batch Perm 1", city="Bogotá")
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -1669,7 +1684,7 @@ class TestRecorridosApi(IntegrationTestCase):
 
 	def test_geocode_route_pending_addresses_no_economic_values(self):
 		forbidden_keys = {"rate", "amount", "grand_total", "net_total", "price", "account", "outstanding_amount"}
-		customer = self.world.customer("FG244 Batch NoEcon Customer")
+		customer = self.world.customer(f"FG244 Batch NoEcon Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Batch NoEcon 1", city="Bogotá")
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -1684,7 +1699,7 @@ class TestRecorridosApi(IntegrationTestCase):
 	# =====================================================================
 
 	def test_refresh_route_geolocation_updates_borrador(self):
-		customer = self.world.customer("FG243 Refresh Customer")
+		customer = self.world.customer(f"FG243 Refresh Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer, address_line1="Calle Refresh 1", city="Bogotá")
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -1713,7 +1728,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		allowed while Planificado so a location can be fixed before
 		start_route(). En Ruta/Cancelado/Completado stay rejected, see
 		test_recorridos_start_route.py."""
-		customer = self.world.customer("FG243 Refresh Planificado Customer")
+		customer = self.world.customer(f"FG243 Refresh Planificado Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer)
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -1724,7 +1739,7 @@ class TestRecorridosApi(IntegrationTestCase):
 		self.assertEqual(refreshed["stops"][0]["sequence"], route["stops"][0]["sequence"])
 
 	def test_refresh_route_geolocation_requires_permission(self):
-		customer = self.world.customer("FG243 Refresh No Perm Customer")
+		customer = self.world.customer(f"FG243 Refresh No Perm Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer)
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -1734,7 +1749,7 @@ class TestRecorridosApi(IntegrationTestCase):
 				recorridos.refresh_route_geolocation(route["name"])
 
 	def test_refresh_route_geolocation_does_not_change_qty_or_accounting(self):
-		customer = self.world.customer("FG243 Refresh Guardrail Customer")
+		customer = self.world.customer(f"FG243 Refresh Guardrail Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer)
 		so, pl = self._facturado_pick_list(customer=customer, qty=7)
 		before_pl = frappe.db.get_value("Sales Order", so.name, ["per_billed", "per_delivered"])
@@ -1752,7 +1767,7 @@ class TestRecorridosApi(IntegrationTestCase):
 	# =====================================================================
 
 	def test_get_route_geolocation_status_ready_false_with_pending(self):
-		customer = self.world.customer("FG243 Ready False Customer")
+		customer = self.world.customer(f"FG243 Ready False Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer)
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
@@ -1764,8 +1779,8 @@ class TestRecorridosApi(IntegrationTestCase):
 		self.assertEqual(status["total_stops"], 1)
 
 	def test_get_route_geolocation_status_ready_true_when_all_geolocated(self):
-		customer1 = self.world.customer("FG243 Ready True Customer 1")
-		customer2 = self.world.customer("FG243 Ready True Customer 2")
+		customer1 = self.world.customer(f"FG243 Ready True Customer 1 {self.world.namespace}")
+		customer2 = self.world.customer(f"FG243 Ready True Customer 2 {self.world.namespace}")
 		self._set_customer_primary_address(customer1, address_line1="Calle Ready 1")
 		self._set_customer_primary_address(customer2, address_line1="Calle Ready 2")
 		self._geocode_customer_address(customer1, latitude=4.1, longitude=-74.1)
@@ -1791,7 +1806,7 @@ class TestRecorridosApi(IntegrationTestCase):
 
 	def test_get_route_geolocation_status_no_economic_values(self):
 		forbidden_keys = {"rate", "amount", "grand_total", "net_total", "price", "account", "outstanding_amount"}
-		customer = self.world.customer("FG243 No Econ Customer")
+		customer = self.world.customer(f"FG243 No Econ Customer {self.world.namespace}")
 		self._set_customer_primary_address(customer)
 		so, pl = self._facturado_pick_list(customer=customer)
 		with fx.as_user(self.recorrido_user):
