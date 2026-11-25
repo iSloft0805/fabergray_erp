@@ -98,7 +98,7 @@ class TestTresCorazonesInvoice(IntegrationTestCase):
 	def _facturar(self, pl_name, issuer):
 		self._check_all(pl_name)
 		with fx.as_user(self.facturacion_user):
-			return facturacion.mark_as_invoiced(pl_name, issuer)
+			return facturacion.mark_as_invoiced(pl_name, issuer, payment_method="Contado", due_date=frappe.utils.nowdate())
 
 	def _invoiced(self, issuer=TCC, **kwargs):
 		so, pl_name = self._picked_pick_list(**kwargs)
@@ -191,7 +191,7 @@ class TestTresCorazonesInvoice(IntegrationTestCase):
 			_, pl_name = self._picked_pick_list()
 			self._check_all(pl_name)
 			with fx.as_user(self.facturacion_user):
-				result = facturacion.mark_as_invoiced(pl_name, TCC)
+				result = facturacion.mark_as_invoiced(pl_name, TCC, payment_method="Contado", due_date=frappe.utils.nowdate())
 			self.assertEqual(result["fg_invoice_number"], position)
 			self.assertEqual(result["fg_invoice_number_display"], text)
 			self.assertEqual(

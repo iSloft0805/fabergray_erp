@@ -149,7 +149,7 @@ class TestFacturacionInvoicePricing(IntegrationTestCase):
 		with fx.as_user(self.facturacion_user):
 			for item in facturacion.get_invoicing_detail(pl_name)["items"]:
 				facturacion.set_invoicing_item_checked(pl_name, item["row_name"], 1)
-			facturacion.mark_as_invoiced(pl_name, issuer)
+			facturacion.mark_as_invoiced(pl_name, issuer, payment_method="Contado", due_date=frappe.utils.nowdate())
 
 	def _pdf_html(self, pl_name):
 		with fx.as_user(self.facturacion_user):
@@ -605,7 +605,7 @@ class TestFacturacionInvoicePricing(IntegrationTestCase):
 			for detail_item in facturacion.get_invoicing_detail(other)["items"]:
 				facturacion.set_invoicing_item_checked(other, detail_item["row_name"], 1)
 			with self.assertRaises(facturacion.InvoiceLinePriceMissingError):
-				facturacion.mark_as_invoiced(other, "integrandoMAS")
+				facturacion.mark_as_invoiced(other, "integrandoMAS", payment_method="Contado", due_date=frappe.utils.nowdate())
 		self.assertNotEqual(frappe.db.get_value("Pick List", other, "fg_invoicing_status"), "Facturado")
 		for row in self._rows(other).values():
 			self.assertEqual(row.fg_invoice_rate, 0)
@@ -754,7 +754,7 @@ class TestFacturacionInvoicePricing(IntegrationTestCase):
 			for detail_item in facturacion.get_invoicing_detail(pl_name)["items"]:
 				facturacion.set_invoicing_item_checked(pl_name, detail_item["row_name"], 1)
 			with self.assertRaises(facturacion.InvoiceLinePriceMissingError):
-				facturacion.mark_as_invoiced(pl_name, "integrandoMAS")
+				facturacion.mark_as_invoiced(pl_name, "integrandoMAS", payment_method="Contado", due_date=frappe.utils.nowdate())
 		self.assertEqual(frappe.db.get_value("Pick List", pl_name, "fg_invoicing_status"), "Pendiente")
 		after = {code: (row.fg_invoice_rate, row.fg_invoice_price_mode) for code, row in self._rows(pl_name).items()}
 		self.assertEqual(after, before)

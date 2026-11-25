@@ -414,7 +414,7 @@ class TestCommercialValueAfterStockIssue(IntegrationTestCase):
 		with fx.as_user(self.facturacion_user):
 			for it in facturacion.get_invoicing_detail(pl)["items"]:
 				facturacion.set_invoicing_item_checked(pl, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl, "integrandoMAS")
+			facturacion.mark_as_invoiced(pl, "integrandoMAS", payment_method="Contado", due_date=frappe.utils.nowdate())
 		self.assertEqual(self._value(), (16, 16, 160000, 16, 160000))
 
 		driver = self._driver(self._unique("Conductor")).name

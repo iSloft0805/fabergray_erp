@@ -59,7 +59,7 @@ class TestShortageInvoiceAuthorization(_ResolvedShortageMixin, IntegrationTestCa
 		with fx.as_user(self.facturacion_user):
 			for item in facturacion.get_invoicing_detail(pl)["items"]:
 				facturacion.set_invoicing_item_checked(pl, item["row_name"], 1)
-			return facturacion.mark_as_invoiced(pl, ISSUER)
+			return facturacion.mark_as_invoiced(pl, ISSUER, payment_method="Contado", due_date=frappe.utils.nowdate())
 
 	def _invoiced(self):
 		item_a, item_b, so, pl, report = self._authorized()
@@ -228,7 +228,7 @@ class TestShortageInvoiceAuthorization(_ResolvedShortageMixin, IntegrationTestCa
 			with self.assertRaises(facturacion.PickListNotReadyForInvoicingError):
 				facturacion.get_invoicing_detail(pl)
 			with self.assertRaises(facturacion.PickListNotReadyForInvoicingError):
-				facturacion.mark_as_invoiced(pl, ISSUER)
+				facturacion.mark_as_invoiced(pl, ISSUER, payment_method="Contado", due_date=frappe.utils.nowdate())
 			before = facturacion.get_invoicing_summary()["pendientes"]
 
 		self._run(mode=ALLOW)
@@ -276,7 +276,7 @@ class TestShortageInvoiceAuthorization(_ResolvedShortageMixin, IntegrationTestCa
 		number = frappe.db.get_value("Pick List", pl, "fg_invoice_number")
 		self.assertEqual(self._doc(pl).docstatus, 0)
 		with fx.as_user(self.facturacion_user), self.assertRaises(facturacion.AlreadyInvoicedError):
-			facturacion.mark_as_invoiced(pl, ISSUER)
+			facturacion.mark_as_invoiced(pl, ISSUER, payment_method="Contado", due_date=frappe.utils.nowdate())
 		self.assertEqual(frappe.db.get_value("Pick List", pl, "fg_invoice_number"), number)
 
 	# =====================================================================

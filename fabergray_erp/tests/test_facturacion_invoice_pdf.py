@@ -110,7 +110,7 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 		with fx.as_user(self.facturacion_user):
 			for item in facturacion.get_invoicing_detail(pl_name)["items"]:
 				facturacion.set_invoicing_item_checked(pl_name, item["row_name"], 1)
-			facturacion.mark_as_invoiced(pl_name, issuer)
+			facturacion.mark_as_invoiced(pl_name, issuer, payment_method="Contado", due_date=frappe.utils.nowdate())
 		return so, pl_name
 
 	def _with_issuer(self, issuer="integrandoMAS", **kwargs):

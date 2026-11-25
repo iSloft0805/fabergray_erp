@@ -269,6 +269,8 @@ doc_events = {
 		# cubre borradores; `before_update_after_submit` el Pick List sometido.
 		# Ajuste numeración por empresa -- fg_invoice_number/_key (y el emisor
 		# ya numerado) solo cambian vía set_invoice_issuer().
+		# Forma de pago/vencimiento -- solo vía set_invoice_payment_terms()/
+		# mark_as_invoiced(), y fijos desde que el pedido está Facturado.
 		# Facturación con faltantes -- los 3 campos de autorización solo
 		# cambian vía fulfillment.shortage_invoice; un Draft autorizado y ya
 		# Facturado queda congelado (filas, cantidades contractuales, borrado)
@@ -276,6 +278,7 @@ doc_events = {
 		"validate": [
 			"fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
 			"fabergray_erp.api.facturacion.guard_invoice_number_fields",
+			"fabergray_erp.api.facturacion.guard_invoice_payment_fields",
 			"fabergray_erp.fulfillment.shortage_invoice.guard_shortage_invoice_pick_list",
 		],
 		# INVENTARIO-OUT-01 -- un Pick List de entrega solo se somete con
@@ -290,6 +293,7 @@ doc_events = {
 		"before_update_after_submit": [
 			"fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
 			"fabergray_erp.api.facturacion.guard_invoice_number_fields",
+			"fabergray_erp.api.facturacion.guard_invoice_payment_fields",
 			"fabergray_erp.fulfillment.shortage_invoice.guard_shortage_invoice_pick_list",
 		],
 		"on_trash": "fabergray_erp.fulfillment.shortage_invoice.guard_invoiced_pick_list_delete",
@@ -589,6 +593,11 @@ fixtures = [
 					"fg_shortage_invoice_authorized",
 					"fg_shortage_invoice_authorized_by",
 					"fg_shortage_invoice_authorized_on",
+					# Forma de pago y vencimiento de la factura comercial,
+					# elegidos en Revisar pedido. See
+					# set_invoice_payment_terms() in api/facturacion.py.
+					"fg_invoice_payment_method",
+					"fg_invoice_due_date",
 					# Commit 25.12 -- mandatory cancellation reason (+ optional
 					# free-text detail) captured by cancel_sales_order().
 					"fg_cancellation_reason",

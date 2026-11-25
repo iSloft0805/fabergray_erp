@@ -111,7 +111,7 @@ from decimal import Decimal, InvalidOperation
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import cint, flt, nowdate
+from frappe.utils import cint, flt, getdate, nowdate
 
 from erpnext.stock.doctype.pick_list.pick_list import create_delivery, get_actual_qty
 
@@ -985,6 +985,10 @@ def get_invoicing_detail(pick_list):
 		"fg_invoice_issuer": pl.fg_invoice_issuer or None,
 		"fg_invoice_number": cint(pl.fg_invoice_number) or None,
 		"fg_invoice_number_display": format_invoice_number(pl.fg_invoice_issuer, pl.fg_invoice_number),
+		# Forma de pago y vencimiento (Revisar pedido). Fechas ISO; la fecha de
+		# facturación es la del sitio (zona horaria del sitio), nunca la del
+		# navegador. Un pedido nuevo llega sin forma de pago (sin preselección).
+		**_invoice_payment_terms_payload(pl),
 		"authorized_with_shortage": authorized_with_shortage,
 		"shortage_authorized_by": pl.get(shortage_invoice.FIELD_AUTHORIZED_BY) if authorized_with_shortage else None,
 		"shortage_authorized_on": pl.get(shortage_invoice.FIELD_AUTHORIZED_ON) if authorized_with_shortage else None,
@@ -1096,7 +1100,7 @@ def _retrying_on_deadlock(fn):
 
 @frappe.whitelist()
 @_retrying_on_deadlock
-def mark_as_invoiced(pick_list_name, issuer=None):
+def mark_as_invoiced(pick_list_name, issuer=None, payment_method=None, due_date=None):
 	"""The one write in the new flow: marks a Pick List as operationally
 	"Facturado" -- fg_invoicing_status/fg_invoiced_on/fg_invoiced_by only,
 	via a plain `.save()` (real permission, no ignore_permissions). Never
@@ -1149,7 +1153,13 @@ def mark_as_invoiced(pick_list_name, issuer=None):
 	   Facturado status. A Pick List that somehow already has a number keeps
 	   it (never renumbered, never moved to another series).
 	The MariaDB 1020 wake-up error of a request that waited on those locks
-	is retried by @_retrying_on_deadlock (see its docstring)."""
+	is retried by @_retrying_on_deadlock (see its docstring).
+
+	Forma de pago y vencimiento -- obligatorios para FACTURAR: `payment_method`/
+	`due_date` (o los ya guardados con set_invoice_payment_terms()) se validan
+	contra la fecha de facturación efectiva (hoy, zona horaria del sitio) y
+	viajan en este MISMO `.save()`. Informativos: no tocan Cartera, pagos ni
+	contabilidad."""
 	_require_login()
 	frappe.has_permission("Pick List", "write", throw=True)
 
@@ -1191,6 +1201,10 @@ def mark_as_invoiced(pick_list_name, issuer=None):
 			InvoiceIssuerLockedError,
 		)
 
+	invoiced_on = frappe.utils.now_datetime()
+	payment_method = _validate_invoice_payment_method(payment_method or pl.get("fg_invoice_payment_method"))
+	due_date = _validate_invoice_due_date(due_date or pl.get("fg_invoice_due_date"), getdate(invoiced_on))
+
 	# Commit 25.25 -- congela el precio final de CADA línea (el precio de
 	# Facturación si existe; si no, el rate actual del Sales Order) antes de
 	# pasar a Facturado. Valida todas las líneas primero y lanza sin tocar
@@ -1199,10 +1213,12 @@ def mark_as_invoiced(pick_list_name, issuer=None):
 	_freeze_invoice_prices(pl, _invoice_pricing_sales_orders(pl))
 
 	pl.fg_invoicing_status = FG_INVOICING_FACTURADO
-	pl.fg_invoiced_on = frappe.utils.now_datetime()
+	pl.fg_invoiced_on = invoiced_on
 	pl.fg_invoiced_by = frappe.session.user
-	with _invoice_pricing_write(), _invoice_numbering_write():
+	with _invoice_pricing_write(), _invoice_numbering_write(), _invoice_payment_write():
 		pl.fg_invoice_issuer = issuer
+		pl.fg_invoice_payment_method = payment_method
+		pl.fg_invoice_due_date = due_date
 		if not cint(pl.fg_invoice_number):
 			number = _next_invoice_number(issuer)
 			pl.fg_invoice_number = number
@@ -1222,6 +1238,8 @@ def mark_as_invoiced(pick_list_name, issuer=None):
 		"fg_invoice_issuer": pl.fg_invoice_issuer,
 		"fg_invoice_number": cint(pl.fg_invoice_number),
 		"fg_invoice_number_display": format_invoice_number(pl.fg_invoice_issuer, pl.fg_invoice_number),
+		"fg_invoice_payment_method": pl.fg_invoice_payment_method,
+		"fg_invoice_due_date": _date_iso(pl.fg_invoice_due_date),
 	}
 
 
@@ -1730,15 +1748,20 @@ def _build_invoice_pdf_context(pl, so):
 	pl.fg_pdf_draft_reasons = draft_reasons
 
 	pl.fg_pdf_invoice_date = _format_date_co(pl.fg_invoiced_on)
-	pl.fg_pdf_payment_terms = None
-	pl.fg_pdf_due_date = None
+	# Forma de pago y vencimiento elegidos en Revisar pedido. Un documento
+	# histórico sin ellos conserva el comportamiento anterior (condición de
+	# pago del Sales Order, si la tiene; si no, "—"): nunca se inventan.
+	so_payment_terms = None
+	so_due_date = None
 	if so.payment_terms_template:
-		pl.fg_pdf_payment_terms = (
+		so_payment_terms = (
 			frappe.db.get_value("Payment Terms Template", so.payment_terms_template, "template_name")
 			or so.payment_terms_template
 		)
 		due_dates = [row.due_date for row in (so.payment_schedule or []) if row.due_date]
-		pl.fg_pdf_due_date = _format_date_co(max(due_dates)) if due_dates else None
+		so_due_date = _format_date_co(max(due_dates)) if due_dates else None
+	pl.fg_pdf_payment_terms = pl.get("fg_invoice_payment_method") or so_payment_terms
+	pl.fg_pdf_due_date = _format_date_co(pl.get("fg_invoice_due_date")) or so_due_date
 
 	pl.fg_pdf_customer = _resolve_invoice_customer(so)
 	pl.fg_pdf_seller_name = _resolve_pdf_advisor_name(so)
@@ -1815,6 +1838,222 @@ def set_invoice_issuer(pick_list_name, issuer):
 		"fg_invoice_number": cint(pl.fg_invoice_number) or None,
 		"fg_invoice_number_display": format_invoice_number(pl.fg_invoice_issuer, pl.fg_invoice_number),
 	}
+
+
+# =============================================================================
+# Forma de pago y vencimiento de la factura comercial (Revisar pedido)
+#
+# Auditoría previa (ningún campo existente servía):
+#   - Pick List no tenía forma de pago ni vencimiento.
+#   - Sales Order.payment_terms_template/payment_schedule (nativos) son la
+#     condición de pago CONTABLE de ERPNext; ningún pedido los usa y no tienen
+#     estas cuatro opciones.
+#   - Mode of Payment (Cash, Wire Transfer...) es un maestro contable.
+#   - Recorrido Parada.payment_status (Pagado/Pendiente por Pago/Crédito) lo
+#     reporta el conductor al ENTREGAR, y Cartera Pago.payment_method describe
+#     un pago ya recibido -- ninguno es la condición de la factura.
+#   - Cartera Obligacion.credit_days/due_date se DERIVAN al entregar
+#     (cartera_service.derive_obligation_values()) y son de solo lectura.
+# De ahí dos Custom Fields en Pick List: fg_invoice_payment_method (Select) y
+# fg_invoice_due_date (Date), allow_on_submit=1, read_only en Desk.
+#
+# En esta fase son INFORMATIVOS y DOCUMENTALES: se imprimen en FORMA DE PAGO/
+# VENCIMIENTO del PDF comercial; nunca registran pagos, crean Payment Entry,
+# ni modifican Cartera, saldos, inventario o contabilidad. Elegirlos no
+# consume número de factura. Desde que el pedido está Facturado quedan fijos
+# (no existe todavía un flujo de corrección autorizado).
+# =============================================================================
+
+#: Conjunto cerrado -- el navegador solo pinta estas opciones; el servidor
+#: rechaza cualquier otra. Mismo orden que las options del Custom Field.
+INVOICE_PAYMENT_METHODS = ("Contado", "Crédito", "Efectivo", "Transferencia")
+#: Plazo SUGERIDO (días) al elegir cada forma de pago; siempre editable.
+INVOICE_PAYMENT_SUGGESTED_DAYS = {"Contado": 0, "Crédito": 30, "Efectivo": 0, "Transferencia": 0}
+#: Botones rápidos de plazo (Hoy, 15, 30, 45, 60, 90 días).
+INVOICE_DUE_QUICK_DAYS = (0, 15, 30, 45, 60, 90)
+#: Límite de cordura: un vencimiento a más de un año es casi seguro un error
+#: de digitación (año equivocado en el calendario).
+MAX_INVOICE_DUE_DAYS = 365
+
+INVOICE_PAYMENT_FIELDS = ("fg_invoice_payment_method", "fg_invoice_due_date")
+_INVOICE_PAYMENT_FLAG = "fg_invoice_payment_write"
+
+
+class InvoicePaymentMethodRequiredError(frappe.ValidationError):
+	pass
+
+
+class InvalidInvoicePaymentMethodError(frappe.ValidationError):
+	pass
+
+
+class InvoiceDueDateRequiredError(frappe.ValidationError):
+	pass
+
+
+class InvalidInvoiceDueDateError(frappe.ValidationError):
+	pass
+
+
+class InvoicePaymentTermsLockedError(frappe.ValidationError):
+	pass
+
+
+@contextmanager
+def _invoice_payment_write():
+	"""Misma bandera interna que _invoice_numbering_write(): nunca viene del
+	navegador y se restaura aunque el bloque lance."""
+	previous = frappe.flags.get(_INVOICE_PAYMENT_FLAG)
+	frappe.flags[_INVOICE_PAYMENT_FLAG] = True
+	try:
+		yield
+	finally:
+		frappe.flags[_INVOICE_PAYMENT_FLAG] = previous
+
+
+def _date_iso(value):
+	return str(getdate(value)) if value else None
+
+
+def _invoice_billing_date(pl):
+	"""Fecha efectiva de facturación, en la zona horaria del sitio: la de
+	fg_invoiced_on si ya está Facturado; si no, hoy -- FACTURAR la fija a hoy."""
+	return getdate(pl.fg_invoiced_on) if pl.get("fg_invoiced_on") else getdate(nowdate())
+
+
+def _validate_invoice_payment_method(payment_method):
+	"""Whitelist estricta -- nunca texto libre del navegador."""
+	if not payment_method:
+		frappe.throw(_("Selecciona la forma de pago de la factura."), InvoicePaymentMethodRequiredError)
+	if payment_method not in INVOICE_PAYMENT_METHODS:
+		frappe.throw(
+			_("Forma de pago no permitida: {0}.").format(frappe.bold(payment_method)),
+			InvalidInvoicePaymentMethodError,
+		)
+	return payment_method
+
+
+def _parse_invoice_due_date(value):
+	"""Solo AAAA-MM-DD (o un date de Python): nunca se adivina si 05/06 es
+	mayo o junio."""
+	import datetime
+	import re
+
+	if isinstance(value, datetime.datetime):
+		return value.date()
+	if isinstance(value, datetime.date):
+		return value
+	text = value.strip() if isinstance(value, str) else ""
+	if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+		return None
+	try:
+		return datetime.date.fromisoformat(text)
+	except ValueError:
+		return None
+
+
+def _validate_invoice_due_date(due_date, billing_date):
+	"""Obligatoria, válida, nunca anterior a la fecha de facturación y a lo
+	sumo MAX_INVOICE_DUE_DAYS después. Devuelve un datetime.date."""
+	if due_date is None or (isinstance(due_date, str) and not due_date.strip()):
+		frappe.throw(_("Selecciona la fecha de vencimiento de la factura."), InvoiceDueDateRequiredError)
+	parsed = _parse_invoice_due_date(due_date)
+	if not parsed:
+		frappe.throw(_("La fecha de vencimiento no es válida."), InvalidInvoiceDueDateError)
+	billing_date = getdate(billing_date)
+	if parsed < billing_date:
+		frappe.throw(
+			_("La fecha de vencimiento ({0}) no puede ser anterior a la fecha de facturación ({1}).").format(
+				_format_date_co(parsed), _format_date_co(billing_date)
+			),
+			InvalidInvoiceDueDateError,
+		)
+	if (parsed - billing_date).days > MAX_INVOICE_DUE_DAYS:
+		frappe.throw(
+			_("La fecha de vencimiento no puede superar {0} días desde la fecha de facturación.").format(
+				MAX_INVOICE_DUE_DAYS
+			),
+			InvalidInvoiceDueDateError,
+		)
+	return parsed
+
+
+def _invoice_payment_terms_payload(pl):
+	"""Estado de forma de pago/vencimiento para Revisar pedido."""
+	billing_date = _invoice_billing_date(pl)
+	due_date = getdate(pl.fg_invoice_due_date) if pl.get("fg_invoice_due_date") else None
+	return {
+		"fg_invoice_payment_method": pl.get("fg_invoice_payment_method") or None,
+		"fg_invoice_due_date": _date_iso(due_date),
+		"invoice_billing_date": _date_iso(billing_date),
+		"invoice_due_days": (due_date - billing_date).days if due_date else None,
+		"payment_terms_editable": pl.fg_invoicing_status != FG_INVOICING_FACTURADO,
+		"payment_methods": list(INVOICE_PAYMENT_METHODS),
+		"payment_suggested_days": dict(INVOICE_PAYMENT_SUGGESTED_DAYS),
+		"due_quick_days": list(INVOICE_DUE_QUICK_DAYS),
+		"max_due_days": MAX_INVOICE_DUE_DAYS,
+	}
+
+
+@frappe.whitelist()
+def set_invoice_payment_terms(pick_list_name, payment_method, due_date):
+	"""Guarda forma de pago + fecha de vencimiento de un Pick List sometido y
+	aún NO Facturado, desde Revisar pedido -- para que se conserven al cerrar
+	y reabrir el pedido. Mismas validaciones de rol/permiso/Company que elegir
+	el emisor (_assert_issuer_selectable()). Nunca asigna ni consume número de
+	factura, ni toca Cartera, pagos o contabilidad.
+
+	Ya Facturado -> InvoicePaymentTermsLockedError (no existe todavía un flujo
+	de corrección autorizado). Mismos valores -> no escribe. Un `.save()` real,
+	sin ignore_permissions; guard_invoice_payment_fields() re-verifica."""
+	_require_login()
+	pl = frappe.get_doc("Pick List", pick_list_name)
+	_assert_issuer_selectable(pl)
+
+	if pl.fg_invoicing_status == FG_INVOICING_FACTURADO:
+		frappe.throw(
+			_("Este pedido ya fue facturado; su forma de pago y vencimiento no pueden cambiarse."),
+			InvoicePaymentTermsLockedError,
+		)
+
+	payment_method = _validate_invoice_payment_method(payment_method)
+	parsed_due_date = _validate_invoice_due_date(due_date, _invoice_billing_date(pl))
+
+	current_due = getdate(pl.fg_invoice_due_date) if pl.get("fg_invoice_due_date") else None
+	if pl.get("fg_invoice_payment_method") != payment_method or current_due != parsed_due_date:
+		with _invoice_payment_write():
+			pl.fg_invoice_payment_method = payment_method
+			pl.fg_invoice_due_date = parsed_due_date
+			pl.save()  # real permission, no ignore_permissions
+
+	return {"pick_list": pl.name, **_invoice_payment_terms_payload(pl)}
+
+
+def guard_invoice_payment_fields(doc, method=None):
+	"""Pick List `validate` + `before_update_after_submit` (hooks.py): forma de
+	pago y vencimiento solo cambian dentro de _invoice_payment_write() -- Bodega
+	y Facturación tienen write sobre Pick List y, sin esto, podrían
+	reescribirlos por API/Desk -- y nunca después de Facturado."""
+	before = doc.get_doc_before_save()
+
+	def normalized(source, fieldname):
+		value = source.get(fieldname) if source else None
+		if not value:
+			return None
+		return _date_iso(value) if fieldname == "fg_invoice_due_date" else value
+
+	if all(normalized(doc, f) == normalized(before, f) for f in INVOICE_PAYMENT_FIELDS):
+		return
+	if not frappe.flags.get(_INVOICE_PAYMENT_FLAG):
+		frappe.throw(
+			_("La forma de pago y el vencimiento solo los asigna Facturación desde Revisar pedido."),
+			frappe.PermissionError,
+		)
+	if before and before.get("fg_invoicing_status") == FG_INVOICING_FACTURADO:
+		frappe.throw(
+			_("Este pedido ya fue facturado; su forma de pago y vencimiento no pueden cambiarse."),
+			InvoicePaymentTermsLockedError,
+		)
 
 
 @frappe.whitelist()

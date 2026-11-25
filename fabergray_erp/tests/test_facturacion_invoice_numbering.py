@@ -66,7 +66,7 @@ class TestFacturacionInvoiceNumbering(IntegrationTestCase):
 
 	def _facturar(self, pl_name, issuer=None, user=None):
 		with fx.as_user(user or self.facturacion_user):
-			return facturacion.mark_as_invoiced(pl_name, issuer)
+			return facturacion.mark_as_invoiced(pl_name, issuer, payment_method="Contado", due_date=frappe.utils.nowdate())
 
 	def _invoiced(self, issuer):
 		pl_name = self._checked()
@@ -263,7 +263,7 @@ class TestFacturacionInvoiceNumbering(IntegrationTestCase):
 			frappe.db.begin()
 			frappe.set_user(user)
 			try:
-				result = facturacion.mark_as_invoiced(pl_name, issuer)
+				result = facturacion.mark_as_invoiced(pl_name, issuer, payment_method="Contado", due_date=frappe.utils.nowdate())
 				frappe.db.commit()
 				results[key] = ("ok", result["fg_invoice_number"])
 			except facturacion.AlreadyInvoicedError:

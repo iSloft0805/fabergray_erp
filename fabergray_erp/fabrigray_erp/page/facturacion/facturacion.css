@@ -643,6 +643,213 @@ both review dialogs (never on the queue cards, to keep them compact). */
 	font-weight: 600;
 }
 
+/* Forma de pago y vencimiento (Revisar pedido). Like the issuer select,
+   the dialog renders outside .fg-facturacion, so nothing here is scoped
+   under it. Buttons: white; selected: blue border + light-blue fill. */
+.fg-fact-payment {
+	margin: -8px 0 24px;
+	padding: 16px 18px;
+	border: 1px solid var(--fg-border, #e4e7ec);
+	border-radius: 14px;
+	background: var(--fg-bg, #f8fafc);
+}
+
+.fg-fact-payment-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 12px;
+	margin-bottom: 12px;
+}
+
+.fg-fact-payment-title {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 0.95rem;
+	font-weight: 700;
+	color: var(--fg-text, #101828);
+}
+
+.fg-fact-payment-title .fg-icon {
+	color: var(--fg-primary, #2b7be4);
+}
+
+.fg-fact-payment-required,
+.fg-fact-payment-lock {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 0.8rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-payment.is-missing .fg-fact-payment-required {
+	color: var(--fg-warning-dark, #b54708);
+	font-weight: 600;
+}
+
+.fg-fact-payment-methods {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 10px;
+}
+
+.fg-fact-payment-method {
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	min-height: 64px;
+	padding: 10px 8px;
+	border: 1.5px solid var(--fg-border, #d0d5dd);
+	border-radius: 12px;
+	background: #ffffff;
+	color: var(--fg-text, #344054);
+	font-size: 0.82rem;
+	font-weight: 600;
+	cursor: pointer;
+	transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.fg-fact-payment-method .fg-icon {
+	width: 20px;
+	height: 20px;
+}
+
+.fg-fact-payment-method:hover:not(:disabled) {
+	border-color: var(--fg-primary, #2b7be4);
+}
+
+.fg-fact-payment-method.is-selected {
+	border-color: var(--fg-primary, #2b7be4);
+	background: var(--fg-primary-tint, #eaf2fd);
+	color: var(--fg-primary, #2b7be4);
+}
+
+.fg-fact-payment-method:disabled,
+.fg-fact-payment-quick:disabled {
+	cursor: not-allowed;
+	opacity: 0.6;
+}
+
+.fg-fact-payment-status {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	margin-top: 10px;
+	font-size: 0.82rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-payment-status.is-ok .fg-icon {
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+.fg-fact-payment-due {
+	margin-top: 14px;
+	padding-top: 14px;
+	border-top: 1px solid var(--fg-border, #e4e7ec);
+}
+
+.fg-fact-payment-billing {
+	margin: 6px 0 10px;
+	font-size: 0.82rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-payment-quick-row {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.fg-fact-payment-quick {
+	padding: 4px 14px;
+	border: 1px solid var(--fg-border, #d0d5dd);
+	border-radius: 999px;
+	background: #ffffff;
+	color: var(--fg-text, #344054);
+	font-size: 0.8rem;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.fg-fact-payment-quick.is-active {
+	border-color: var(--fg-primary, #2b7be4);
+	background: var(--fg-primary, #2b7be4);
+	color: #ffffff;
+}
+
+.fg-fact-payment-custom {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin: 12px 0 0;
+	font-size: 0.82rem;
+	font-weight: 500;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-payment-due-input {
+	max-width: 260px;
+	min-height: 36px;
+	padding: 0 10px;
+	border: 1.5px solid var(--fg-border, #d0d5dd);
+	border-radius: 10px;
+	background: #ffffff;
+	color: var(--fg-text, #101828);
+	font-size: 0.88rem;
+	font-weight: 600;
+}
+
+.fg-fact-payment-summary {
+	margin-top: 14px;
+	padding: 12px 14px;
+	border-radius: 12px;
+	background: var(--fg-primary-tint, #eaf2fd);
+}
+
+.fg-fact-payment.is-readonly .fg-fact-payment-summary {
+	margin-top: 0;
+}
+
+.fg-fact-payment-summary-title {
+	margin-bottom: 6px;
+	font-size: 0.78rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-fact-payment-summary-row {
+	display: flex;
+	justify-content: space-between;
+	gap: 12px;
+	padding: 3px 0;
+	font-size: 0.88rem;
+	color: var(--fg-text, #101828);
+}
+
+.fg-fact-payment-empty {
+	font-size: 0.85rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+@media (max-width: 640px) {
+	.fg-fact-payment {
+		padding: 14px 12px;
+	}
+
+	.fg-fact-payment-methods {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.fg-fact-payment-due-input {
+		max-width: none;
+		width: 100%;
+	}
+}
+
 .fg-fact-review-info-value--link {
 	display: inline-flex;
 	align-items: center;

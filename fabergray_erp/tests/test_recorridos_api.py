@@ -195,7 +195,27 @@ class TestRecorridosApi(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for it in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
+			# Forma de pago y vencimiento (obligatorios al FACTURAR). Por defecto
+			# Contado del mismo día; una clase/test puede pedir otros con
+			# `invoice_terms = (forma_de_pago, días)` e `invoice_issuer`.
+			method, days = getattr(self, "invoice_terms", None) or ("Contado", 0)
+			facturacion.mark_as_invoiced(
+				pl.name,
+				getattr(self, "invoice_issuer", None) or "integrandoMAS",
+				payment_method=method,
+				due_date=str(frappe.utils.add_days(frappe.utils.nowdate(), days)),
+			)
+		if getattr(self, "historical_invoice_terms", False):
+			# Test setup: un Pick List facturado ANTES de existir forma de pago/
+			# vencimiento (así están los históricos del sitio). Las suites de
+			# Cartera que cubren la regla anterior (Crédito del conductor =
+			# entrega + 30 días) lo usan; escrito a nivel BD a propósito.
+			frappe.db.set_value(
+				"Pick List",
+				pl.name,
+				{"fg_invoice_payment_method": None, "fg_invoice_due_date": None},
+				update_modified=False,
+			)
 		return so, frappe.get_doc("Pick List", pl.name)
 
 	def _submitted_not_facturado_pick_list(self, qty=5, rate=100):
@@ -235,7 +255,7 @@ class TestRecorridosApi(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for it in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS", payment_method="Contado", due_date=frappe.utils.nowdate())
 		return so, frappe.get_doc("Pick List", pl.name)
 
 	def _set_customer_primary_address(self, customer, address_line1="Calle 10 # 5-20", city="Bogotá"):
@@ -414,7 +434,7 @@ class TestRecorridosApi(IntegrationTestCase):
 			detail = facturacion.get_invoicing_detail(pl.name)
 			for it in detail["items"]:
 				facturacion.set_invoicing_item_checked(pl.name, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl.name, "integrandoMAS")
+			facturacion.mark_as_invoiced(pl.name, "integrandoMAS", payment_method="Contado", due_date=frappe.utils.nowdate())
 		return so, frappe.get_doc("Pick List", pl.name)
 
 	def test_other_company_pick_list_excluded(self):

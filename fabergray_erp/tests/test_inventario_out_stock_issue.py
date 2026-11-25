@@ -541,7 +541,7 @@ class TestCompleteOrderStockIssue(_StockIssueMixin, IntegrationTestCase):
 		with fx.as_user(self.facturacion_user):
 			for it in facturacion.get_invoicing_detail(pl)["items"]:
 				facturacion.set_invoicing_item_checked(pl, it["row_name"], 1)
-			facturacion.mark_as_invoiced(pl, "integrandoMAS")
+			facturacion.mark_as_invoiced(pl, "integrandoMAS", payment_method="Contado", due_date=frappe.utils.nowdate())
 
 		self.assertEqual(frappe.db.get_value("Pick List", pl, "fg_invoicing_status"), "Facturado")
 		self.assertEqual(_actual(item, self.wh_liq), 16)

@@ -686,6 +686,9 @@ fabergray_erp.Facturacion = class Facturacion {
 		this._review_pick_list = pick_list_name;
 		this._review_detail = null;
 		this._review_issuer = null;
+		this._review_payment_method = null;
+		this._review_due_date = null;
+		this._review_payment_saving = false;
 		this._review_pricing = null;
 		this._review_saving_rows = new Set();
 
@@ -717,6 +720,10 @@ fabergray_erp.Facturacion = class Facturacion {
 				this._review_detail = detail;
 				this._review_pricing = pricing;
 				this._review_issuer = detail.fg_invoice_issuer || null;
+				// Lo guardado en el Pick List (set_invoice_payment_terms());
+				// un pedido nuevo llega vacío -- nunca se preselecciona nada.
+				this._review_payment_method = detail.fg_invoice_payment_method || null;
+				this._review_due_date = detail.fg_invoice_due_date || null;
 				this.render_review_dialog_body();
 			})
 			.catch(() => dialog.hide());
@@ -841,6 +848,8 @@ fabergray_erp.Facturacion = class Facturacion {
 					</div>
 				</div>
 			</div>
+
+			${this.render_review_payment_html()}
 
 			${observations_html}
 
@@ -1169,6 +1178,192 @@ fabergray_erp.Facturacion = class Facturacion {
 			this._review_issuer = $(e.currentTarget).val() || null;
 			this.refresh_review_primary_action();
 		});
+
+		// Forma de pago y vencimiento -- delegados: la sección se reemplaza
+		// en sitio (refresh_review_payment()) y siguen funcionando.
+		$wrap.off("click", ".fg-fact-payment-method").on("click", ".fg-fact-payment-method", (e) => {
+			const method = $(e.currentTarget).data("method");
+			const d = this._review_detail;
+			if (!d || !method) return;
+			// Cada forma de pago propone su plazo (Contado/Efectivo/
+			// Transferencia: mismo día; Crédito: 30 días); editable después.
+			const days = cint((d.payment_suggested_days || {})[method]);
+			this.save_review_payment_terms(method, add_days_iso(d.invoice_billing_date, days));
+		});
+		$wrap.off("click", ".fg-fact-payment-quick").on("click", ".fg-fact-payment-quick", (e) => {
+			const d = this._review_detail;
+			if (!d || !this._review_payment_method) return;
+			const days = cint($(e.currentTarget).data("days"));
+			this.save_review_payment_terms(this._review_payment_method, add_days_iso(d.invoice_billing_date, days));
+		});
+		$wrap.off("change", ".fg-fact-payment-due-input").on("change", ".fg-fact-payment-due-input", (e) => {
+			const d = this._review_detail;
+			const value = $(e.currentTarget).val();
+			if (!d || !this._review_payment_method) return;
+			const days = value ? payment_due_days(d.invoice_billing_date, value) : null;
+			if (days === null || days < 0 || days > cint(d.max_due_days)) {
+				frappe.msgprint(
+					days !== null && days < 0
+						? __("La fecha de vencimiento no puede ser anterior a la fecha de facturación ({0}).", [
+								format_date_co(d.invoice_billing_date),
+						  ])
+						: __("Selecciona una fecha de vencimiento válida (máximo {0} días).", [d.max_due_days])
+				);
+				$(e.currentTarget).val(this._review_due_date || "");
+				return;
+			}
+			this.save_review_payment_terms(this._review_payment_method, value);
+		});
+	}
+
+	// =====================================================================
+	// Forma de pago y vencimiento (Revisar pedido). Obligatorios para
+	// CONFIRMAR FACTURACIÓN en un pedido nuevo. Cada cambio se guarda de
+	// inmediato (set_invoice_payment_terms()) para conservarse al cerrar y
+	// reabrir; el servidor valida opciones y fechas. Informativos: nunca
+	// registran pagos ni tocan Cartera, y no consumen número de factura.
+	// Fechas siempre AAAA-MM-DD desde el servidor (zona horaria del sitio).
+	// =====================================================================
+	render_review_payment_html() {
+		const d = this._review_detail;
+		if (!d) return "";
+		const method = this._review_payment_method;
+		const due = this._review_due_date;
+		const billing = d.invoice_billing_date;
+		const days = due ? payment_due_days(billing, due) : null;
+
+		if (!d.payment_terms_editable) {
+			// Facturado: solo lectura. Un histórico sin forma de pago lo dice
+			// tal cual -- nunca se le asigna una.
+			const body = method
+				? `${this.render_review_payment_summary_html(method, due, days)}`
+				: `<div class="fg-fact-payment-empty">${__("Sin forma de pago registrada (pedido facturado antes de esta función).")}</div>`;
+			return `
+				<div class="fg-fact-payment is-readonly">
+					<div class="fg-fact-payment-head">
+						<span class="fg-fact-payment-title">${icon("wallet", "fg-icon-sm")} ${__("Forma de pago y vencimiento")}</span>
+						<span class="fg-fact-payment-lock">${icon("lock", "fg-icon-sm")} ${__("Fijado al facturar")}</span>
+					</div>
+					${body}
+				</div>
+			`;
+		}
+
+		const busy = this._review_payment_saving;
+		const methods_html = (d.payment_methods || [])
+			.map((m) => {
+				const selected = m === method;
+				return `<button type="button" class="fg-fact-payment-method ${selected ? "is-selected" : ""}" data-method="${frappe.utils.escape_html(
+					m
+				)}" role="radio" aria-checked="${selected ? "true" : "false"}" ${busy ? "disabled" : ""}>
+						${icon(PAYMENT_METHOD_ICONS[m] || "wallet")}
+						<span>${__(m)}</span>
+					</button>`;
+			})
+			.join("");
+		const quick_html = (d.due_quick_days || [])
+			.map((n) => {
+				const active = method && days === n;
+				return `<button type="button" class="fg-fact-payment-quick ${active ? "is-active" : ""}" data-days="${n}" ${
+					!method || busy ? "disabled" : ""
+				}>${n === 0 ? __("Hoy") : __("{0} días", [n])}</button>`;
+			})
+			.join("");
+		const max_date = add_days_iso(billing, cint(d.max_due_days));
+		const status_html = busy
+			? `${icon("loader-circle", "fg-icon-sm fg-spin")} ${__("Guardando...")}`
+			: method && due
+			? `${icon("circle-check", "fg-icon-sm")} ${__("Forma de pago seleccionada:")} <strong>${frappe.utils.escape_html(__(method))}</strong>`
+			: `${icon("info", "fg-icon-sm")} ${__("Selecciona la forma de pago para poder confirmar la facturación.")}`;
+
+		return `
+			<div class="fg-fact-payment ${method ? "" : "is-missing"}">
+				<div class="fg-fact-payment-head">
+					<span class="fg-fact-payment-title">${icon("wallet", "fg-icon-sm")} ${__("Forma de pago")}</span>
+					<span class="fg-fact-payment-required">${__("Obligatorio")}</span>
+				</div>
+				<div class="fg-fact-payment-methods" role="radiogroup" aria-label="${__("Forma de pago")}">${methods_html}</div>
+				<div class="fg-fact-payment-status ${method && due && !busy ? "is-ok" : ""}">${status_html}</div>
+
+				<div class="fg-fact-payment-due">
+					<div class="fg-fact-payment-title">${icon("calendar-days", "fg-icon-sm")} ${__("Fecha de vencimiento")}</div>
+					<div class="fg-fact-payment-billing">${__("Fecha de facturación:")} <strong>${format_date_co(billing)}</strong></div>
+					<div class="fg-fact-payment-quick-row">${quick_html}</div>
+					<label class="fg-fact-payment-custom">
+						<span>${__("Seleccionar fecha personalizada")}</span>
+						<input type="date" class="fg-fact-payment-due-input" value="${due || ""}" min="${billing}" max="${max_date}" ${
+			!method || busy ? "disabled" : ""
+		}>
+					</label>
+				</div>
+
+				${method && due ? this.render_review_payment_summary_html(method, due, days) : ""}
+			</div>
+		`;
+	}
+
+	render_review_payment_summary_html(method, due, days) {
+		const term = days === null ? "—" : days === 0 ? __("Mismo día") : days === 1 ? __("1 día") : __("{0} días", [days]);
+		return `
+			<div class="fg-fact-payment-summary">
+				<div class="fg-fact-payment-summary-title">${__("Resumen de facturación")}</div>
+				<div class="fg-fact-payment-summary-row"><span>${__("Forma de pago")}</span><strong>${frappe.utils.escape_html(
+					__(method || "—")
+				)}</strong></div>
+				<div class="fg-fact-payment-summary-row"><span>${__("Vencimiento")}</span><strong>${
+					due ? format_date_co(due) : "—"
+				}</strong></div>
+				<div class="fg-fact-payment-summary-row"><span>${__("Plazo")}</span><strong>${term}</strong></div>
+			</div>
+		`;
+	}
+
+	refresh_review_payment() {
+		const dialog = this._review_dialog;
+		if (!dialog) return;
+		dialog.fields_dict.review_html.$wrapper.find(".fg-fact-payment").replaceWith(this.render_review_payment_html());
+		this.refresh_review_primary_action();
+	}
+
+	// Optimista con reversión: la UI muestra la elección mientras se guarda
+	// (controles deshabilitados -- un solo request en vuelo); si el servidor
+	// rechaza, vuelve a lo último guardado. CONFIRMAR queda deshabilitado
+	// mientras tanto, así que nunca se factura con un valor sin persistir.
+	save_review_payment_terms(method, due_date) {
+		const d = this._review_detail;
+		if (!d || !d.payment_terms_editable || this._review_payment_saving) return;
+		if (method === this._review_payment_method && due_date === this._review_due_date) return;
+		const pick_list_name = this._review_pick_list;
+		const previous = { method: this._review_payment_method, due: this._review_due_date };
+
+		this._review_payment_method = method;
+		this._review_due_date = due_date;
+		this._review_payment_saving = true;
+		this.refresh_review_payment();
+
+		this.call("set_invoice_payment_terms", {
+			pick_list_name: pick_list_name,
+			payment_method: method,
+			due_date: due_date,
+		})
+			.then((result) => {
+				if (this._review_pick_list !== pick_list_name || !this._review_detail) return;
+				this._review_payment_method = result.fg_invoice_payment_method;
+				this._review_due_date = result.fg_invoice_due_date;
+				this._review_detail.invoice_billing_date = result.invoice_billing_date;
+				this._review_detail.fg_invoice_payment_method = result.fg_invoice_payment_method;
+				this._review_detail.fg_invoice_due_date = result.fg_invoice_due_date;
+			})
+			.catch(() => {
+				if (this._review_pick_list !== pick_list_name) return;
+				this._review_payment_method = previous.method;
+				this._review_due_date = previous.due;
+			})
+			.finally(() => {
+				if (this._review_pick_list !== pick_list_name) return;
+				this._review_payment_saving = false;
+				this.refresh_review_payment();
+			});
 	}
 
 	// One row, one immediate server call -- "guardado inmediato" per the
@@ -1305,7 +1500,10 @@ fabergray_erp.Facturacion = class Facturacion {
 			d.checked_items === d.total_items &&
 			d.fg_invoicing_status !== "Facturado" &&
 			prices_ok &&
-			!!this._review_issuer;
+			!!this._review_issuer &&
+			!!this._review_payment_method &&
+			!!this._review_due_date &&
+			!this._review_payment_saving;
 		if (complete) {
 			dialog.enable_primary_action();
 		} else {
@@ -1322,6 +1520,11 @@ fabergray_erp.Facturacion = class Facturacion {
 			frappe.msgprint(__("Selecciona la empresa emisora de la factura."));
 			return;
 		}
+		if (!this._review_payment_method || !this._review_due_date) {
+			frappe.msgprint(__("Selecciona la forma de pago y la fecha de vencimiento de la factura."));
+			return;
+		}
+		if (this._review_payment_saving) return;
 		this.submit_mark_as_invoiced(this._review_pick_list, this._review_issuer);
 	}
 
@@ -1336,7 +1539,12 @@ fabergray_erp.Facturacion = class Facturacion {
 		this.set_busy(true);
 		if (this._review_dialog) this._review_dialog.disable_primary_action();
 
-		this.call("mark_as_invoiced", { pick_list_name: pick_list_name, issuer: issuer })
+		this.call("mark_as_invoiced", {
+			pick_list_name: pick_list_name,
+			issuer: issuer,
+			payment_method: this._review_payment_method,
+			due_date: this._review_due_date,
+		})
 			.then((result) => {
 				if (this._review_dialog) this._review_dialog.hide();
 
@@ -2100,6 +2308,43 @@ function download_fabrigray_invoice_pdf(name) {
 			"/api/method/fabergray_erp.api.facturacion.download_invoice_pdf?pick_list_name=" + encodeURIComponent(name)
 		)
 	);
+}
+
+// Forma de pago -> icono (sprite lucide de Frappe). La lista de opciones y
+// los plazos sugeridos vienen del servidor (get_invoicing_detail()).
+const PAYMENT_METHOD_ICONS = {
+	Contado: "wallet",
+	"Crédito": "calendar-clock",
+	Efectivo: "banknote",
+	Transferencia: "landmark",
+};
+
+// "2026-12-25" -> "25/12/2026". Solo texto: nunca pasa por Date() (sin
+// corrimientos de zona horaria del navegador).
+function format_date_co(iso) {
+	if (!iso) return "—";
+	const [y, m, d] = String(iso).slice(0, 10).split("-");
+	return d && m && y ? `${d}/${m}/${y}` : "—";
+}
+
+// Días entre dos fechas AAAA-MM-DD (UTC puro, sin horario de verano).
+function payment_due_days(from_iso, to_iso) {
+	const parse = (iso) => {
+		const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+		return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) : null;
+	};
+	const a = parse(from_iso);
+	const b = parse(to_iso);
+	return a === null || b === null ? null : Math.round((b - a) / 86400000);
+}
+
+// "2026-11-25" + 30 -> "2026-12-25" (UTC puro: sin zona horaria ni DST del
+// navegador). frappe.datetime.add_days() devuelve fecha-hora con zona, no
+// una fecha AAAA-MM-DD.
+function add_days_iso(iso, days) {
+	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ""));
+	if (!m) return null;
+	return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3] + cint(days))).toISOString().slice(0, 10);
 }
 
 function get_initials(name) {

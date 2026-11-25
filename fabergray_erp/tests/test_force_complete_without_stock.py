@@ -606,7 +606,7 @@ class TestForceCompleteWithoutStock(_StockIssueMixin, IntegrationTestCase):
 			self.assertEqual((entry["total_qty"], entry["authorized_with_shortage"]), (3, False))
 			for line in facturacion.get_invoicing_detail(pl)["items"]:
 				facturacion.set_invoicing_item_checked(pl, line["row_name"], 1)
-			facturacion.mark_as_invoiced(pl, "integrandoMAS")
+			facturacion.mark_as_invoiced(pl, "integrandoMAS", payment_method="Contado", due_date=frappe.utils.nowdate())
 
 		with fx.as_user(self.recorrido_user):
 			orders = recorridos.get_available_orders(txt=pl)["pick_lists"]
