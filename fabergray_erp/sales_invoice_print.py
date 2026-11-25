@@ -16,7 +16,7 @@ import frappe
 
 from fabergray_erp.api.cotizaciones import _resolve_pdf_advisor_name
 from fabergray_erp.api.facturacion import _clean_order_observations, _resolve_invoice_customer
-from fabergray_erp.invoice_issuers import get_tres_corazones_issuer
+from fabergray_erp.invoice_issuers import get_print_provider, get_tres_corazones_issuer
 
 
 def _payment_terms(doc):
@@ -64,13 +64,32 @@ def _seller_name(doc):
 	return ", ".join(names) or _resolve_pdf_advisor_name(doc) or ""
 
 
+def _draft_reasons(doc, issuer):
+	"""Motivos por los que el documento no es factura fiscal (el template
+	muestra entonces la nota gris "Documento comercial — No válido como
+	factura fiscal"). Sin resolución DIAN nunca es válida, aunque esté
+	validada (submitted) en ERPNext; un documento anulado muestra ANULADA."""
+	if doc.docstatus == 2:
+		return []
+	reasons = []
+	if doc.docstatus == 0:
+		reasons.append("documento sin validar")
+	if not issuer.get("legal_document_enabled"):
+		reasons.append("sin resolución de facturación DIAN")
+	reasons.extend(issuer.get("pending_validations") or [])
+	return reasons
+
+
 def get_sales_invoice_print_context(doc):
+	issuer = get_tres_corazones_issuer()
 	customer = _resolve_invoice_customer(doc)
 	if not customer.get("tax_id") and doc.tax_id:
 		customer["tax_id"] = doc.tax_id
 	sales_orders = _sales_orders(doc)
 	return {
-		"issuer": get_tres_corazones_issuer(),
+		"issuer": issuer,
+		"draft_reasons": _draft_reasons(doc, issuer),
+		"print_provider": get_print_provider() if issuer.get("show_print_provider") else {},
 		"customer": customer,
 		"payment_terms": _payment_terms(doc),
 		"internal_reference": ", ".join(sales_orders) or doc.name,

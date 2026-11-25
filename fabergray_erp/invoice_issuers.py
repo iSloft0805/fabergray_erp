@@ -62,16 +62,18 @@ INVOICE_ASSETS_URL_PREFIX = "/assets/fabergray_erp/images/invoice/"
 _INVOICE_ASSETS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public", "images", "invoice")
 
 #: Imprenta -- común a TODOS los emisores (no pertenece a ninguno), por eso
-#: vive aquí una sola vez y no dentro de cada legal_footer. El Print Format
-#: arma con estos campos: "Impreso por: <name> Nit: <nit> Tel <phone>".
+#: vive aquí una sola vez y no dentro de cada legal_footer. Cada Print Format
+#: arma su línea con estos campos ("Fabrigray Factura Comercial":
+#: "Impreso por: <name> Nit: <nit> Tel <phone>"; los de 3CORAZONESCAFES:
+#: "Impreso por: <name> — NIT: <nit> — Tel. <phone>").
 INVOICE_PRINT_PROVIDER = {
 	"name": "LITO CARIBE",
 	"nit": "28410436-9",
 	"phone": "(7) 6336124",
 }
 
-# Textos legales: copia LITERAL de lo entregado por el negocio (incluidas
-# grafías como "Art, 774", "titulo", "tranfrencia" y "ECODLUMINAR") -- no se
+# Textos legales de integrandoMAS/ecoluminar: copia LITERAL de lo entregado
+# por el negocio (incluidas grafías como "Art, 774", "titulo", "tranfrencia" y "ECODLUMINAR") -- no se
 # corrigen sin autorización. `legal_footer` es el párrafo jurídico y
 # `payment_instruction` la instrucción de pago que lo seguía, separados solo
 # para poder destacarla visualmente en el PDF.
@@ -124,48 +126,66 @@ ISSUER_CONFIG = {
 		"bank_account_number": "09036542699",
 		"bank_account_holder": "JUAN ANDRES LOZANO GARCIA",
 	},
-	# 3CORAZONESCAFÉS -- misma regla: nada se inventa. Solo el nombre
-	# comercial y el logo fueron entregados; todo `None` está PENDIENTE de
-	# que el negocio lo entregue. Mientras falte un REQUIRED_ISSUER_FIELDS el
-	# PDF sale BORRADOR y lo lista ("faltan datos del emisor: ..."); los
-	# campos opcionales vacíos (razón social, resolución DIAN, banco) se
-	# marcan "[pendiente]" en su propio formato. Completar = llenar estos
-	# valores, sin tocar el HTML.
+	# 3CORAZONESCAFÉS -- misma regla: nada se inventa. Datos del emisor y
+	# cuenta bancaria entregados por el titular y confirmados (2026-11-25).
+	# Una clave de PENDING_VALIDATIONS en False vuelve a agregar su motivo
+	# a draft_reasons (issuer_pending_validations()). Completar = cambiar estos valores, sin
+	# tocar el HTML.
 	INVOICE_ISSUER_TRES_CORAZONES: {
 		"display_name": "3CORAZONESCAFÉS",
-		"legal_name": None,  # pendiente: razón social
-		"nit": None,  # pendiente
-		"tax_regime": None,  # pendiente: régimen / responsabilidad tributaria
-		"address": None,  # pendiente
-		"city": None,  # pendiente
-		"phones": (),  # pendiente
-		"email": None,  # pendiente
+		"legal_name": "LISBETH DAYANNA CÁCERES PINTO",
+		"nit": "1099735459-2",
+		# Validado contra el RUT vigente: No responsable de IVA.
+		"tax_regime": "No responsable de IVA",
+		"tax_regime_validated": True,
+		"address": "Calle 46 # 22-28 Oficina 3",
+		"city": "Girón, Santander",
+		"phones": ("311 881 4375", "321 535 1749"),
+		"email": "dayanacacerespinto13@gmail.com",
 		"logo": INVOICE_ASSETS_URL_PREFIX + "3corazonescafes-logo.png",
 		# Pendiente: resolución de facturación DIAN (número, fecha, rango,
-		# vigencia). No se imprime ninguna resolución hasta tenerla.
+		# vigencia). Sin ella el documento NO está habilitado fiscalmente:
+		# los formatos de 3CORAZONESCAFES imprimen la nota discreta
+		# "Documento comercial — No válido como factura fiscal"
+		# (legal_document_enabled()).
 		"dian_resolution": None,
-		# Texto genérico del Art. 774 del Código de Comercio, SIN la
-		# autorización de reporte a centrales de riesgo de los otros dos
-		# emisores: esa autorización es propia de cada empresa y debe
-		# entregarla el negocio si aplica.
+		# Texto entregado por el negocio, corregido solo en ortografía y
+		# puntuación (autorizado).
 		"legal_footer": (
 			"Esta factura de venta se asimila en sus efectos a la letra de cambio, conforme al Art. 774 del "
 			"Código de Comercio. Declaro haber recibido real y materialmente las mercancías descritas en este "
-			"título valor. Adeudo a 3CORAZONESCAFÉS el monto neto indicado; en caso de mora se causarán los "
-			"intereses al máximo permitido legalmente."
+			"título valor. Adeudo a 3CORAZONESCAFÉS el monto neto indicado; en caso de mora, se causarán los "
+			"intereses al máximo permitido legalmente. Autorizamos a 3CORAZONESCAFÉS para registrar el nombre "
+			"de nuestra razón social en los archivos de Procrédito o en cualquier otro sistema de información "
+			"crediticia, en caso de que se incumpla con el pago de las obligaciones aquí constituidas."
 		),
-		"payment_instruction": None,  # pendiente (se arma con los bank_* cuando existan)
-		"bank_name": None,  # pendiente
-		"bank_account_type": None,  # pendiente
-		"bank_account_number": None,  # pendiente
-		"bank_account_holder": None,  # pendiente
-		"bank_account_holder_id": None,  # pendiente: NIT/CC del titular
+		# Instrucción de pago: el ÚNICO lugar del PDF donde aparece la cuenta
+		# (los bank_* son la versión normalizada; un test verifica que
+		# coinciden). Solo el NIT del titular se imprime aparte.
+		"payment_instruction": (
+			"FAVOR GIRAR CHEQUE A NOMBRE DE LISBETH DAYANNA CÁCERES PINTO O REALIZAR TRANSFERENCIA A LA "
+			"CUENTA DE AHORROS NRO. 91263037630 DE BANCOLOMBIA."
+		),
+		"bank_name": "Bancolombia",
+		"bank_account_type": "Ahorros",
+		"bank_account_number": "91263037630",
+		"bank_account_holder": "Lisbeth Dayanna Cáceres Pinto",
+		"bank_account_holder_id": "1099735459-2",
+		# Cuenta de ahorros Bancolombia confirmada.
+		"bank_account_confirmed": True,
 		"print_format": "3CORAZONESCAFES Factura Comercial",
-		# La línea "Impreso por: LITO CARIBE" corresponde a los talonarios de
-		# los otros dos emisores; no se imprime aquí hasta que el negocio
-		# confirme la imprenta de esta empresa.
-		"show_print_provider": False,
+		# Imprenta LITO CARIBE confirmada por el negocio para esta empresa
+		# (INVOICE_PRINT_PROVIDER, única fuente).
+		"show_print_provider": True,
 	},
+}
+
+#: Validaciones que un emisor puede declarar pendientes: clave de
+#: ISSUER_CONFIG -> motivo que se agrega al BORRADOR mientras sea False.
+#: Un emisor que no declara la clave no tiene nada pendiente.
+PENDING_VALIDATIONS = {
+	"tax_regime_validated": "régimen tributario pendiente de validación contra el RUT",
+	"bank_account_confirmed": "cuenta bancaria pendiente de confirmación",
 }
 
 #: Numeración INTERNA de factura, independiente por emisor (no es numeración
@@ -252,6 +272,8 @@ def get_issuer_config(issuer):
 	context["label"] = INVOICE_ISSUER_LABELS.get(issuer, issuer)
 	context["print_format"] = invoice_print_format(issuer)
 	context.setdefault("show_print_provider", True)
+	context["legal_document_enabled"] = legal_document_enabled(issuer)
+	context["pending_validations"] = issuer_pending_validations(issuer)
 	return context
 
 
@@ -291,6 +313,22 @@ def invoice_numbering_configured(issuer):
 def get_print_provider():
 	"""Copia de INVOICE_PRINT_PROVIDER para el Print Format."""
 	return dict(INVOICE_PRINT_PROVIDER)
+
+
+def issuer_pending_validations(issuer):
+	"""Motivos de BORRADOR por datos entregados pero aún sin validar
+	(PENDING_VALIDATIONS), en el orden de esa tabla."""
+	config = ISSUER_CONFIG.get(issuer) or {}
+	return [reason for key, reason in PENDING_VALIDATIONS.items() if key in config and not config[key]]
+
+
+def legal_document_enabled(issuer):
+	"""True solo si el documento está habilitado fiscalmente como factura de
+	venta (resolución DIAN entregada). Mientras sea False los formatos de
+	3CORAZONESCAFES imprimen la nota "Documento comercial — No válido como
+	factura fiscal" y la cláusula de título valor atenuada."""
+	config = ISSUER_CONFIG.get(issuer) or {}
+	return bool(config.get("dian_resolution"))
 
 
 def missing_issuer_fields(issuer):

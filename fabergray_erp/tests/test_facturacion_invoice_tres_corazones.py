@@ -155,7 +155,8 @@ class TestTresCorazonesInvoice(IntegrationTestCase):
 			for key in ("display_name", "nit", "email", "address", "bank_account_number", "bank_account_holder"):
 				values.append(config[key])
 			values.append(config["logo"].rsplit("/", 1)[-1])
-		return values + ["LITO CARIBE", "28410436-9", "ECODLUMINAR", "procredito"]
+		# La imprenta LITO CARIBE es compartida (INVOICE_PRINT_PROVIDER), no un dato ajeno.
+		return values + ["ECODLUMINAR", "procredito"]
 
 	# -- 1. selector ------------------------------------------------------------
 
@@ -289,10 +290,26 @@ class TestTresCorazonesInvoice(IntegrationTestCase):
 		self.assertIn('<span class="tcc-inv-brand-light">3CORAZONES</span>CAFÉS', html)
 		self.assertIn("3corazonescafes-logo.png", html)
 		self.assertIn("Adeudo a 3CORAZONESCAFÉS el monto neto indicado", html)
-		self.assertIn("INFORMACIÓN DE PAGO", html)
-		self.assertIn("[pendiente]", html)  # banco / DIAN / régimen aún no entregados
-		self.assertIn("BORRADOR — NO VÁLIDO COMO FACTURA DE VENTA", html)
-		self.assertIn("faltan datos del emisor: NIT, régimen, dirección, ciudad, teléfono, email", html)
+		# encabezado: datos del emisor bajo el nombre comercial, en orden
+		header = [
+			"LISBETH DAYANNA CÁCERES PINTO",
+			"NIT 1099735459-2",
+			"No responsable de IVA",
+			"Calle 46 # 22-28 Oficina 3",
+			"Girón, Santander",
+			"Tel. 311 881 4375 - 321 535 1749",
+			"dayanacacerespinto13@gmail.com",
+		]
+		positions = [html.index('class="tcc-inv-issuer-name"')] + [html.index(text) for text in header]
+		self.assertEqual(positions, sorted(positions))
+		self.assertIn("[pendiente]", html)  # resolución DIAN aún no entregada
+		# sin recuadro rojo de BORRADOR: solo la nota gris discreta
+		self.assertIn('class="tcc-inv-fiscal-note">Documento comercial — No válido como factura fiscal', html)
+		self.assertNotIn("BORRADOR", html)
+		self.assertNotIn('class="tcc-inv-draft"', html)
+		self.assertNotIn("faltan datos del emisor", html)
+		self.assertNotIn("pendiente de validación", html)
+		self.assertNotIn("pendiente de confirmación", html)
 		self.assertIn(f"No. {number}", html)
 		self.assertIn(f"Ref. interna: {pl_name}", html)
 		self.assertIn(self.customer.customer_name, html)
@@ -306,6 +323,53 @@ class TestTresCorazonesInvoice(IntegrationTestCase):
 		for name in ("integrando", "ecoluminar", "ecodluminar"):
 			self.assertNotIn(name, lowered)
 		self.assertNotIn('class="fg-inv', html)  # nada del formato compartido
+
+	def test_06b_closing_block_legal_payment_and_printer(self):
+		"""firmas -> cláusula (condicionada) -> instrucción de pago -> imprenta,
+		todo en un bloque que no se parte entre páginas."""
+		_, pl_name, _n = self._invoiced(TCC)
+		html = self._html(pl_name, print_format=TCC_FORMAT)
+		config = invoice_issuers.ISSUER_CONFIG[TCC]
+		printer_line = "Impreso por: LITO CARIBE — NIT: 28410436-9 — Tel. (7) 6336124"
+		positions = [
+			html.index('class="tcc-inv-closing"'),
+			html.index('class="tcc-inv-signatures"'),
+			html.index("archivos de Procrédito"),
+			html.index('class="tcc-inv-payment-box"'),
+			html.index(config["payment_instruction"]),
+			html.index("NIT del titular: 1099735459-2"),
+			html.index(printer_line),
+		]
+		self.assertEqual(positions, sorted(positions))
+		self.assertEqual(html.count(printer_line), 1)
+		# la cuenta aparece una sola vez: sin tabla bancaria duplicada
+		self.assertEqual(html.count(config["bank_account_number"]), 1)
+		self.assertNotIn("INFORMACIÓN DE PAGO", html)
+		self.assertIn("tcc-inv-legal-text-inactive", html)
+		self.assertNotIn("Cláusula condicionada", html)
+		self.assertNotIn("tcc-inv-legal-condition", html)
+		css = frappe.db.get_value("Print Format", TCC_FORMAT, "css")
+		for selector in (".tcc-inv-closing {", ".tcc-inv-printer {", ".tcc-inv-payment-box {"):
+			block = css[css.index(selector) :]
+			block = block[: block.index("}")]
+			self.assertIn("page-break-inside: avoid", block, selector)
+		printer_css = css[css.index(".tcc-inv-printer {") :]
+		printer_css = printer_css[: printer_css.index("}")]
+		self.assertIn("font-size: 7.5pt", printer_css)
+		self.assertIn("color: #4e2a12", printer_css)
+		self.assertIn("text-align: center", printer_css)
+
+	def test_06c_legal_clause_only_active_when_legally_enabled(self):
+		"""La resolución DIAN sola no basta: mientras el PDF tenga motivos de
+		BORRADOR (hoy siempre: numeración interna) sigue la nota fiscal gris."""
+		self.assertFalse(invoice_issuers.legal_document_enabled(TCC))
+		_, pl_name, _n = self._invoiced(TCC)
+		with patch.dict(invoice_issuers.ISSUER_CONFIG[TCC], {"dian_resolution": "18764000000000"}):
+			self.assertTrue(invoice_issuers.legal_document_enabled(TCC))
+			html = self._html(pl_name, print_format=TCC_FORMAT)
+		# la numeración interna sigue siendo motivo de BORRADOR -> cláusula aún condicionada
+		self.assertIn("Documento comercial — No válido como factura fiscal", html)
+		self.assertIn("tcc-inv-legal-text-inactive", html)
 
 	def test_07_each_format_only_prints_its_own_issuer(self):
 		_, pl_tcc, _n = self._invoiced(TCC)
@@ -417,14 +481,40 @@ class TestTresCorazonesInvoice(IntegrationTestCase):
 		text = " ".join(" ".join(v) if isinstance(v, tuple) else str(v) for v in config.values())
 		for value in self._foreign_values():
 			self.assertNotIn(value, text)
-		self.assertEqual(
-			invoice_issuers.missing_issuer_fields(TCC), ["NIT", "régimen", "dirección", "ciudad", "teléfono", "email"]
-		)
-		for key in ("nit", "tax_regime", "dian_resolution", "bank_account_number", "legal_name"):
-			self.assertIsNone(config[key], key)  # nada inventado
+		expected_missing = [] if invoice_issuers.logo_available(TCC) else ["logo"]
+		self.assertEqual(invoice_issuers.missing_issuer_fields(TCC), expected_missing)
+		self.assertIsNone(config["dian_resolution"])  # nada inventado
+		self.assertEqual(invoice_issuers.issuer_pending_validations(TCC), [])  # régimen y cuenta confirmados
+		with patch.dict(config, {"tax_regime_validated": False, "bank_account_confirmed": False}):
+			self.assertEqual(
+				invoice_issuers.issuer_pending_validations(TCC),
+				["régimen tributario pendiente de validación contra el RUT", "cuenta bancaria pendiente de confirmación"],
+			)
+		for issuer in ("integrandoMAS", "ecoluminar"):
+			self.assertEqual(invoice_issuers.issuer_pending_validations(issuer), [], issuer)
 		context = invoice_issuers.get_issuer_config(TCC)
-		self.assertFalse(context["show_print_provider"])
+		self.assertTrue(context["show_print_provider"])
+		self.assertFalse(context["legal_document_enabled"])
 		self.assertTrue(invoice_issuers.get_issuer_config("integrandoMAS")["show_print_provider"])
+
+	def test_10b_bank_data_matches_the_payment_instruction(self):
+		config = invoice_issuers.ISSUER_CONFIG[TCC]
+		instruction = config["payment_instruction"]
+		self.assertEqual(
+			instruction,
+			"FAVOR GIRAR CHEQUE A NOMBRE DE LISBETH DAYANNA CÁCERES PINTO O REALIZAR TRANSFERENCIA A LA "
+			"CUENTA DE AHORROS NRO. 91263037630 DE BANCOLOMBIA.",
+		)
+		self.assertEqual(
+			(config["bank_name"], config["bank_account_type"], config["bank_account_number"]),
+			("Bancolombia", "Ahorros", "91263037630"),
+		)
+		for key in ("bank_name", "bank_account_type", "bank_account_number", "bank_account_holder"):
+			self.assertIn(config[key].upper(), instruction, key)
+		self.assertEqual(config["bank_account_holder_id"], config["nit"])
+		self.assertTrue(config["bank_account_confirmed"])
+		self.assertTrue(config["tax_regime_validated"])
+		self.assertEqual(config["tax_regime"], "No responsable de IVA")
 
 	def test_11_sales_invoice_format_reads_the_same_config(self):
 		from fabergray_erp import sales_invoice_print  # noqa: F401 -- el import mismo es la prueba
@@ -434,7 +524,27 @@ class TestTresCorazonesInvoice(IntegrationTestCase):
 		self.assertEqual(issuer["display_name"], "3CORAZONESCAFÉS")
 		self.assertEqual(issuer["logo"], config["logo"])
 		self.assertEqual(issuer["legal_text"], config["legal_footer"])
-		self.assertIsNone(issuer["phones_display"])
+		self.assertEqual(issuer["phones_display"], "311 881 4375 - 321 535 1749")
+
+	def test_11b_sales_invoice_draft_reasons_and_printer(self):
+		from fabergray_erp import sales_invoice_print
+
+		issuer = invoice_issuers.get_tres_corazones_issuer()
+		pending = invoice_issuers.issuer_pending_validations(TCC)
+		reasons = sales_invoice_print._draft_reasons
+		self.assertEqual(
+			reasons(frappe._dict(docstatus=0), issuer),
+			["documento sin validar", "sin resolución de facturación DIAN", *pending],
+		)
+		# validada en ERPNext pero sin resolución DIAN: sigue sin habilitación fiscal
+		self.assertEqual(reasons(frappe._dict(docstatus=1), issuer), ["sin resolución de facturación DIAN", *pending])
+		self.assertEqual(reasons(frappe._dict(docstatus=2), issuer), [])
+		template = frappe.db.get_value("Print Format", "3CORAZONESCAFES Factura", "html")
+		self.assertIn("ctx.print_provider", template)
+		self.assertIn("ctx.draft_reasons", template)
+		self.assertIn("Documento comercial — No válido como factura fiscal", template)
+		self.assertNotIn("BORRADOR", template)
+		self.assertNotIn("LITO CARIBE", template)  # se arma desde la config
 
 	# -- 7. la serie real nunca se toca -----------------------------------------
 

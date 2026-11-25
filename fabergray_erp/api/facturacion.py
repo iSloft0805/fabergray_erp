@@ -1708,7 +1708,7 @@ def _build_invoice_pdf_context(pl, so):
 	if issuer.get("logo") and issuer["logo"].startswith("/"):
 		issuer["logo"] = frappe.utils.get_url(issuer["logo"])
 	pl.fg_pdf_issuer = issuer
-	# Imprenta: común a integrandoMAS/ecoluminar (invoice_issuers.INVOICE_PRINT_PROVIDER);
+	# Imprenta: común a los emisores (invoice_issuers.INVOICE_PRINT_PROVIDER);
 	# un emisor con show_print_provider=False no la imprime.
 	pl.fg_pdf_print_provider = get_print_provider() if issuer.get("show_print_provider") else {}
 
@@ -1725,6 +1725,8 @@ def _build_invoice_pdf_context(pl, so):
 	missing = missing_issuer_fields(issuer_key)
 	if missing:
 		draft_reasons.append(_("faltan datos del emisor: {0}").format(", ".join(missing)))
+	# Datos entregados pero aún sin validar (régimen vs RUT, cuenta bancaria).
+	draft_reasons.extend(_(reason) for reason in issuer.get("pending_validations") or [])
 	pl.fg_pdf_draft_reasons = draft_reasons
 
 	pl.fg_pdf_invoice_date = _format_date_co(pl.fg_invoiced_on)
