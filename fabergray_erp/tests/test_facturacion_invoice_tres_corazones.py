@@ -358,6 +358,10 @@ class TestTresCorazonesInvoice(IntegrationTestCase):
 		self.assertIn("font-size: 7.5pt", printer_css)
 		self.assertIn("color: #4e2a12", printer_css)
 		self.assertIn("text-align: center", printer_css)
+		# "Resolución de facturación DIAN: [pendiente]" en gris oscuro, no en rojo
+		self.assertIn("Resolución de facturación DIAN: <span class=\"tcc-inv-pending\">[pendiente]</span>", html)
+		dian_css = css[css.index(".tcc-inv-legal-meta .tcc-inv-pending {") :]
+		self.assertIn("color: #4a4a4a", dian_css[: dian_css.index("}")])
 
 	def test_06c_legal_clause_only_active_when_legally_enabled(self):
 		"""La resolución DIAN sola no basta: mientras el PDF tenga motivos de
