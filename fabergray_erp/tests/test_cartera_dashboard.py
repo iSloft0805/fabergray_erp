@@ -56,6 +56,12 @@ XSS = '<img src=x onerror="alert(1)">'
 
 
 class TestCarteraDashboard(IntegrationTestCase):
+	#: Facturación integration -- this suite covers the PREVIOUS due-date rule
+	#: (driver "Crédito" -> delivery + 30 days), which still applies to Pick
+	#: Lists invoiced without payment terms (historical). The rule for new
+	#: invoices is covered by test_cartera_invoice_due_date.py.
+	historical_invoice_terms = True
+
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()

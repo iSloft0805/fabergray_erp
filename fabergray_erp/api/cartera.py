@@ -157,7 +157,8 @@ _LIST_FIELDS = """
 	o.commercial_name, o.sales_order, o.pick_list, o.recorrido,
 	o.invoice_amount, o.paid_amount, o.outstanding_amount, o.currency, o.amount_source,
 	o.status, o.payment_verification, o.credit_days, o.due_date,
-	o.delivery_date, o.delivered_on, o.driver_payment_status, o.has_delivery_issues
+	o.delivery_date, o.delivered_on, o.driver_payment_status, o.has_delivery_issues,
+	o.invoice_payment_method, o.due_date_source, pl.fg_invoiced_on AS invoiced_on
 """
 
 
@@ -261,6 +262,19 @@ def _serialize_obligation(row, today, bucket=None):
 		"por_confirmar": bool(cint(row.get("por_confirmar"))),
 		"days_to_due": (due_date - today).days if due_date else None,
 		"days_since_delivery": (today - delivery_date).days if delivery_date else None,
+		# Facturación integration (read-only, informative). invoice_date is the
+		# Pick List's effective invoicing date; days_overdue ("días de mora")
+		# only counts while there is a balance; the discrepancy is computed
+		# here, never stored, and never changes any data.
+		"invoice_payment_method": row.get("invoice_payment_method") or None,
+		"due_date_source": row.get("due_date_source") or None,
+		"due_from_invoice": row.get("due_date_source") == cartera_service.DUE_SOURCE_INVOICE,
+		"invoice_date": _date_str(row.get("invoiced_on")),
+		"days_overdue": (today - due_date).days
+		if due_date and due_date < today and flt(row.get("outstanding_amount")) > 0
+		else 0,
+		"immediate_payment": cartera_service.is_immediate_payment(row),
+		"terms_discrepancy": cartera_service.invoice_terms_discrepancy(row),
 	}
 
 
@@ -401,7 +415,10 @@ def get_obligations(filter="todos", search="", page=1, page_length=DEFAULT_PAGE_
 			+ ")"
 		)
 	where = " AND ".join(conditions)
-	source = "`tabCartera Obligacion` o LEFT JOIN `tabCustomer` c ON c.name = o.customer"
+	source = (
+		"`tabCartera Obligacion` o LEFT JOIN `tabCustomer` c ON c.name = o.customer"
+		" LEFT JOIN `tabPick List` pl ON pl.name = o.pick_list"
+	)
 
 	total = cint(frappe.db.sql(f"SELECT COUNT(*) FROM {source} WHERE {where}", params)[0][0])
 	rows = frappe.db.sql(
@@ -441,6 +458,7 @@ def _detail_payload(doc):
 	today = _today()
 	row = doc.as_dict()
 	row["por_confirmar"] = _is_por_confirmar(doc.name)
+	row["invoiced_on"] = frappe.db.get_value("Pick List", doc.pick_list, "fg_invoiced_on") if doc.pick_list else None
 	data = _serialize_obligation(row, today)
 	has_active_driver_payment = bool(
 		frappe.db.exists(

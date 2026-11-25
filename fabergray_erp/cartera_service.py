@@ -98,6 +98,23 @@ CARTERA_REQUEST_PREFIX = "cartera:"
 #: rewrites existing obligations.
 DEFAULT_CREDIT_DAYS = 30
 
+#: Origin of an obligation's due date (Cartera Obligacion.due_date_source).
+#: Facturación integration: a Pick List invoiced with a payment method and a
+#: due date (api.facturacion, fg_invoice_payment_method/fg_invoice_due_date)
+#: gives the obligation EXACTLY that due date -- one date shared by
+#: Facturación, the commercial PDF and Cartera, never recomputed from the
+#: delivery. A Pick List invoiced before that feature (no due date) keeps the
+#: previous rule (driver "Crédito" -> delivery + DEFAULT_CREDIT_DAYS).
+#: Obligations created before this integration keep an empty source; they
+#: are never recalculated (their fields are immutable, see DERIVED_FIELDS).
+DUE_SOURCE_INVOICE = "Factura comercial"
+DUE_SOURCE_LEGACY = "Regla anterior (entrega)"
+
+#: Invoice payment methods that mean "due on the invoice date" -- an
+#: informative label (PAGO INMEDIATO), NEVER money received: no payment is
+#: ever created from the payment method.
+IMMEDIATE_PAYMENT_METHODS = ("Contado", "Efectivo", "Transferencia")
+
 #: Fields a Cartera Obligacion takes from its delivered stop and never
 #: changes afterwards.
 DERIVED_FIELDS = (
@@ -114,6 +131,8 @@ DERIVED_FIELDS = (
 	"amount_source",
 	"credit_days",
 	"due_date",
+	"invoice_payment_method",
+	"due_date_source",
 	"delivered_on",
 	"delivery_date",
 	"delivered_by",
@@ -239,8 +258,15 @@ def derive_obligation_values(recorrido_parada):
 	currency = currency or frappe.get_cached_value("Company", company, "default_currency")
 
 	delivery_date = getdate(stop.delivered_on)
-	is_credit = stop.payment_status == DRIVER_CREDIT
-	credit_days = DEFAULT_CREDIT_DAYS if is_credit else 0
+	invoice = frappe.db.get_value(
+		"Pick List",
+		stop.pick_list,
+		["fg_invoice_issuer", "fg_invoice_payment_method", "fg_invoice_due_date", "fg_invoiced_on"],
+		as_dict=True,
+	) or frappe._dict()
+	invoice_payment_method, credit_days, due_date, due_date_source = invoice_due_terms(
+		invoice, delivery_date, stop.payment_status
+	)
 
 	return {
 		"recorrido": stop.recorrido,
@@ -250,12 +276,14 @@ def derive_obligation_values(recorrido_parada):
 		"company": company,
 		"customer": stop.customer,
 		"customer_name": stop.customer_name,
-		"invoice_issuer": frappe.db.get_value("Pick List", stop.pick_list, "fg_invoice_issuer") or None,
+		"invoice_issuer": invoice.get("fg_invoice_issuer") or None,
 		"invoice_amount": amount or 0,
 		"currency": currency,
 		"amount_source": amount_source,
 		"credit_days": credit_days,
-		"due_date": add_days(delivery_date, credit_days) if is_credit else None,
+		"due_date": due_date,
+		"invoice_payment_method": invoice_payment_method,
+		"due_date_source": due_date_source,
 		"delivered_on": stop.delivered_on,
 		"delivery_date": delivery_date,
 		"delivered_by": stop.delivered_by,
@@ -272,6 +300,58 @@ def derive_obligation_values(recorrido_parada):
 		"payment_verified_on": None,
 		"payment_rejection_reason": None,
 	}
+
+
+def invoice_due_terms(invoice, delivery_date, driver_payment_status):
+	"""(invoice_payment_method, credit_days, due_date, due_date_source) of a
+	NEW obligation.
+
+	- Invoice with payment method + due date: due_date is the invoice's own
+	  date, copied exactly; credit_days counts from the effective invoicing
+	  date (fg_invoiced_on, site time zone) -- the same basis as the PDF.
+	  The delivery date and the driver's report play no part: a delivery
+	  made after the due date is simply already overdue.
+	- Otherwise (Pick List invoiced before the feature): the previous rule,
+	  unchanged -- driver "Crédito" -> delivery + DEFAULT_CREDIT_DAYS, else
+	  no due date."""
+	method = invoice.get("fg_invoice_payment_method") or None
+	due = invoice.get("fg_invoice_due_date")
+	if method and due:
+		due = getdate(due)
+		invoiced_on = invoice.get("fg_invoiced_on")
+		billing_date = getdate(invoiced_on) if invoiced_on else due
+		return method, max((due - billing_date).days, 0), due, DUE_SOURCE_INVOICE
+
+	is_credit = driver_payment_status == DRIVER_CREDIT
+	credit_days = DEFAULT_CREDIT_DAYS if is_credit else 0
+	return None, credit_days, add_days(delivery_date, credit_days) if is_credit else None, DUE_SOURCE_LEGACY
+
+
+def invoice_terms_discrepancy(obligation):
+	"""Informative only, computed at read time and never stored: a driver
+	report that contradicts the invoice's payment condition. Nothing is ever
+	corrected automatically.
+
+	The one incompatible combination: the invoice is due on its own date
+	(PAGO INMEDIATO) and the driver reported "Crédito" at delivery. "Pagado"
+	or "Pendiente por Pago" are compatible with every condition (a customer
+	may pay early, or still owe an immediate invoice -- that is a collection,
+	not a contradiction). Obligations without an invoice condition
+	(historical) never report a discrepancy."""
+	if obligation.get("due_date_source") != DUE_SOURCE_INVOICE:
+		return None
+	if is_immediate_payment(obligation) and obligation.get("driver_payment_status") == DRIVER_CREDIT:
+		return _("El conductor reportó Crédito, pero la factura es de pago inmediato ({0}).").format(
+			obligation.get("invoice_payment_method")
+		)
+	return None
+
+
+def is_immediate_payment(obligation):
+	"""Invoice due on its invoicing date. A label, never a received payment."""
+	return obligation.get("due_date_source") == DUE_SOURCE_INVOICE and (
+		obligation.get("invoice_payment_method") in IMMEDIATE_PAYMENT_METHODS or not cint(obligation.get("credit_days"))
+	)
 
 
 def _commercial_name(sales_order):

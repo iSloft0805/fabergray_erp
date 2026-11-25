@@ -34,6 +34,8 @@
   "column_break_credit",
   "credit_days",
   "due_date",
+  "invoice_payment_method",
+  "due_date_source",
   "section_break_delivery",
   "delivered_on",
   "delivery_date",
@@ -240,6 +242,22 @@
    "read_only": 1
   },
   {
+   "fieldname": "invoice_payment_method",
+   "fieldtype": "Select",
+   "label": "Forma de pago de la factura",
+   "options": "\nContado\nCrédito\nEfectivo\nTransferencia",
+   "read_only": 1,
+   "description": "Copiada del Pick List facturado (fg_invoice_payment_method) al crear la obligación; inmutable. Informativa: no registra pagos. Vacía en obligaciones anteriores a esta integración o de facturas sin forma de pago."
+  },
+  {
+   "fieldname": "due_date_source",
+   "fieldtype": "Select",
+   "label": "Origen del vencimiento",
+   "options": "\nFactura comercial\nRegla anterior (entrega)",
+   "read_only": 1,
+   "description": "Factura comercial: due_date es exactamente fg_invoice_due_date del Pick List y credit_days se cuenta desde la fecha de facturación. Regla anterior (entrega): factura sin vencimiento (histórica), se conserva la regla previa (Crédito del conductor = entrega + 30 días). Vacío en obligaciones creadas antes de esta integración; inmutable."
+  },
+  {
    "fieldname": "section_break_delivery",
    "fieldtype": "Section Break",
    "label": "Entrega y reporte del conductor"
@@ -324,7 +342,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-09-25 18:00:00.000000",
+ "modified": "2026-11-25 18:00:00.000000",
  "modified_by": "Administrator",
  "module": "Fabrigray ERP",
  "name": "Cartera Obligacion",

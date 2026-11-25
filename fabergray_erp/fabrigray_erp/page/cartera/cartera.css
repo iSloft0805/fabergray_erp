@@ -885,3 +885,12 @@
 		grid-template-columns: repeat(3, minmax(0, 1fr));
 	}
 }
+
+/* Facturación integration -- condiciones de la factura en el detalle. */
+.fg-cartera .fg-cartera-terms-title {
+	margin-top: 16px;
+}
+
+.fg-cartera .fg-cartera-overdue {
+	color: var(--fg-danger, #d92d20);
+}

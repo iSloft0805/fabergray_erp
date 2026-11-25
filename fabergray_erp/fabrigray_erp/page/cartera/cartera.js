@@ -924,7 +924,9 @@ function render_obligation_card(item) {
 	const meta = bucket_meta(item.bucket);
 	const due = due_label(item);
 	const badges = [];
-	if (item.credit_days > 0) badges.push(render_badge(__("CRÉDITO {0}", [plural_days(cint(item.credit_days))]), "neutral"));
+	if (item.immediate_payment) badges.push(render_badge(immediate_payment_label(item), "neutral"));
+	else if (item.credit_days > 0) badges.push(render_badge(__("CRÉDITO {0}", [plural_days(cint(item.credit_days))]), "neutral"));
+	if (item.terms_discrepancy) badges.push(render_badge(`⚠ ${__("CONDICIÓN DISCREPANTE")}`, "atencion"));
 	if (due && item.due_date) badges.push(render_badge(due.text, due.mod));
 	if (is_unconfirmed_driver_payment(item)) badges.push(render_badge(__("PAGO REPORTADO · SIN CONFIRMAR"), "atencion"));
 	if (is_unproven_driver_report(item)) badges.push(render_badge(__("PAGO REPORTADO SIN COMPROBANTE"), "atencion"));
@@ -967,6 +969,58 @@ function render_obligation_card(item) {
 			<button type="button" class="fg-btn fg-btn--solid-primary fg-cartera-card-detail" data-name="${esc(item.name)}">
 				${icon("eye", "fg-icon-sm")} ${__("VER DETALLE")}
 			</button>
+		</div>
+	`;
+}
+
+// Facturación integration -- "PAGO INMEDIATO · CONTADO". A label only:
+// choosing Contado/Efectivo/Transferencia never means the money was received.
+function immediate_payment_label(item) {
+	return item.invoice_payment_method
+		? __("PAGO INMEDIATO · {0}", [esc(String(item.invoice_payment_method).toUpperCase())])
+		: __("PAGO INMEDIATO");
+}
+
+function term_label(days) {
+	const n = cint(days);
+	return n === 0 ? __("Mismo día") : n === 1 ? __("1 día") : __("{0} días", [n]);
+}
+
+// Condiciones de la factura (payment method, invoicing date, due date, term,
+// days overdue) -- every value computed by the server (api/cartera.py
+// _serialize_obligation()) against the site's today. Only for obligations
+// whose due date came from the invoice; historical ones keep the previous
+// CRÉDITO / VENCE EL fields untouched.
+function render_invoice_terms_html(d, due) {
+	if (!d.due_from_invoice) return "";
+	const overdue = cint(d.days_overdue);
+	return `
+		<div class="fg-cartera-section-title fg-cartera-terms-title">${__("CONDICIONES DE LA FACTURA")}</div>
+		<div class="fg-cartera-detail-grid fg-cartera-terms">
+			${detail_field(
+				__("FORMA DE PAGO"),
+				`${esc(d.invoice_payment_method) || "—"} ${d.immediate_payment ? render_badge(__("PAGO INMEDIATO"), "neutral") : ""}`
+			)}
+			${detail_field(__("FECHA DE FACTURACIÓN"), format_date(d.invoice_date))}
+			${detail_field(__("VENCIMIENTO"), `${format_date(d.due_date)} ${due ? render_badge(due.text, due.mod) : ""}`)}
+			${detail_field(__("PLAZO"), esc(term_label(d.credit_days)))}
+			${detail_field(
+				__("DÍAS DE MORA"),
+				overdue > 0 ? `<strong class="fg-cartera-overdue">${esc(plural_days(overdue))}</strong>` : __("Sin mora")
+			)}
+		</div>
+	`;
+}
+
+// Informative only -- never changes the obligation (the server computes it
+// at read time and stores nothing).
+function render_terms_discrepancy_html(d) {
+	if (!d.terms_discrepancy) return "";
+	return `
+		<div class="fg-cartera-detail-section fg-cartera-issues fg-cartera-discrepancy">
+			<div class="fg-cartera-issues-title">⚠ ${__("CONDICIÓN DISCREPANTE")}</div>
+			<div>${esc(d.terms_discrepancy)}</div>
+			<div class="fg-cartera-muted">${__("Alerta informativa: no modifica la obligación, el vencimiento ni los pagos.")}</div>
 		</div>
 	`;
 }
@@ -1051,7 +1105,9 @@ function render_detail_html(d, ui) {
 			</div>`
 		: "";
 
-	const credit_html = d.due_date
+	const credit_html = d.due_from_invoice
+		? ""
+		: d.due_date
 		? `${detail_field(__("CRÉDITO"), esc(plural_days(cint(d.credit_days))))}
 			${detail_field(__("VENCE EL"), `${format_date(d.due_date)} ${due ? render_badge(due.text, due.mod) : ""}`)}`
 		: due
@@ -1088,7 +1144,10 @@ function render_detail_html(d, ui) {
 			</div>
 
 			${credit_html ? `<div class="fg-cartera-detail-grid">${credit_html}</div>` : ""}
+			${render_invoice_terms_html(d, due)}
 		</div>
+
+		${render_terms_discrepancy_html(d)}
 
 		${pay_section}
 		${amount_warning}

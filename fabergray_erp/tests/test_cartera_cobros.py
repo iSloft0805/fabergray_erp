@@ -54,6 +54,12 @@ def _image(fmt, size=(900, 600), exif=None):
 
 
 class TestCarteraCobros(IntegrationTestCase):
+	#: Facturación integration -- this suite covers the PREVIOUS due-date rule
+	#: (driver "Crédito" -> delivery + 30 days), which still applies to Pick
+	#: Lists invoiced without payment terms (historical). The rule for new
+	#: invoices is covered by test_cartera_invoice_due_date.py.
+	historical_invoice_terms = True
+
 	@classmethod
 	def setUpClass(cls):
 		super().setUpClass()
