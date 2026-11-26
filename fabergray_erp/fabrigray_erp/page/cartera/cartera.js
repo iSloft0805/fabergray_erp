@@ -927,6 +927,7 @@ function render_obligation_card(item) {
 	if (item.immediate_payment) badges.push(render_badge(immediate_payment_label(item), "neutral"));
 	else if (item.credit_days > 0) badges.push(render_badge(__("CRÉDITO {0}", [plural_days(cint(item.credit_days))]), "neutral"));
 	if (item.terms_discrepancy) badges.push(render_badge(`⚠ ${__("CONDICIÓN DISCREPANTE")}`, "atencion"));
+	if (item.delivery_time_verified === false) badges.push(render_badge(__("REGULARIZACIÓN"), "neutral"));
 	if (due && item.due_date) badges.push(render_badge(due.text, due.mod));
 	if (is_unconfirmed_driver_payment(item)) badges.push(render_badge(__("PAGO REPORTADO · SIN CONFIRMAR"), "atencion"));
 	if (is_unproven_driver_report(item)) badges.push(render_badge(__("PAGO REPORTADO SIN COMPROBANTE"), "atencion"));
@@ -1160,7 +1161,16 @@ function render_detail_html(d, ui) {
 			<div class="fg-cartera-detail-grid">
 				${detail_field(__("PAGO REPORTADO"), esc(DRIVER_STATUS_LABELS[d.driver_payment_status] || d.driver_payment_status) || "—")}
 				${detail_field(__("CONDUCTOR"), esc(d.delivered_by_name || d.delivered_by) || "—")}
-				${detail_field(__("FECHA / HORA DE ENTREGA"), format_datetime(d.delivered_on))}
+				${
+					d.delivery_time_verified === false
+						? detail_field(
+								__("FECHA DE ENTREGA"),
+								`${format_date(d.delivery_date)} ${render_badge(__("REGULARIZACIÓN ADMINISTRATIVA"), "neutral")}<div class="fg-cartera-muted">${__(
+									"Entrega registrada por una entrega masiva: sin hora comprobada, foto ni firma."
+								)}</div>`
+						  )
+						: detail_field(__("FECHA / HORA DE ENTREGA"), format_datetime(d.delivered_on))
+				}
 			</div>
 			${d.driver_payment_note ? detail_field(__("OBSERVACIÓN DEL PAGO"), `<div class="fg-cartera-pre">${esc(d.driver_payment_note)}</div>`) : ""}
 			${d.has_driver_proof && !is_unconfirmed_driver_payment(d) ? proof_button : ""}

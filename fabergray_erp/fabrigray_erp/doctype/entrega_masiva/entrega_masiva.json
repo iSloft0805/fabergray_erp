@@ -1,0 +1,267 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "EM-.YYYY.-.#####",
+ "creation": "2026-11-26 00:00:00.000000",
+ "description": "Lote de regularización administrativa de entregas (Recorridos). Solo lo escribe fabergray_erp.entrega_masiva_service.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "company",
+  "status",
+  "requested_by",
+  "reason",
+  "column_break_criteria",
+  "date_criterion",
+  "date_from",
+  "date_to",
+  "date_mode",
+  "effective_delivery_date",
+  "physical_delivery_confirmed",
+  "invoice_date_confirmed",
+  "section_break_totals",
+  "total_selected",
+  "total_amount",
+  "processed_count",
+  "column_break_totals",
+  "delivered_count",
+  "skipped_count",
+  "failed_count",
+  "section_break_execution",
+  "queued_on",
+  "started_on",
+  "finished_on",
+  "heartbeat_on",
+  "column_break_execution",
+  "client_request_id",
+  "active_company_lock",
+  "worker_token",
+  "job_id",
+  "last_error"
+ ],
+ "fields": [
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Empresa",
+   "read_only": 1,
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "label": "Estado",
+   "read_only": 1,
+   "options": "En cola\nEn proceso\nInterrumpido\nCompletado\nCompletado con errores\nCerrado",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "requested_by",
+   "fieldtype": "Link",
+   "label": "Solicitado por",
+   "read_only": 1,
+   "options": "User",
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "label": "Motivo de la regularización",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_criteria",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "date_criterion",
+   "fieldtype": "Data",
+   "label": "Criterio del rango",
+   "read_only": 1
+  },
+  {
+   "fieldname": "date_from",
+   "fieldtype": "Date",
+   "label": "Facturados desde",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "date_to",
+   "fieldtype": "Date",
+   "label": "Facturados hasta",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "fieldname": "date_mode",
+   "fieldtype": "Select",
+   "label": "Fecha efectiva de entrega",
+   "read_only": 1,
+   "options": "Fecha común\nFecha de facturación de cada pedido",
+   "reqd": 1
+  },
+  {
+   "fieldname": "effective_delivery_date",
+   "fieldtype": "Date",
+   "label": "Fecha común de entrega",
+   "read_only": 1
+  },
+  {
+   "fieldname": "physical_delivery_confirmed",
+   "fieldtype": "Check",
+   "label": "Confirmó entrega física",
+   "read_only": 1
+  },
+  {
+   "fieldname": "invoice_date_confirmed",
+   "fieldtype": "Check",
+   "label": "Confirmó que la fecha de facturación es la entrega real",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_totals",
+   "fieldtype": "Section Break",
+   "label": "Resultado"
+  },
+  {
+   "fieldname": "total_selected",
+   "fieldtype": "Int",
+   "label": "Pedidos seleccionados",
+   "read_only": 1
+  },
+  {
+   "fieldname": "total_amount",
+   "fieldtype": "Currency",
+   "label": "Valor seleccionado",
+   "read_only": 1
+  },
+  {
+   "fieldname": "processed_count",
+   "fieldtype": "Int",
+   "label": "Procesados",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_totals",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "delivered_count",
+   "fieldtype": "Int",
+   "label": "Entregados",
+   "read_only": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "skipped_count",
+   "fieldtype": "Int",
+   "label": "Omitidos",
+   "read_only": 1
+  },
+  {
+   "fieldname": "failed_count",
+   "fieldtype": "Int",
+   "label": "Fallidos",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_execution",
+   "fieldtype": "Section Break",
+   "label": "Ejecución (hora real)"
+  },
+  {
+   "fieldname": "queued_on",
+   "fieldtype": "Datetime",
+   "label": "En cola desde",
+   "read_only": 1
+  },
+  {
+   "fieldname": "started_on",
+   "fieldtype": "Datetime",
+   "label": "Iniciado el (hora real)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "finished_on",
+   "fieldtype": "Datetime",
+   "label": "Finalizado el (hora real)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "heartbeat_on",
+   "fieldtype": "Datetime",
+   "label": "Último avance del proceso",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_execution",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "client_request_id",
+   "fieldtype": "Data",
+   "label": "Clave de idempotencia",
+   "read_only": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "active_company_lock",
+   "fieldtype": "Data",
+   "label": "Bloqueo de lote activo",
+   "read_only": 1,
+   "unique": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "worker_token",
+   "fieldtype": "Data",
+   "label": "Token del proceso",
+   "read_only": 1,
+   "hidden": 1
+  },
+  {
+   "fieldname": "job_id",
+   "fieldtype": "Data",
+   "label": "Trabajo en segundo plano",
+   "read_only": 1
+  },
+  {
+   "fieldname": "last_error",
+   "fieldtype": "Small Text",
+   "label": "Último error",
+   "read_only": 1
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-26 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Fabrigray ERP",
+ "name": "Entrega Masiva",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "company",
+ "track_changes": 1
+}

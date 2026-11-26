@@ -489,6 +489,20 @@ def _validate_pick_list_eligible(pl, company, already_assigned):
 		)
 
 
+def _assert_operational_route(route):
+	"""Entrega masiva -- an administrative regularization route (created and
+	delivered by fabergray_erp.entrega_masiva_service) is a closed record of
+	deliveries that already happened: none of the operational endpoints
+	(edit stops, plan, start, cancel, deliver, geolocation) may touch it."""
+	from fabergray_erp.entrega_masiva_service import ROUTE_KIND_REGULARIZATION
+
+	if route.get("route_kind") == ROUTE_KIND_REGULARIZATION:
+		frappe.throw(
+			_("Los recorridos de regularización administrativa no se modifican desde Recorridos."),
+			RouteNotEditableError,
+		)
+
+
 def _parse_pick_lists(pick_lists):
 	"""create_route()/update_route_stops() both accept `pick_lists` as
 	either a real list (server-to-server call) or a JSON string (the
@@ -726,6 +740,13 @@ def get_route_detail(route_name):
 			# issue details and the proof URL stay on the stop itself.
 			"payment_status",
 			"has_delivery_issues",
+			# Entrega masiva -- a regularized stop shows the declared DAY
+			# (effective_delivery_date) and the real registration time, never
+			# delivered_on's 00:00 as if it were a verified hour.
+			"delivery_mode",
+			"entrega_masiva",
+			"effective_delivery_date",
+			"regularized_on",
 		],
 		order_by="sequence asc",
 	)
@@ -749,6 +770,8 @@ def get_route_detail(route_name):
 		"completed_on": route.completed_on,
 		"total_stops": len(stops),
 		"stops": stops,
+		"route_kind": route.get("route_kind") or None,
+		"entrega_masiva": route.get("entrega_masiva") or None,
 	}
 
 
@@ -867,7 +890,7 @@ def get_routes(status=None, start=0, page_length=20, txt=None):
 	page_rows = frappe.get_list(
 		"Recorrido",
 		filters=filters,
-		fields=["name", "route_date", "status", "driver", "vehicle", "created_by_user", "creation"],
+		fields=["name", "route_date", "status", "driver", "vehicle", "created_by_user", "creation", "route_kind", "entrega_masiva"],
 		order_by="creation desc",
 		limit_start=start,
 		limit_page_length=page_length,
@@ -899,6 +922,8 @@ def get_routes(status=None, start=0, page_length=20, txt=None):
 			"created_by_user": r.created_by_user,
 			"creation": r.creation,
 			"stop_count": stop_counts.get(r.name, 0),
+			"route_kind": r.route_kind or None,
+			"entrega_masiva": r.entrega_masiva or None,
 		}
 		for r in page_rows
 	]
@@ -1053,6 +1078,7 @@ def update_route_stops(route_name, pick_lists=None):
 
 	route = frappe.get_doc("Recorrido", route_name)
 	route.check_permission("write")
+	_assert_operational_route(route)
 
 	if route.status != "Borrador":
 		frappe.throw(
@@ -1142,6 +1168,7 @@ def plan_route(route_name):
 
 	route = frappe.get_doc("Recorrido", route_name)
 	route.check_permission("write")
+	_assert_operational_route(route)
 
 	if route.status != "Borrador":
 		frappe.throw(_("Solo se puede planificar un recorrido en Borrador."), RouteNotEditableError)
@@ -1257,6 +1284,7 @@ def start_route(route_name):
 
 	route = frappe.get_doc("Recorrido", route_name)
 	route.check_permission("write")
+	_assert_operational_route(route)
 
 	if route.company != get_default_company():
 		frappe.throw(_("Este recorrido pertenece a otra empresa."), frappe.PermissionError)
@@ -1583,6 +1611,7 @@ def _deliver_stop(
 
 	route = frappe.get_doc("Recorrido", route_name)
 	route.check_permission("write")
+	_assert_operational_route(route)
 	if route.company != get_default_company():
 		frappe.throw(_("Este recorrido pertenece a otra empresa."), frappe.PermissionError)
 
@@ -1866,6 +1895,7 @@ def cancel_route(route_name):
 
 	route = frappe.get_doc("Recorrido", route_name)
 	route.check_permission("write")
+	_assert_operational_route(route)
 
 	if route.status not in ("Borrador", "Planificado"):
 		frappe.throw(
@@ -2343,6 +2373,7 @@ def geocode_route_pending_addresses(route_name, force=False):
 	# esperas HTTP".
 	route = frappe.get_doc("Recorrido", route_name)
 	route.check_permission("read")
+	_assert_operational_route(route)
 	if route.status != "Borrador":
 		frappe.throw(
 			_("Solo se pueden geocodificar direcciones de un recorrido en Borrador."),
@@ -2450,6 +2481,7 @@ def refresh_route_geolocation(route_name):
 
 	route = frappe.get_doc("Recorrido", route_name)
 	route.check_permission("write")
+	_assert_operational_route(route)
 
 	locked_status = frappe.db.get_value("Recorrido", route_name, "status", for_update=True)
 	if locked_status is None:

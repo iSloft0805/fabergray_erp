@@ -487,6 +487,12 @@ fixtures = [
 					"Address",
 					"Sales Order",
 					"Quotation",
+					# Entrega masiva (System Manager only): READ-only on Pick List
+					# and Customer -- both already carry Custom DocPerm rows, so
+					# this masks nothing for any other role. The service never
+					# writes either doctype.
+					"Pick List",
+					"Customer",
 				],
 			],
 		],

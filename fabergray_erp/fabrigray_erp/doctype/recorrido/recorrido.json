@@ -22,7 +22,10 @@
   "completed_on",
   "column_break_meta",
   "created_by_user",
-  "notes"
+  "notes",
+  "section_break_regularization",
+  "route_kind",
+  "entrega_masiva"
  ],
  "fields": [
   {
@@ -129,13 +132,35 @@
    "fieldname": "notes",
    "fieldtype": "Small Text",
    "label": "Notas"
+  },
+  {
+   "fieldname": "section_break_regularization",
+   "fieldtype": "Section Break",
+   "label": "Regularización administrativa"
+  },
+  {
+   "fieldname": "route_kind",
+   "fieldtype": "Select",
+   "label": "Tipo de recorrido",
+   "options": "\nOperativo\nRegularización administrativa",
+   "read_only": 1,
+   "in_standard_filter": 1,
+   "description": "Vacío/Operativo: recorrido normal con conductor y evidencia. Regularización administrativa: creado SOLO por fabergray_erp.entrega_masiva_service (token privado) para registrar entregas ya ocurridas; sin conductor, coordenadas, foto ni firma. Inmutable."
+  },
+  {
+   "fieldname": "entrega_masiva",
+   "fieldtype": "Link",
+   "label": "Entrega masiva",
+   "options": "Entrega Masiva",
+   "read_only": 1,
+   "search_index": 1
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "is_submittable": 0,
  "links": [],
- "modified": "2026-08-30 00:00:00.000000",
+ "modified": "2026-11-26 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Fabrigray ERP",
  "name": "Recorrido",

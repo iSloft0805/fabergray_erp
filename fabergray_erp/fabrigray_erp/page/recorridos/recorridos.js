@@ -206,12 +206,432 @@ fabergray_erp.Recorridos = class Recorridos {
 
 	render_body() {
 		this.$body.html(`
+			${this.render_bulk_bar_html()}
 			${this.render_kpis()}
 			<div class="fg-recorridos-tabs-nav">${this.render_top_tabs_html()}</div>
 			<div class="fg-recorridos-tab-body"></div>
 		`);
 		this.render_active_tab();
 		this.bind_body_events();
+		this.$body.find(".fg-em-open-btn").on("click", () => this.open_bulk_dialog());
+	}
+
+	// =====================================================================
+	// Entrega masiva de pedidos (System Manager) -- api/entrega_masiva.py.
+	// Every rule lives on the server (eligibility, dates, permissions,
+	// revalidation, idempotency); this only collects the parameters, shows
+	// the server's preview and polls the background job's progress.
+	// =====================================================================
+	render_bulk_bar_html() {
+		if (!frappe.user.has_role("System Manager")) return "";
+		return `
+			<div class="fg-em-bar">
+				<button type="button" class="fg-btn fg-em-open-btn">${icon("check-check", "fg-icon-sm")} ${__("Entregar todos los pedidos")}</button>
+				<span class="fg-em-bar-hint">${__("Regulariza pedidos ya entregados físicamente")}</span>
+			</div>
+		`;
+	}
+
+	em_call(method, args) {
+		return this._frappe_call("fabergray_erp.api.entrega_masiva." + method, args);
+	}
+
+	open_bulk_dialog() {
+		const today = frappe.datetime.get_today();
+		this.em = {
+			date_from: today.slice(0, 8) + "01",
+			date_to: today,
+			date_mode: "Fecha común",
+			effective_date: today,
+			invoice_confirmed: false,
+			view: "eligible",
+			page: 1,
+			preview: null,
+			select_all: true,
+			excluded: new Map(),
+			selected: new Map(),
+			reason: "",
+			physical: false,
+			request_id: null,
+			batch: null,
+			busy: false,
+		};
+		const dialog = new frappe.ui.Dialog({
+			title: `<span class="fg-em-title">${icon("package-check")}${__("Entrega masiva de pedidos")}</span>`,
+			size: "extra-large",
+			fields: [{ fieldtype: "HTML", fieldname: "em_html" }],
+		});
+		dialog.$wrapper.addClass("fg-em-dialog");
+		dialog.onhide = () => {
+			clearTimeout(this._em_poll);
+			if (this.em && this.em.batch) this.load_all();
+		};
+		this.em_dialog = dialog;
+		this.$em = dialog.fields_dict.em_html.$wrapper;
+		this.bind_bulk_events();
+		dialog.show();
+		this.render_bulk();
+		this.em_call("get_active_bulk_delivery").then((active) => {
+			if (active) this.show_bulk_progress(active.name);
+		});
+	}
+
+	em_selected_count() {
+		const p = this.em.preview;
+		if (!p) return 0;
+		return this.em.select_all ? p.summary.eligible - this.em.excluded.size : this.em.selected.size;
+	}
+
+	em_selected_value() {
+		const p = this.em.preview;
+		if (!p) return 0;
+		const sum = (m) => Array.from(m.values()).reduce((a, r) => a + (Number(r.amount) || 0), 0);
+		return this.em.select_all ? Number(p.summary.total_amount) - sum(this.em.excluded) : sum(this.em.selected);
+	}
+
+	em_can_confirm() {
+		const e = this.em;
+		return (
+			!e.busy &&
+			e.preview &&
+			this.em_selected_count() > 0 &&
+			e.reason.trim().length >= 10 &&
+			e.physical &&
+			(e.date_mode !== "Fecha de facturación de cada pedido" || e.invoice_confirmed)
+		);
+	}
+
+	render_bulk() {
+		const e = this.em;
+		if (e.batch) return this.render_bulk_progress();
+		const invoice_mode = e.date_mode === "Fecha de facturación de cada pedido";
+		this.$em.html(`
+			<div class="fg-em">
+				<div class="fg-em-criteria">
+					${icon("info", "fg-icon-sm")}
+					<span>${__("Criterio del rango: <strong>fecha de facturación</strong> del pedido (hora del sitio). Solo pedidos facturados que no hayan sido entregados.")}</span>
+				</div>
+				<div class="fg-em-filters">
+					<label class="fg-em-field"><span>${__("Fecha inicial")}</span><input type="date" class="fg-em-date-from" value="${e.date_from}" max="${frappe.datetime.get_today()}"></label>
+					<label class="fg-em-field"><span>${__("Fecha final")}</span><input type="date" class="fg-em-date-to" value="${e.date_to}" max="${frappe.datetime.get_today()}"></label>
+				</div>
+				<div class="fg-em-mode">
+					<div class="fg-em-label">${__("Fecha efectiva de entrega")}</div>
+					<label class="fg-em-radio"><input type="radio" name="fg-em-mode" value="Fecha común" ${invoice_mode ? "" : "checked"}> ${__("Una fecha común para todos los pedidos")}</label>
+					<input type="date" class="fg-em-effective" value="${e.effective_date || ""}" max="${frappe.datetime.get_today()}" ${invoice_mode ? "disabled" : ""}>
+					<label class="fg-em-radio"><input type="radio" name="fg-em-mode" value="Fecha de facturación de cada pedido" ${invoice_mode ? "checked" : ""}> ${__("La fecha de facturación de cada pedido")}</label>
+					${
+						invoice_mode
+							? `<label class="fg-em-check fg-em-check--warn"><input type="checkbox" class="fg-em-invoice-confirm" ${e.invoice_confirmed ? "checked" : ""}> ${__("Confirmo que la fecha de facturación de cada pedido corresponde a su entrega real.")}</label>`
+							: ""
+					}
+				</div>
+				<button type="button" class="fg-btn fg-em-search-btn" ${e.busy ? "disabled" : ""}>${icon("search", "fg-icon-sm")} ${__("Buscar pedidos")}</button>
+				<div class="fg-em-results">${e.preview ? this.render_bulk_results_html() : ""}</div>
+			</div>
+		`);
+	}
+
+	render_bulk_results_html() {
+		const e = this.em;
+		const p = e.preview;
+		const s = p.summary;
+		const excluded_html = s.excluded_by_reason.length
+			? `<ul class="fg-em-reasons">${s.excluded_by_reason
+					.map(
+						(r) =>
+							`<li class="${r.needs_review ? "is-review" : ""}"><strong>${r.count}</strong> ${frappe.utils.escape_html(r.label)}${
+								r.needs_review ? ` <span class="fg-em-tag fg-em-tag--review">${__("REVISAR")}</span>` : ""
+							}</li>`
+					)
+					.join("")}</ul>`
+			: `<div class="fg-em-muted">${__("Ningún pedido excluido.")}</div>`;
+		const warnings_html = s.warnings.length
+			? s.warnings
+					.map((w) => `<div class="fg-em-warning">${icon("triangle-alert", "fg-icon-sm")} ${w.count} · ${frappe.utils.escape_html(w.label)}</div>`)
+					.join("")
+			: "";
+		const count = this.em_selected_count();
+		return `
+			<div class="fg-em-kpis">
+				<div class="fg-em-kpi"><span>${__("Pedidos encontrados")}</span><strong>${s.found}</strong></div>
+				<div class="fg-em-kpi fg-em-kpi--ok"><span>${__("Se pueden entregar")}</span><strong>${s.eligible}</strong></div>
+				<div class="fg-em-kpi fg-em-kpi--muted"><span>${__("Excluidos")}</span><strong>${s.excluded}</strong></div>
+				<div class="fg-em-kpi"><span>${__("Valor total facturado")}</span><strong>${format_money_co(s.total_amount)}</strong></div>
+			</div>
+			${warnings_html}
+			<div class="fg-em-tabs">
+				<button type="button" class="fg-em-tab ${e.view === "eligible" ? "is-active" : ""}" data-view="eligible">${__("Para entregar")} (${s.eligible})</button>
+				<button type="button" class="fg-em-tab ${e.view === "excluded" ? "is-active" : ""}" data-view="excluded">${__("Excluidos")} (${s.excluded})</button>
+			</div>
+			${e.view === "eligible" ? this.render_bulk_table_html() : `<div class="fg-em-excluded-summary">${excluded_html}</div>${this.render_bulk_table_html()}`}
+			<div class="fg-em-confirm-box">
+				<div class="fg-em-selection">${__("Seleccionados")}: <strong>${count}</strong> ${__("pedidos")} · ${__("Valor seleccionado")}: <strong>${format_money_co(this.em_selected_value())}</strong></div>
+				<label class="fg-em-field fg-em-reason"><span>${__("Motivo de la regularización (obligatorio)")}</span><textarea class="fg-em-reason-input" rows="2" maxlength="500" placeholder="${__("Ej.: pedidos entregados en noviembre que no se confirmaron en Recorridos")}">${frappe.utils.escape_html(e.reason)}</textarea></label>
+				<label class="fg-em-check"><input type="checkbox" class="fg-em-physical" ${e.physical ? "checked" : ""}> ${__("Confirmo que estos pedidos fueron entregados físicamente.")}</label>
+				<div class="fg-em-irreversible">${icon("lock", "fg-icon-sm")} ${__("Esta operación no se puede deshacer desde la interfaz. Cada pedido quedará entregado como «Regularización administrativa», sin foto ni firma, y se creará su obligación de Cartera sin registrar ningún pago.")}</div>
+				<button type="button" class="fg-btn fg-em-confirm-btn" ${this.em_can_confirm() ? "" : "disabled"}>${icon("check-check", "fg-icon-sm")} ${__("Confirmar entrega masiva")}</button>
+			</div>
+		`;
+	}
+
+	render_bulk_table_html() {
+		const e = this.em;
+		const p = e.preview;
+		const rows = p.rows || [];
+		const eligible = e.view === "eligible";
+		const pages = Math.max(Math.ceil(p.total_in_view / p.page_length), 1);
+		const is_checked = (r) => (e.select_all ? !e.excluded.has(r.pick_list) : e.selected.has(r.pick_list));
+		const body = rows.length
+			? rows
+					.map((r) => {
+						const warn = (r.warnings || []).map((w) => w.label).join(" · ");
+						return `<tr>
+							${eligible ? `<td><input type="checkbox" class="fg-em-row-check" data-pl="${frappe.utils.escape_html(r.pick_list)}" ${is_checked(r) ? "checked" : ""}></td>` : ""}
+							<td><strong>${frappe.utils.escape_html(r.commercial_name || "—")}</strong><div class="fg-em-muted">${frappe.utils.escape_html(r.pick_list)}</div></td>
+							<td>${frappe.utils.escape_html(r.customer_name || "—")}</td>
+							<td>${format_date_co(r.invoice_date)}</td>
+							${
+								eligible
+									? `<td>${frappe.utils.escape_html(r.payment_method || __("Sin forma de pago"))}${r.due_date ? `<div class="fg-em-muted">${__("Vence")} ${format_date_co(r.due_date)}</div>` : ""}</td>
+									<td class="fg-em-num">${r.amount_available ? format_money_co(r.amount) : `<span class="fg-em-muted">${__("Por validar")}</span>`}</td>
+									<td>${r.origin_recorrido ? `${__("En ruta")} <span class="fg-em-muted">${frappe.utils.escape_html(r.origin_recorrido)}</span>` : __("Sin recorrido")}${
+											warn ? ` <span class="fg-em-warn-icon" title="${frappe.utils.escape_html(warn)}">${icon("triangle-alert", "fg-icon-sm")}</span>` : ""
+									  }</td>`
+									: `<td>${frappe.utils.escape_html(r.reason || "")}${r.reason_detail ? `<div class="fg-em-muted">${frappe.utils.escape_html(r.reason_detail)}</div>` : ""}${
+											r.needs_review ? ` <span class="fg-em-tag fg-em-tag--review">${__("REVISAR")}</span>` : ""
+									  }</td>`
+							}
+						</tr>`;
+					})
+					.join("")
+			: `<tr><td colspan="7" class="fg-em-empty">${__("Sin pedidos en esta vista.")}</td></tr>`;
+		const head = eligible
+			? `<th><input type="checkbox" class="fg-em-select-all" ${e.select_all && !e.excluded.size ? "checked" : ""} title="${__("Seleccionar todos los resultados (todas las páginas)")}"></th><th>${__("Pedido")}</th><th>${__("Cliente")}</th><th>${__("Facturado")}</th><th>${__("Forma de pago")}</th><th class="fg-em-num">${__("Valor")}</th><th>${__("Origen")}</th>`
+			: `<th>${__("Pedido")}</th><th>${__("Cliente")}</th><th>${__("Facturado")}</th><th>${__("Motivo")}</th>`;
+		return `
+			${eligible ? `<div class="fg-em-select-all-row">${__("Casilla del encabezado: selecciona los {0} pedidos de todas las páginas.", [p.summary.eligible])}</div>` : ""}
+			<div class="fg-em-table-wrap"><table class="fg-em-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
+			<div class="fg-em-pager">
+				<button type="button" class="fg-btn fg-em-page" data-page="${p.page - 1}" ${p.page <= 1 ? "disabled" : ""}>${icon("chevron-left", "fg-icon-sm")}</button>
+				<span>${__("Página {0} de {1}", [p.page, pages])}</span>
+				<button type="button" class="fg-btn fg-em-page" data-page="${p.page + 1}" ${p.has_more ? "" : "disabled"}>${icon("chevron-right", "fg-icon-sm")}</button>
+			</div>
+		`;
+	}
+
+	bind_bulk_events() {
+		const $w = this.$em;
+		const e = () => this.em;
+		$w.on("change", ".fg-em-date-from", (ev) => (e().date_from = ev.target.value));
+		$w.on("change", ".fg-em-date-to", (ev) => (e().date_to = ev.target.value));
+		$w.on("change", ".fg-em-effective", (ev) => (e().effective_date = ev.target.value));
+		$w.on("change", "input[name=fg-em-mode]", (ev) => {
+			e().date_mode = ev.target.value;
+			e().invoice_confirmed = false;
+			e().preview = null;
+			this.render_bulk();
+		});
+		$w.on("change", ".fg-em-invoice-confirm", (ev) => {
+			e().invoice_confirmed = ev.target.checked;
+			this.refresh_bulk_confirm();
+		});
+		$w.on("click", ".fg-em-search-btn", () => this.load_bulk_preview(1, true));
+		$w.on("click", ".fg-em-tab", (ev) => {
+			e().view = $(ev.currentTarget).data("view");
+			this.load_bulk_preview(1, false);
+		});
+		$w.on("click", ".fg-em-page", (ev) => this.load_bulk_preview(cint($(ev.currentTarget).data("page")), false));
+		$w.on("change", ".fg-em-row-check", (ev) => {
+			const pl = $(ev.currentTarget).data("pl");
+			const row = (e().preview.rows || []).find((r) => r.pick_list === pl);
+			const target = e().select_all ? e().excluded : e().selected;
+			const wants = e().select_all ? !ev.target.checked : ev.target.checked;
+			if (wants) target.set(pl, row);
+			else target.delete(pl);
+			this.refresh_bulk_results();
+		});
+		$w.on("change", ".fg-em-select-all", (ev) => {
+			e().select_all = ev.target.checked;
+			e().excluded = new Map();
+			e().selected = new Map();
+			this.refresh_bulk_results();
+		});
+		$w.on("input", ".fg-em-reason-input", (ev) => {
+			e().reason = ev.target.value;
+			this.refresh_bulk_confirm();
+		});
+		$w.on("change", ".fg-em-physical", (ev) => {
+			e().physical = ev.target.checked;
+			this.refresh_bulk_confirm();
+		});
+		$w.on("click", ".fg-em-confirm-btn", () => this.confirm_bulk());
+		$w.on("click", ".fg-em-resume-btn", () => this.bulk_recovery("resume_bulk_delivery"));
+		$w.on("click", ".fg-em-close-batch-btn", () => this.bulk_recovery("close_bulk_delivery"));
+		$w.on("click", ".fg-em-done-btn", () => this.em_dialog.hide());
+	}
+
+	refresh_bulk_results() {
+		this.$em.find(".fg-em-results").html(this.render_bulk_results_html());
+	}
+
+	refresh_bulk_confirm() {
+		this.$em.find(".fg-em-confirm-btn").prop("disabled", !this.em_can_confirm());
+	}
+
+	load_bulk_preview(page, refresh) {
+		const e = this.em;
+		if (e.busy) return;
+		e.busy = true;
+		this.$em.find(".fg-em-search-btn").prop("disabled", true).html(`${icon("loader-circle", "fg-icon-sm fg-spin")} ${__("Buscando...")}`);
+		if (refresh) {
+			e.select_all = true;
+			e.excluded = new Map();
+			e.selected = new Map();
+			e.view = "eligible";
+			e.request_id = null;
+		}
+		this.em_call("get_bulk_delivery_preview", {
+			date_from: e.date_from,
+			date_to: e.date_to,
+			date_mode: e.date_mode,
+			effective_date: e.date_mode === "Fecha común" ? e.effective_date : null,
+			view: e.view,
+			page: page,
+			refresh: refresh ? 1 : 0,
+		})
+			.then((p) => {
+				e.preview = p;
+				e.page = p.page;
+			})
+			.catch(() => {})
+			.finally(() => {
+				e.busy = false;
+				this.render_bulk();
+			});
+	}
+
+	confirm_bulk() {
+		const e = this.em;
+		if (!this.em_can_confirm()) return;
+		const count = this.em_selected_count();
+		frappe.confirm(
+			__("Se registrarán {0} pedidos como entregados (regularización administrativa). Esta operación no se puede deshacer. ¿Continuar?", [count]),
+			() => {
+				e.busy = true;
+				e.request_id = e.request_id || frappe.utils.get_random(24);
+				this.refresh_bulk_confirm();
+				this.em_call("confirm_bulk_delivery", {
+					date_from: e.date_from,
+					date_to: e.date_to,
+					date_mode: e.date_mode,
+					effective_date: e.date_mode === "Fecha común" ? e.effective_date : null,
+					reason: e.reason.trim(),
+					physical_delivery_confirmed: 1,
+					invoice_date_confirmed: e.invoice_confirmed ? 1 : 0,
+					select_all: e.select_all ? 1 : 0,
+					pick_lists: e.select_all ? null : JSON.stringify(Array.from(e.selected.keys())),
+					excluded_pick_lists: e.select_all ? JSON.stringify(Array.from(e.excluded.keys())) : null,
+					client_request_id: e.request_id,
+				})
+					.then((status) => {
+						if (status.not_eligible && status.not_eligible.length) {
+							frappe.show_alert({ message: __("{0} pedidos ya no se podían entregar y se omitieron.", [status.not_eligible.length]), indicator: "orange" }, 7);
+						}
+						this.show_bulk_progress(status.name, status);
+					})
+					.catch(() => {
+						e.busy = false;
+						this.refresh_bulk_confirm();
+					});
+			}
+		);
+	}
+
+	show_bulk_progress(batch_name, status) {
+		this.em.batch = { name: batch_name, status: status || null };
+		this.render_bulk_progress();
+		this.poll_bulk_status();
+	}
+
+	poll_bulk_status() {
+		clearTimeout(this._em_poll);
+		const batch = this.em && this.em.batch;
+		if (!batch) return;
+		this.em_call("get_bulk_delivery_status", { batch_name: batch.name })
+			.then((st) => {
+				batch.status = st;
+				this.render_bulk_progress();
+				if (!st.finished && !st.can_resume && this.em_dialog.display) {
+					this._em_poll = setTimeout(() => this.poll_bulk_status(), 1500);
+				}
+			})
+			.catch(() => {});
+	}
+
+	bulk_recovery(method) {
+		const batch = this.em.batch;
+		const label = method === "resume_bulk_delivery" ? __("¿Reanudar la entrega masiva desde los pedidos pendientes?") : __("¿Cerrar el lote sin procesar los pedidos pendientes?");
+		frappe.confirm(label, () => {
+			this.em_call(method, { batch_name: batch.name }).then((st) => {
+				batch.status = st;
+				this.render_bulk_progress();
+				this.poll_bulk_status();
+			});
+		});
+	}
+
+	render_bulk_progress() {
+		const st = this.em.batch.status;
+		if (!st) {
+			this.$em.html(`<div class="fg-em fg-em-progress"><div class="fg-em-muted">${__("Cargando...")}</div></div>`);
+			return;
+		}
+		const pct = Math.min(Math.max(Number(st.progress_percent) || 0, 0), 100);
+		const issues = (st.issues || [])
+			.map(
+				(i) =>
+					`<tr><td><strong>${frappe.utils.escape_html(i.commercial_name || i.pick_list)}</strong><div class="fg-em-muted">${frappe.utils.escape_html(
+						i.pick_list
+					)}</div></td><td>${frappe.utils.escape_html(i.customer_name || "—")}</td><td><span class="fg-em-tag ${i.result === "Fallido" ? "fg-em-tag--fail" : ""}">${frappe.utils.escape_html(
+						i.result
+					)}</span></td><td>${frappe.utils.escape_html(i.message || "")}</td></tr>`
+			)
+			.join("");
+		const head = st.finished
+			? `<div class="fg-em-done ${st.failed ? "has-errors" : ""}">${icon(st.failed ? "triangle-alert" : "circle-check")} ${
+					st.failed ? __("Entrega masiva finalizada con errores") : __("Entrega masiva finalizada")
+			  } · ${frappe.utils.escape_html(st.name)}</div>`
+			: st.can_resume
+			? `<div class="fg-em-done has-errors">${icon("triangle-alert")} ${__("El proceso se interrumpió o no avanza. Puedes reanudarlo (no repite pedidos ya entregados) o cerrar el lote.")}</div>`
+			: `<div class="fg-em-running">${icon("loader-circle", "fg-spin")} ${__("Procesando en segundo plano… puedes cerrar esta ventana; el proceso continúa.")}</div>`;
+		this.$em.html(`
+			<div class="fg-em fg-em-progress">
+				${head}
+				<div class="fg-em-bar-track"><div class="fg-em-bar-fill" style="width:${pct}%"></div><span>${pct}%</span></div>
+				<div class="fg-em-kpis">
+					<div class="fg-em-kpi"><span>${__("Seleccionados")}</span><strong>${st.total_selected}</strong></div>
+					<div class="fg-em-kpi fg-em-kpi--ok"><span>${__("Entregados")}</span><strong>${st.delivered}</strong></div>
+					<div class="fg-em-kpi fg-em-kpi--muted"><span>${__("Omitidos")}</span><strong>${st.skipped}</strong></div>
+					<div class="fg-em-kpi fg-em-kpi--fail"><span>${__("Fallidos")}</span><strong>${st.failed}</strong></div>
+				</div>
+				<div class="fg-em-meta">
+					${__("Fecha efectiva")}: <strong>${st.date_mode === "Fecha común" ? format_date_co(st.effective_date) : __("fecha de facturación de cada pedido")}</strong> ·
+					${__("Valor")}: <strong>${format_money_co(st.total_amount)}</strong> ·
+					${__("Recorridos administrativos")}: <strong>${(st.administrative_routes || []).length}</strong>
+				</div>
+				${issues ? `<div class="fg-em-table-wrap"><table class="fg-em-table"><thead><tr><th>${__("Pedido")}</th><th>${__("Cliente")}</th><th>${__("Resultado")}</th><th>${__("Detalle")}</th></tr></thead><tbody>${issues}</tbody></table></div>` : ""}
+				<div class="fg-em-actions">
+					${
+						st.can_resume
+							? `<button type="button" class="fg-btn fg-em-resume-btn">${icon("rotate-ccw", "fg-icon-sm")} ${__("Reanudar")}</button>
+							   <button type="button" class="fg-btn fg-em-close-batch-btn">${icon("circle-x", "fg-icon-sm")} ${__("Cerrar lote")}</button>`
+							: ""
+					}
+					${st.finished ? `<button type="button" class="fg-btn fg-em-confirm-btn fg-em-done-btn">${__("Listo")}</button>` : ""}
+				</div>
+			</div>
+		`);
 	}
 
 	render_active_tab() {
@@ -856,7 +1276,11 @@ fabergray_erp.Recorridos = class Recorridos {
 			r.creation || ""
 		)}">
 				<div class="fg-recorridos-route-card-top">
-					<div class="fg-recorridos-route-card-id">${frappe.utils.escape_html(r.name)}</div>
+					<div class="fg-recorridos-route-card-id">${frappe.utils.escape_html(r.name)}${
+						r.route_kind === "Regularización administrativa"
+							? ` <span class="fg-em-route-badge" title="${__("Entregas ya realizadas registradas por una entrega masiva: sin conductor, foto ni firma.")}">${__("REGULARIZACIÓN")}</span>`
+							: ""
+					}</div>
 					${status_badge_html(r.status)}
 				</div>
 				<div class="fg-recorridos-route-card-grid">
@@ -2477,6 +2901,17 @@ function weekday_label(date_str) {
 	} catch (e) {
 		return "";
 	}
+}
+
+// Entrega masiva -- presentation only (values come from the server).
+function format_money_co(v) {
+	const n = Number(v) || 0;
+	return "$ " + Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+}
+
+function format_date_co(iso) {
+	const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso || "");
+	return m ? `${m[3]}/${m[2]}/${m[1]}` : "—";
 }
 
 function status_badge_html(status) {

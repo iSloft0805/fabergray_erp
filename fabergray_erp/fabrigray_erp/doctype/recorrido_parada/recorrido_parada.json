@@ -42,7 +42,13 @@
   "payment_status",
   "payment_note",
   "column_break_payment",
-  "payment_proof"
+  "payment_proof",
+  "section_break_regularization",
+  "delivery_mode",
+  "entrega_masiva",
+  "column_break_regularization",
+  "effective_delivery_date",
+  "regularized_on"
  ],
  "fields": [
   {
@@ -287,13 +293,52 @@
    "fieldtype": "Attach Image",
    "label": "Comprobante de pago",
    "read_only": 1
+  },
+  {
+   "fieldname": "section_break_regularization",
+   "fieldtype": "Section Break",
+   "label": "Regularización administrativa"
+  },
+  {
+   "fieldname": "delivery_mode",
+   "fieldtype": "Select",
+   "label": "Modalidad de entrega",
+   "options": "\nConductor\nRegularización administrativa",
+   "read_only": 1,
+   "description": "Vacío/Conductor: entrega normal con foto y firma. Regularización administrativa: entrega ya ocurrida registrada por una Entrega Masiva (token privado del servicio); sin foto ni firma. Inmutable una vez entregada."
+  },
+  {
+   "fieldname": "entrega_masiva",
+   "fieldtype": "Link",
+   "label": "Entrega masiva",
+   "options": "Entrega Masiva",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "column_break_regularization",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "effective_delivery_date",
+   "fieldtype": "Date",
+   "label": "Fecha efectiva de entrega",
+   "read_only": 1,
+   "description": "Regularización: el DÍA de entrega declarado. La hora de delivered_on no es una hora real comprobada (se guarda 00:00) y la interfaz no la muestra."
+  },
+  {
+   "fieldname": "regularized_on",
+   "fieldtype": "Datetime",
+   "label": "Registrado el (hora real)",
+   "read_only": 1,
+   "description": "Hora real en que la entrega masiva registró esta entrega."
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "is_submittable": 0,
  "links": [],
- "modified": "2026-09-24 12:00:00.000000",
+ "modified": "2026-11-26 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Fabrigray ERP",
  "name": "Recorrido Parada",

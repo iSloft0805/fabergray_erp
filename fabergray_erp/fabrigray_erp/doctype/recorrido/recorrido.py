@@ -65,6 +65,7 @@ class Recorrido(Document):
 		if not before:
 			return
 
+		self._validate_regularization_unchanged(before)
 		self._validate_company_unchanged(before)
 		self._validate_status_transition(before)
 		self._validate_started_on(before)
@@ -77,6 +78,50 @@ class Recorrido(Document):
 			frappe.throw(_("Un recorrido nuevo no puede tener fecha de inicio."), frappe.ValidationError)
 		if self.completed_on:
 			frappe.throw(_("Un recorrido nuevo no puede tener fecha de finalización."), frappe.ValidationError)
+		if self._is_regularization() or self.entrega_masiva:
+			# Entrega masiva -- only the service (private token) creates an
+			# administrative regularization route; never Desk/REST/the API.
+			from fabergray_erp import entrega_masiva_service
+
+			if not (self._is_regularization() and entrega_masiva_service.is_authorized(self) and self.entrega_masiva):
+				frappe.throw(
+					_("Los recorridos de regularización administrativa solo los crea el servicio de entrega masiva."),
+					frappe.PermissionError,
+				)
+
+	def _is_regularization(self):
+		from fabergray_erp import entrega_masiva_service
+
+		return self.route_kind == entrega_masiva_service.ROUTE_KIND_REGULARIZATION
+
+	def _validate_regularization_unchanged(self, before):
+		"""route_kind/entrega_masiva never change. A regularization route
+		accepts, without the service token, only what reconcile_recorrido_
+		status() does to every route (status -> Completado + completed_on);
+		any other edit (driver, notes, dates...) is refused."""
+		from fabergray_erp import entrega_masiva_service
+
+		for fieldname in ("route_kind", "entrega_masiva"):
+			if (self.get(fieldname) or None) != (before.get(fieldname) or None):
+				frappe.throw(
+					_("No se puede cambiar el tipo de recorrido ni su entrega masiva ({0}).").format(fieldname),
+					frappe.PermissionError,
+				)
+		if not self._is_regularization() or entrega_masiva_service.is_authorized(self):
+			return
+		allowed = {"status", "completed_on", "modified", "modified_by"}
+		for df in self.meta.fields:
+			if df.fieldname in allowed or df.fieldtype in ("Section Break", "Column Break", "Tab Break"):
+				continue
+			if (self.get(df.fieldname) or None) != (before.get(df.fieldname) or None):
+				frappe.throw(
+					_("Un recorrido de regularización administrativa no se puede modificar ({0}).").format(df.fieldname),
+					frappe.PermissionError,
+				)
+		if self.status != before.status and self.status != "Completado":
+			frappe.throw(
+				_("Un recorrido de regularización administrativa no se puede modificar (status)."), frappe.PermissionError
+			)
 
 	def _validate_company_unchanged(self, before):
 		if before.company and self.company != before.company:
@@ -96,7 +141,15 @@ class Recorrido(Document):
 			# keeping it out of module load avoids any import cycle.
 			from fabergray_erp.api.recorridos import _assert_route_ready_to_start
 
-			_assert_route_ready_to_start(self)
+			if self._is_regularization():
+				# Entrega masiva: no driver/coordinates exist for a delivery that
+				# already happened -- allowed only under the service token
+				# (checked in _validate_regularization_unchanged()), and still
+				# never without at least one stop.
+				if not frappe.db.exists("Recorrido Parada", {"recorrido": self.name}):
+					frappe.throw(_("El recorrido no tiene paradas."), frappe.ValidationError)
+			else:
+				_assert_route_ready_to_start(self)
 			if not self.started_on:
 				self.started_on = frappe.utils.now_datetime()
 

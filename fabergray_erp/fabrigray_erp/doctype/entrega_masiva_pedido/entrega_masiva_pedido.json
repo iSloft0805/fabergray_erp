@@ -1,0 +1,208 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "EMP-.YYYY.-.#######",
+ "creation": "2026-11-26 00:00:00.000000",
+ "description": "Resultado por pedido de una Entrega Masiva. Solo lo escribe fabergray_erp.entrega_masiva_service.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "entrega_masiva",
+  "pick_list",
+  "sales_order",
+  "commercial_name",
+  "customer",
+  "customer_name",
+  "column_break_invoice",
+  "invoice_date",
+  "invoice_payment_method",
+  "amount",
+  "effective_delivery_date",
+  "origin",
+  "origin_recorrido",
+  "stock_issue_warning",
+  "section_break_result",
+  "result",
+  "message",
+  "processed_on",
+  "column_break_result",
+  "recorrido",
+  "recorrido_parada",
+  "cartera_obligacion"
+ ],
+ "fields": [
+  {
+   "fieldname": "entrega_masiva",
+   "fieldtype": "Link",
+   "label": "Entrega masiva",
+   "read_only": 1,
+   "options": "Entrega Masiva",
+   "reqd": 1,
+   "search_index": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "pick_list",
+   "fieldtype": "Link",
+   "label": "Pick List",
+   "read_only": 1,
+   "options": "Pick List",
+   "reqd": 1,
+   "search_index": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "sales_order",
+   "fieldtype": "Link",
+   "label": "Pedido (Sales Order)",
+   "read_only": 1,
+   "options": "Sales Order"
+  },
+  {
+   "fieldname": "commercial_name",
+   "fieldtype": "Data",
+   "label": "Pedido",
+   "read_only": 1
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Cliente",
+   "read_only": 1,
+   "options": "Customer"
+  },
+  {
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "label": "Nombre del cliente",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_invoice",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "invoice_date",
+   "fieldtype": "Date",
+   "label": "Fecha de facturación",
+   "read_only": 1
+  },
+  {
+   "fieldname": "invoice_payment_method",
+   "fieldtype": "Data",
+   "label": "Forma de pago de la factura",
+   "read_only": 1
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "Valor facturado",
+   "read_only": 1
+  },
+  {
+   "fieldname": "effective_delivery_date",
+   "fieldtype": "Date",
+   "label": "Fecha efectiva de entrega",
+   "read_only": 1
+  },
+  {
+   "fieldname": "origin",
+   "fieldtype": "Select",
+   "label": "Origen",
+   "read_only": 1,
+   "options": "Sin recorrido\nRecorrido en ruta"
+  },
+  {
+   "fieldname": "origin_recorrido",
+   "fieldtype": "Link",
+   "label": "Recorrido en ruta de origen",
+   "read_only": 1,
+   "options": "Recorrido"
+  },
+  {
+   "fieldname": "stock_issue_warning",
+   "fieldtype": "Check",
+   "label": "Sin salida de inventario registrada",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_break_result",
+   "fieldtype": "Section Break",
+   "label": "Resultado"
+  },
+  {
+   "fieldname": "result",
+   "fieldtype": "Select",
+   "label": "Resultado",
+   "read_only": 1,
+   "options": "Pendiente\nEntregado\nOmitido\nFallido",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "message",
+   "fieldtype": "Small Text",
+   "label": "Detalle",
+   "read_only": 1
+  },
+  {
+   "fieldname": "processed_on",
+   "fieldtype": "Datetime",
+   "label": "Procesado el (hora real)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_result",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "recorrido",
+   "fieldtype": "Link",
+   "label": "Recorrido",
+   "read_only": 1,
+   "options": "Recorrido"
+  },
+  {
+   "fieldname": "recorrido_parada",
+   "fieldtype": "Link",
+   "label": "Parada",
+   "read_only": 1,
+   "options": "Recorrido Parada"
+  },
+  {
+   "fieldname": "cartera_obligacion",
+   "fieldtype": "Link",
+   "label": "Obligación de cartera",
+   "read_only": 1,
+   "options": "Cartera Obligacion"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-26 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Fabrigray ERP",
+ "name": "Entrega Masiva Pedido",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "write": 1,
+   "create": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "customer_name",
+ "track_changes": 1
+}

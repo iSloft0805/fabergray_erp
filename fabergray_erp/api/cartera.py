@@ -158,7 +158,8 @@ _LIST_FIELDS = """
 	o.invoice_amount, o.paid_amount, o.outstanding_amount, o.currency, o.amount_source,
 	o.status, o.payment_verification, o.credit_days, o.due_date,
 	o.delivery_date, o.delivered_on, o.driver_payment_status, o.has_delivery_issues,
-	o.invoice_payment_method, o.due_date_source, pl.fg_invoiced_on AS invoiced_on
+	o.invoice_payment_method, o.due_date_source, pl.fg_invoiced_on AS invoiced_on,
+	rp.delivery_mode AS delivery_mode
 """
 
 
@@ -274,6 +275,10 @@ def _serialize_obligation(row, today, bucket=None):
 		if due_date and due_date < today and flt(row.get("outstanding_amount")) > 0
 		else 0,
 		"immediate_payment": cartera_service.is_immediate_payment(row),
+		# Entrega masiva: a regularized delivery has a declared DAY only --
+		# its 00:00 time is never shown as a verified hour.
+		"delivery_mode": row.get("delivery_mode") or None,
+		"delivery_time_verified": row.get("delivery_mode") != "Regularización administrativa",
 		"terms_discrepancy": cartera_service.invoice_terms_discrepancy(row),
 	}
 
@@ -418,6 +423,7 @@ def get_obligations(filter="todos", search="", page=1, page_length=DEFAULT_PAGE_
 	source = (
 		"`tabCartera Obligacion` o LEFT JOIN `tabCustomer` c ON c.name = o.customer"
 		" LEFT JOIN `tabPick List` pl ON pl.name = o.pick_list"
+		" LEFT JOIN `tabRecorrido Parada` rp ON rp.name = o.recorrido_parada"
 	)
 
 	total = cint(frappe.db.sql(f"SELECT COUNT(*) FROM {source} WHERE {where}", params)[0][0])
@@ -459,6 +465,9 @@ def _detail_payload(doc):
 	row = doc.as_dict()
 	row["por_confirmar"] = _is_por_confirmar(doc.name)
 	row["invoiced_on"] = frappe.db.get_value("Pick List", doc.pick_list, "fg_invoiced_on") if doc.pick_list else None
+	row["delivery_mode"] = (
+		frappe.db.get_value("Recorrido Parada", doc.recorrido_parada, "delivery_mode") if doc.recorrido_parada else None
+	)
 	data = _serialize_obligation(row, today)
 	has_active_driver_payment = bool(
 		frappe.db.exists(

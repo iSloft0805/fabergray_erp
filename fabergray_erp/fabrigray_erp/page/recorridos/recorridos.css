@@ -2478,3 +2478,440 @@
 		grid-template-columns: repeat(3, 1fr);
 	}
 }
+
+/* =====================================================================
+   Entrega masiva de pedidos (System Manager). The modal renders outside
+   .fg-recorridos (frappe.ui.Dialog), so its rules are scoped to
+   .fg-em-dialog; the launcher bar lives inside the page.
+   ===================================================================== */
+.fg-recorridos .fg-em-bar {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	flex-wrap: wrap;
+	margin-bottom: 16px;
+}
+
+.fg-recorridos .fg-btn.fg-em-open-btn,
+.fg-em-dialog .fg-btn.fg-em-confirm-btn {
+	background: var(--fg-success-dark, #1f9c46);
+	border: 1px solid var(--fg-success-dark, #1f9c46);
+	color: #ffffff;
+	font-weight: 700;
+}
+
+.fg-recorridos .fg-btn.fg-em-open-btn:hover,
+.fg-em-dialog .fg-btn.fg-em-confirm-btn:hover:not(:disabled) {
+	background: #17803a;
+	color: #ffffff;
+}
+
+.fg-em-dialog .fg-btn.fg-em-confirm-btn:disabled {
+	background: #c8d1cc;
+	border-color: #c8d1cc;
+	color: #ffffff;
+	opacity: 1;
+	cursor: not-allowed;
+}
+
+.fg-recorridos .fg-em-bar-hint {
+	font-size: 0.82rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-recorridos .fg-em-route-badge,
+.fg-em-dialog .fg-em-tag {
+	display: inline-block;
+	padding: 1px 8px;
+	border-radius: 999px;
+	background: #eef2f6;
+	color: #475467;
+	font-size: 0.7rem;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	vertical-align: middle;
+}
+
+.fg-em-dialog .fg-em-title {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	font-weight: 700;
+}
+
+.fg-em-dialog .fg-em-title .fg-icon {
+	width: 22px;
+	height: 22px;
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+.fg-em-dialog .fg-icon {
+	width: 18px;
+	height: 18px;
+	stroke: currentColor;
+	fill: none;
+	flex-shrink: 0;
+	vertical-align: middle;
+}
+
+.fg-em-dialog .fg-icon-sm {
+	width: 15px;
+	height: 15px;
+}
+
+.fg-em-dialog .fg-spin {
+	animation: fg-em-spin 1s linear infinite;
+}
+
+@keyframes fg-em-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.fg-em-dialog .fg-em {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	font-size: 0.9rem;
+	color: var(--fg-text, #101828);
+}
+
+.fg-em-dialog .fg-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	min-height: 38px;
+	padding: 0 16px;
+	border-radius: 10px;
+	border: 1px solid var(--fg-border, #d0d5dd);
+	background: #ffffff;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.fg-em-dialog .fg-btn:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.fg-em-dialog .fg-em-criteria,
+.fg-em-dialog .fg-em-irreversible {
+	display: flex;
+	gap: 8px;
+	align-items: flex-start;
+	padding: 10px 12px;
+	border-radius: 10px;
+	background: var(--fg-primary-tint, #eaf2fd);
+	color: var(--fg-primary-dark, #1e63c4);
+	font-size: 0.84rem;
+}
+
+.fg-em-dialog .fg-em-irreversible {
+	background: #fff4e5;
+	color: #93370d;
+}
+
+.fg-em-dialog .fg-em-filters {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 12px;
+}
+
+.fg-em-dialog .fg-em-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin: 0;
+	font-weight: 600;
+	font-size: 0.82rem;
+}
+
+.fg-em-dialog input[type="date"],
+.fg-em-dialog textarea {
+	min-height: 38px;
+	padding: 6px 10px;
+	border: 1.5px solid var(--fg-border, #d0d5dd);
+	border-radius: 10px;
+	background: #ffffff;
+	font-size: 0.9rem;
+	font-weight: 500;
+}
+
+.fg-em-dialog .fg-em-mode {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 12px;
+	border: 1px solid var(--fg-border, #e4e7ec);
+	border-radius: 12px;
+	background: var(--fg-bg, #f8fafc);
+}
+
+.fg-em-dialog .fg-em-mode input[type="date"] {
+	max-width: 240px;
+	margin-left: 24px;
+}
+
+.fg-em-dialog .fg-em-label {
+	font-weight: 700;
+	font-size: 0.84rem;
+}
+
+.fg-em-dialog .fg-em-radio,
+.fg-em-dialog .fg-em-check {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	margin: 0;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.fg-em-dialog .fg-em-check--warn {
+	color: #93370d;
+	font-weight: 600;
+}
+
+.fg-em-dialog .fg-em-search-btn {
+	align-self: stretch;
+}
+
+.fg-em-dialog .fg-em-kpis {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 10px;
+}
+
+.fg-em-dialog .fg-em-kpi {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 10px 12px;
+	border-radius: 12px;
+	background: var(--fg-primary-tint, #eaf2fd);
+}
+
+.fg-em-dialog .fg-em-kpi span {
+	font-size: 0.75rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-em-dialog .fg-em-kpi strong {
+	font-size: 1.15rem;
+}
+
+.fg-em-dialog .fg-em-kpi--ok {
+	background: var(--fg-success-tint, #e9f9ee);
+}
+
+.fg-em-dialog .fg-em-kpi--muted {
+	background: #f2f4f7;
+}
+
+.fg-em-dialog .fg-em-kpi--fail {
+	background: #fee4e2;
+}
+
+.fg-em-dialog .fg-em-warning {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+	font-size: 0.82rem;
+	color: #93370d;
+}
+
+.fg-em-dialog .fg-em-tabs {
+	display: flex;
+	gap: 8px;
+}
+
+.fg-em-dialog .fg-em-tab {
+	padding: 6px 14px;
+	border: 1px solid var(--fg-border, #d0d5dd);
+	border-radius: 999px;
+	background: #ffffff;
+	font-weight: 600;
+	font-size: 0.82rem;
+	cursor: pointer;
+}
+
+.fg-em-dialog .fg-em-tab.is-active {
+	border-color: var(--fg-success-dark, #1f9c46);
+	background: var(--fg-success-dark, #1f9c46);
+	color: #ffffff;
+}
+
+.fg-em-dialog .fg-em-reasons {
+	margin: 0;
+	padding-left: 18px;
+	font-size: 0.84rem;
+}
+
+.fg-em-dialog .fg-em-tag--review,
+.fg-em-dialog .fg-em-tag--fail {
+	background: #fee4e2;
+	color: #b42318;
+}
+
+.fg-em-dialog .fg-em-select-all-row,
+.fg-em-dialog .fg-em-muted {
+	font-size: 0.78rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-em-dialog .fg-em-table-wrap {
+	overflow-x: auto;
+	border: 1px solid var(--fg-border, #e4e7ec);
+	border-radius: 12px;
+}
+
+.fg-em-dialog .fg-em-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.84rem;
+}
+
+.fg-em-dialog .fg-em-table th {
+	position: sticky;
+	top: 0;
+	padding: 8px 10px;
+	background: #f2f4f7;
+	text-align: left;
+	font-size: 0.75rem;
+	text-transform: uppercase;
+	color: #475467;
+}
+
+.fg-em-dialog .fg-em-table td {
+	padding: 8px 10px;
+	border-top: 1px solid #eaecf0;
+	vertical-align: top;
+}
+
+.fg-em-dialog .fg-em-num {
+	text-align: right;
+	white-space: nowrap;
+}
+
+.fg-em-dialog .fg-em-empty {
+	text-align: center;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-em-dialog .fg-em-warn-icon {
+	color: #b54708;
+}
+
+.fg-em-dialog .fg-em-pager {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 10px;
+	font-size: 0.84rem;
+}
+
+.fg-em-dialog .fg-em-pager .fg-btn {
+	min-height: 32px;
+	padding: 0 10px;
+}
+
+.fg-em-dialog .fg-em-confirm-box {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 14px;
+	border: 1px solid var(--fg-border, #e4e7ec);
+	border-radius: 12px;
+}
+
+.fg-em-dialog .fg-em-progress {
+	gap: 16px;
+}
+
+.fg-em-dialog .fg-em-running,
+.fg-em-dialog .fg-em-done {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 700;
+}
+
+.fg-em-dialog .fg-em-done {
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+.fg-em-dialog .fg-em-done.has-errors {
+	color: #b54708;
+}
+
+.fg-em-dialog .fg-em-bar-track {
+	position: relative;
+	height: 22px;
+	border-radius: 999px;
+	background: #eaecf0;
+	overflow: hidden;
+}
+
+.fg-em-dialog .fg-em-bar-fill {
+	height: 100%;
+	background: var(--fg-success-dark, #1f9c46);
+	transition: width 0.4s ease;
+}
+
+.fg-em-dialog .fg-em-bar-track span {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 0.78rem;
+	font-weight: 700;
+}
+
+.fg-em-dialog .fg-em-meta {
+	font-size: 0.84rem;
+	color: #475467;
+}
+
+.fg-em-dialog .fg-em-actions {
+	display: flex;
+	gap: 10px;
+	justify-content: flex-end;
+	flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+	.fg-em-dialog .fg-em-filters,
+	.fg-em-dialog .fg-em-kpis {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.fg-em-dialog .fg-em-mode input[type="date"] {
+		margin-left: 0;
+		max-width: none;
+	}
+}
+
+/* Mobile: the table scrolls inside its own wrapper instead of widening the
+   modal (flex children default to min-width:auto). */
+.fg-em-dialog .fg-em > * {
+	min-width: 0;
+	max-width: 100%;
+}
+
+.fg-em-dialog .fg-em-table {
+	min-width: 680px;
+}
+
+.fg-em-dialog .modal-dialog {
+	max-width: min(1140px, calc(100vw - 16px));
+}
+
+.fg-em-dialog .modal-content,
+.fg-em-dialog .modal-body,
+.fg-em-dialog .fg-em {
+	min-width: 0;
+	max-width: 100%;
+}

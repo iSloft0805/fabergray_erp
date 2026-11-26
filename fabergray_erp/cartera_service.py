@@ -306,9 +306,11 @@ def invoice_due_terms(invoice, delivery_date, driver_payment_status):
 	"""(invoice_payment_method, credit_days, due_date, due_date_source) of a
 	NEW obligation.
 
-	- Invoice with payment method + due date: due_date is the invoice's own
-	  date, copied exactly; credit_days counts from the effective invoicing
-	  date (fg_invoiced_on, site time zone) -- the same basis as the PDF.
+	- Invoice with an explicit due date (whatever its payment method, even
+	  none): due_date is the invoice's own date, copied exactly -- never
+	  replaced by the invoice date; credit_days counts from the effective
+	  invoicing date (fg_invoiced_on, site time zone) -- the same basis as
+	  the PDF.
 	  The delivery date and the driver's report play no part: a delivery
 	  made after the due date is simply already overdue.
 	- Otherwise (Pick List invoiced before the feature): the previous rule,
@@ -316,7 +318,7 @@ def invoice_due_terms(invoice, delivery_date, driver_payment_status):
 	  no due date."""
 	method = invoice.get("fg_invoice_payment_method") or None
 	due = invoice.get("fg_invoice_due_date")
-	if method and due:
+	if due:
 		due = getdate(due)
 		invoiced_on = invoice.get("fg_invoiced_on")
 		billing_date = getdate(invoiced_on) if invoiced_on else due
