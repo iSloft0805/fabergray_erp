@@ -92,6 +92,28 @@ class CarteraObligacion(Document):
 			frappe.throw(_("El rechazo requiere un motivo."), frappe.ValidationError)
 		if new == cartera_service.VERIFICATION_CONFIRMED and reason:
 			frappe.throw(_("Una confirmación no lleva motivo de rechazo."), frappe.ValidationError)
+		self._validate_verified_batch(new)
+
+	def _validate_verified_batch(self, new):
+		"""Cartera masiva: payment_verified_batch only accompanies a
+		"Confirmado" made inside a RUNNING authorization batch of this same
+		company (the service sets it; its token is already required for the
+		transition itself)."""
+		batch = self.get("payment_verified_batch")
+		if not batch:
+			return
+		from fabergray_erp import cartera_masiva_service
+
+		if new != cartera_service.VERIFICATION_CONFIRMED:
+			frappe.throw(_("Solo una confirmación puede registrar un lote de autorización."), frappe.ValidationError)
+		row = frappe.db.get_value("Cartera Lote", batch, ["status", "mode", "company"], as_dict=True)
+		if (
+			not row
+			or row.mode != cartera_masiva_service.MODE_AUTHORIZATION
+			or row.status != cartera_masiva_service.STATUS_RUNNING
+			or row.company != self.company
+		):
+			frappe.throw(_("El lote de autorización no es válido para esta obligación."), frappe.ValidationError)
 
 	def after_insert(self):
 		# Decision V2: driver reported "Pagado" with a proof -> a Conductor

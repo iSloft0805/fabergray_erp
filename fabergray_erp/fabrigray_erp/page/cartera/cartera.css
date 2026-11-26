@@ -894,3 +894,608 @@
 .fg-cartera .fg-cartera-overdue {
 	color: var(--fg-danger, #d92d20);
 }
+
+/* =====================================================================
+   Cartera masiva -- "Autorizar cobros y pagos" (System Manager). Same
+   visual language as Recorridos' bulk delivery (.fg-em-*). The modal
+   renders outside .fg-cartera (frappe.ui.Dialog), so its rules are scoped
+   to .fg-cm-dialog; the green launcher lives in the section head.
+   ===================================================================== */
+.fg-cartera .fg-btn.fg-cm-open-btn,
+.fg-cm-dialog .fg-btn.fg-cm-confirm-btn {
+	background: var(--fg-success-dark, #1f9c46);
+	border: 1px solid var(--fg-success-dark, #1f9c46);
+	color: #ffffff;
+	font-weight: 700;
+}
+
+.fg-cartera .fg-btn.fg-cm-open-btn:hover,
+.fg-cm-dialog .fg-btn.fg-cm-confirm-btn:hover:not(:disabled) {
+	background: #17803a;
+	color: #ffffff;
+}
+
+.fg-cm-dialog .fg-btn.fg-cm-confirm-btn:disabled {
+	background: #c8d1cc;
+	border-color: #c8d1cc;
+	color: #ffffff;
+	opacity: 1;
+	cursor: not-allowed;
+}
+
+.fg-cm-dialog .fg-cm-tag {
+	display: inline-block;
+	padding: 1px 8px;
+	border-radius: 999px;
+	background: #eef2f6;
+	color: #475467;
+	font-size: 0.7rem;
+	font-weight: 700;
+	letter-spacing: 0.02em;
+	vertical-align: middle;
+}
+
+.fg-cm-dialog .fg-cm-title {
+	display: inline-flex;
+	align-items: center;
+	gap: 10px;
+	font-weight: 700;
+}
+
+.fg-cm-dialog .fg-cm-title .fg-icon {
+	width: 22px;
+	height: 22px;
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+.fg-cm-dialog .fg-icon {
+	width: 18px;
+	height: 18px;
+	stroke: currentColor;
+	fill: none;
+	flex-shrink: 0;
+	vertical-align: middle;
+}
+
+.fg-cm-dialog .fg-icon-sm {
+	width: 15px;
+	height: 15px;
+}
+
+.fg-cm-dialog .fg-spin {
+	animation: fg-cm-spin 1s linear infinite;
+}
+
+@keyframes fg-cm-spin {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+.fg-cm-dialog .fg-cm {
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+	font-size: 0.9rem;
+	color: var(--fg-text, #101828);
+}
+
+.fg-cm-dialog .fg-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 6px;
+	min-height: 38px;
+	padding: 0 16px;
+	border-radius: 10px;
+	border: 1px solid var(--fg-border, #d0d5dd);
+	background: #ffffff;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.fg-cm-dialog .fg-btn:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.fg-cm-dialog .fg-cm-criteria,
+.fg-cm-dialog .fg-cm-irreversible {
+	display: flex;
+	gap: 8px;
+	align-items: flex-start;
+	padding: 10px 12px;
+	border-radius: 10px;
+	background: var(--fg-primary-tint, #eaf2fd);
+	color: var(--fg-primary-dark, #1e63c4);
+	font-size: 0.84rem;
+}
+
+.fg-cm-dialog .fg-cm-irreversible {
+	background: #fff4e5;
+	color: #93370d;
+}
+
+.fg-cm-dialog .fg-cm-filters {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 12px;
+}
+
+.fg-cm-dialog .fg-cm-field {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin: 0;
+	font-weight: 600;
+	font-size: 0.82rem;
+}
+
+.fg-cm-dialog input[type="date"],
+.fg-cm-dialog textarea {
+	min-height: 38px;
+	padding: 6px 10px;
+	border: 1.5px solid var(--fg-border, #d0d5dd);
+	border-radius: 10px;
+	background: #ffffff;
+	font-size: 0.9rem;
+	font-weight: 500;
+}
+
+.fg-cm-dialog .fg-cm-mode {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 12px;
+	border: 1px solid var(--fg-border, #e4e7ec);
+	border-radius: 12px;
+	background: var(--fg-bg, #f8fafc);
+}
+
+.fg-cm-dialog .fg-cm-mode input[type="date"] {
+	max-width: 240px;
+	margin-left: 24px;
+}
+
+.fg-cm-dialog .fg-cm-label {
+	font-weight: 700;
+	font-size: 0.84rem;
+}
+
+.fg-cm-dialog .fg-cm-radio,
+.fg-cm-dialog .fg-cm-check {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	margin: 0;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.fg-cm-dialog .fg-cm-check--warn {
+	color: #93370d;
+	font-weight: 600;
+}
+
+.fg-cm-dialog .fg-cm-search-btn {
+	align-self: stretch;
+}
+
+.fg-cm-dialog .fg-cm-kpis {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	gap: 10px;
+}
+
+.fg-cm-dialog .fg-cm-kpi {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	padding: 10px 12px;
+	border-radius: 12px;
+	background: var(--fg-primary-tint, #eaf2fd);
+}
+
+.fg-cm-dialog .fg-cm-kpi span {
+	font-size: 0.75rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-cm-dialog .fg-cm-kpi strong {
+	font-size: 1.15rem;
+}
+
+.fg-cm-dialog .fg-cm-kpi--ok {
+	background: var(--fg-success-tint, #e9f9ee);
+}
+
+.fg-cm-dialog .fg-cm-kpi--muted {
+	background: #f2f4f7;
+}
+
+.fg-cm-dialog .fg-cm-kpi--fail {
+	background: #fee4e2;
+}
+
+.fg-cm-dialog .fg-cm-warning {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+	font-size: 0.82rem;
+	color: #93370d;
+}
+
+.fg-cm-dialog .fg-cm-tabs {
+	display: flex;
+	gap: 8px;
+}
+
+.fg-cm-dialog .fg-cm-tab {
+	padding: 6px 14px;
+	border: 1px solid var(--fg-border, #d0d5dd);
+	border-radius: 999px;
+	background: #ffffff;
+	font-weight: 600;
+	font-size: 0.82rem;
+	cursor: pointer;
+}
+
+.fg-cm-dialog .fg-cm-tab.is-active {
+	border-color: var(--fg-success-dark, #1f9c46);
+	background: var(--fg-success-dark, #1f9c46);
+	color: #ffffff;
+}
+
+.fg-cm-dialog .fg-cm-reasons {
+	margin: 0;
+	padding-left: 18px;
+	font-size: 0.84rem;
+}
+
+.fg-cm-dialog .fg-cm-tag--review,
+.fg-cm-dialog .fg-cm-tag--fail {
+	background: #fee4e2;
+	color: #b42318;
+}
+
+.fg-cm-dialog .fg-cm-select-all-row,
+.fg-cm-dialog .fg-cm-muted {
+	font-size: 0.78rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-cm-dialog .fg-cm-table-wrap {
+	overflow-x: auto;
+	border: 1px solid var(--fg-border, #e4e7ec);
+	border-radius: 12px;
+}
+
+.fg-cm-dialog .fg-cm-table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.84rem;
+}
+
+.fg-cm-dialog .fg-cm-table th {
+	position: sticky;
+	top: 0;
+	padding: 8px 10px;
+	background: #f2f4f7;
+	text-align: left;
+	font-size: 0.75rem;
+	text-transform: uppercase;
+	color: #475467;
+}
+
+.fg-cm-dialog .fg-cm-table td {
+	padding: 8px 10px;
+	border-top: 1px solid #eaecf0;
+	vertical-align: top;
+}
+
+.fg-cm-dialog .fg-cm-num {
+	text-align: right;
+}
+
+.fg-cm-dialog .fg-cm-empty {
+	text-align: center;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-cm-dialog .fg-cm-warn-icon {
+	color: #b54708;
+}
+
+.fg-cm-dialog .fg-cm-pager {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 10px;
+	font-size: 0.84rem;
+}
+
+.fg-cm-dialog .fg-cm-pager .fg-btn {
+	min-height: 32px;
+	padding: 0 10px;
+}
+
+.fg-cm-dialog .fg-cm-confirm-box {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	padding: 14px;
+	border: 1px solid var(--fg-border, #e4e7ec);
+	border-radius: 12px;
+}
+
+.fg-cm-dialog .fg-cm-progress {
+	gap: 16px;
+}
+
+.fg-cm-dialog .fg-cm-running,
+.fg-cm-dialog .fg-cm-done {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-weight: 700;
+}
+
+.fg-cm-dialog .fg-cm-done {
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+.fg-cm-dialog .fg-cm-done.has-errors {
+	color: #b54708;
+}
+
+.fg-cm-dialog .fg-cm-bar-track {
+	position: relative;
+	height: 22px;
+	border-radius: 999px;
+	background: #eaecf0;
+	overflow: hidden;
+}
+
+.fg-cm-dialog .fg-cm-bar-fill {
+	height: 100%;
+	background: var(--fg-success-dark, #1f9c46);
+	transition: width 0.4s ease;
+}
+
+.fg-cm-dialog .fg-cm-bar-track span {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 0.78rem;
+	font-weight: 700;
+}
+
+.fg-cm-dialog .fg-cm-meta {
+	font-size: 0.84rem;
+	color: #475467;
+}
+
+.fg-cm-dialog .fg-cm-actions {
+	display: flex;
+	gap: 10px;
+	justify-content: flex-end;
+	flex-wrap: wrap;
+}
+
+@media (max-width: 640px) {
+	.fg-cm-dialog .fg-cm-filters,
+	.fg-cm-dialog .fg-cm-kpis {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+
+	.fg-cm-dialog .fg-cm-mode input[type="date"] {
+		margin-left: 0;
+		max-width: none;
+	}
+}
+
+/* Mobile: nothing widens the modal (flex children default to
+   min-width:auto); tables scroll inside their own wrapper. */
+.fg-cm-dialog .fg-cm > * {
+	min-width: 0;
+	max-width: 100%;
+}
+
+.fg-cm-dialog .modal-dialog {
+	max-width: min(1140px, calc(100vw - 16px));
+}
+
+.fg-cm-dialog .modal-content,
+.fg-cm-dialog .modal-body,
+.fg-cm-dialog .fg-cm {
+	min-width: 0;
+	max-width: 100%;
+}
+
+/* -- Cartera masiva: extras over the bulk-delivery look ----------------- */
+.fg-cartera .fg-section-head .fg-cm-head-actions {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.fg-cm-dialog select,
+.fg-cm-dialog input[type="search"],
+.fg-cm-dialog input[type="text"] {
+	min-height: 38px;
+	padding: 6px 10px;
+	border: 1.5px solid var(--fg-border, #d0d5dd);
+	border-radius: 10px;
+	background: #ffffff;
+	font-size: 0.9rem;
+	font-weight: 500;
+}
+
+.fg-cm-dialog .fg-cm-filters {
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.fg-cm-dialog .fg-cm-filters .fg-cm-field--wide {
+	grid-column: 1 / -1;
+}
+
+.fg-cm-dialog .fg-cm-modes {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	padding-bottom: 4px;
+	border-bottom: 1px solid var(--fg-border, #e4e7ec);
+}
+
+.fg-cm-dialog .fg-cm-mode-btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 8px 14px;
+	border: 1px solid var(--fg-border, #d0d5dd);
+	border-radius: 10px;
+	background: #ffffff;
+	font-weight: 700;
+	font-size: 0.86rem;
+	cursor: pointer;
+}
+
+.fg-cm-dialog .fg-cm-mode-btn.is-active {
+	border-color: var(--fg-success-dark, #1f9c46);
+	background: var(--fg-success-tint, #e9f9ee);
+	color: var(--fg-success-dark, #1f9c46);
+}
+
+.fg-cm-dialog .fg-cm-mode-btn:disabled {
+	color: #98a2b3;
+	background: #f9fafb;
+	cursor: not-allowed;
+}
+
+.fg-cm-dialog .fg-cm-soon {
+	padding: 1px 8px;
+	border-radius: 999px;
+	background: #fef0c7;
+	color: #93370d;
+	font-size: 0.68rem;
+	font-weight: 700;
+}
+
+.fg-cm-dialog .fg-cm-customers {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	position: relative;
+}
+
+.fg-cm-dialog .fg-cm-chips {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.fg-cm-dialog .fg-cm-chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 3px 6px 3px 10px;
+	border-radius: 999px;
+	background: var(--fg-primary-tint, #eaf2fd);
+	color: var(--fg-primary-dark, #1e63c4);
+	font-size: 0.8rem;
+	font-weight: 600;
+}
+
+.fg-cm-dialog .fg-cm-chip button {
+	border: 0;
+	background: transparent;
+	color: inherit;
+	cursor: pointer;
+	padding: 0 2px;
+}
+
+.fg-cm-dialog .fg-cm-suggestions {
+	position: absolute;
+	top: 100%;
+	left: 0;
+	right: 0;
+	z-index: 5;
+	max-height: 220px;
+	overflow-y: auto;
+	margin-top: 2px;
+	border: 1px solid var(--fg-border, #d0d5dd);
+	border-radius: 10px;
+	background: #ffffff;
+	box-shadow: 0 8px 20px rgba(16, 24, 40, 0.12);
+}
+
+.fg-cm-dialog .fg-cm-suggestion {
+	display: flex;
+	justify-content: space-between;
+	gap: 10px;
+	width: 100%;
+	padding: 8px 12px;
+	border: 0;
+	background: transparent;
+	text-align: left;
+	font-size: 0.85rem;
+	cursor: pointer;
+}
+
+.fg-cm-dialog .fg-cm-suggestion:hover {
+	background: #f2f4f7;
+}
+
+.fg-cm-dialog .fg-cm-by-customer {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	padding: 12px;
+	border: 1px solid var(--fg-border, #e4e7ec);
+	border-radius: 12px;
+	background: var(--fg-bg, #f8fafc);
+}
+
+.fg-cm-dialog .fg-cm-by-customer .fg-cm-table {
+	min-width: 0;
+}
+
+.fg-cm-dialog .fg-cm-by-customer .fg-cm-table-wrap {
+	max-height: 220px;
+	overflow-y: auto;
+	background: #ffffff;
+}
+
+.fg-cm-dialog .fg-cm-total-row td {
+	font-weight: 700;
+	background: #f9fafb;
+}
+
+.fg-cm-dialog .fg-cm-history-row {
+	cursor: pointer;
+}
+
+.fg-cm-dialog .fg-cm-history-row:hover td {
+	background: #f9fafb;
+}
+
+@media (max-width: 640px) {
+	.fg-cm-dialog .fg-cm-filters {
+		grid-template-columns: repeat(1, minmax(0, 1fr));
+	}
+}
+
+/* Readable columns: each cell keeps a modest minimum, so on a phone the
+   table scrolls inside .fg-cm-table-wrap instead of squeezing ids/dates. */
+.fg-cm-dialog .fg-cm-table th,
+.fg-cm-dialog .fg-cm-table td {
+	min-width: 96px;
+}
+
+.fg-cm-dialog .fg-cm-table th:has(input),
+.fg-cm-dialog .fg-cm-table td:has(input) {
+	min-width: 0;
+}

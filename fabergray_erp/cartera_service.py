@@ -68,6 +68,11 @@ VERIFICATION_FIELDS = (
 	"payment_verified_by",
 	"payment_verified_on",
 	"payment_rejection_reason",
+	# Cartera masiva (autorización de cobros): the batch that confirmed the
+	# report -- set ONLY together with a "Confirmado" transition made by
+	# cartera_masiva_service; empty for individual confirmations, for
+	# rejections and for every obligation verified before this field existed.
+	"payment_verified_batch",
 )
 
 AMOUNT_SOURCE_INVOICE = "Factura comercial"
@@ -299,6 +304,7 @@ def derive_obligation_values(recorrido_parada):
 		"payment_verified_by": None,
 		"payment_verified_on": None,
 		"payment_rejection_reason": None,
+		"payment_verified_batch": None,
 	}
 
 
@@ -888,10 +894,16 @@ def _save_verification(obligation):
 	obligation.save(ignore_permissions=True)
 
 
-def confirm_driver_payment(obligation_name):
+def confirm_driver_payment(obligation_name, batch=None):
 	"""CONFIRMAR PAGO: the driver-reported payment is real. Only the
 	verification changes (who/when); no payment is created or touched and
-	the balance stays 0."""
+	the balance stays 0.
+
+	`batch`: only cartera_masiva_service passes it -- the Cartera Lote that
+	authorizes this report (stored in payment_verified_batch, re-checked by
+	the controller: the batch must be a running authorization batch of the
+	same company). Same checks, same lock, same single transition; it never
+	commits, so the caller's savepoint/transaction stays in control."""
 	obligation = locked_obligation(obligation_name)
 
 	if obligation.payment_verification == VERIFICATION_CONFIRMED:
@@ -921,6 +933,7 @@ def confirm_driver_payment(obligation_name):
 	obligation.payment_verified_by = frappe.session.user
 	obligation.payment_verified_on = now_datetime()
 	obligation.payment_rejection_reason = None
+	obligation.payment_verified_batch = batch or None
 	_save_verification(obligation)
 	return {"already_done": False}
 

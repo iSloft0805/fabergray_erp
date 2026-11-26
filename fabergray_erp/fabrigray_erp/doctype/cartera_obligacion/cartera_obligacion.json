@@ -30,6 +30,7 @@
   "payment_verification",
   "payment_verified_by",
   "payment_verified_on",
+  "payment_verified_batch",
   "payment_rejection_reason",
   "column_break_credit",
   "credit_days",
@@ -216,6 +217,16 @@
    "no_copy": 1
   },
   {
+   "fieldname": "payment_verified_batch",
+   "fieldtype": "Link",
+   "label": "Autorizado en lote",
+   "options": "Cartera Lote",
+   "read_only": 1,
+   "no_copy": 1,
+   "description": "Lote de autorización masiva que confirmó el pago del conductor. Vacío en las confirmaciones individuales y en los registros anteriores.",
+   "depends_on": "eval:doc.payment_verified_batch"
+  },
+  {
    "fieldname": "payment_rejection_reason",
    "fieldtype": "Small Text",
    "label": "Motivo del rechazo",
@@ -342,7 +353,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 0,
  "links": [],
- "modified": "2026-11-25 18:00:00.000000",
+ "modified": "2026-11-26 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Fabrigray ERP",
  "name": "Cartera Obligacion",

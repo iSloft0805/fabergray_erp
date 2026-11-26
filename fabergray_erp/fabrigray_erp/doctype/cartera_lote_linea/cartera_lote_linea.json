@@ -1,0 +1,175 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "CLL-.YYYY.-.#######",
+ "creation": "2026-11-26 12:00:00.000000",
+ "description": "Resultado por obligación de un Cartera Lote. Solo lo escribe fabergray_erp.cartera_masiva_service.",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "cartera_lote",
+  "cartera_obligacion",
+  "driver_payment",
+  "result",
+  "message",
+  "processed_on",
+  "column_break_customer",
+  "customer",
+  "customer_name",
+  "commercial_name",
+  "pick_list",
+  "invoice_issuer",
+  "invoice_payment_method",
+  "currency",
+  "amount",
+  "outstanding_before",
+  "outstanding_after"
+ ],
+ "fields": [
+  {
+   "fieldname": "cartera_lote",
+   "fieldtype": "Link",
+   "label": "Lote",
+   "read_only": 1,
+   "options": "Cartera Lote",
+   "reqd": 1,
+   "search_index": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "cartera_obligacion",
+   "fieldtype": "Link",
+   "label": "Obligación",
+   "read_only": 1,
+   "options": "Cartera Obligacion",
+   "reqd": 1,
+   "search_index": 1,
+   "in_list_view": 1
+  },
+  {
+   "fieldname": "driver_payment",
+   "fieldtype": "Link",
+   "label": "Pago del conductor",
+   "read_only": 1,
+   "options": "Cartera Pago"
+  },
+  {
+   "fieldname": "result",
+   "fieldtype": "Select",
+   "label": "Resultado",
+   "read_only": 1,
+   "options": "Pendiente\nAutorizado\nOmitido\nFallido",
+   "reqd": 1,
+   "in_list_view": 1,
+   "in_standard_filter": 1
+  },
+  {
+   "fieldname": "message",
+   "fieldtype": "Small Text",
+   "label": "Detalle",
+   "read_only": 1
+  },
+  {
+   "fieldname": "processed_on",
+   "fieldtype": "Datetime",
+   "label": "Procesado (hora real)",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_customer",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "customer",
+   "fieldtype": "Link",
+   "label": "Cliente",
+   "read_only": 1,
+   "options": "Customer"
+  },
+  {
+   "fieldname": "customer_name",
+   "fieldtype": "Data",
+   "label": "Nombre del cliente",
+   "read_only": 1
+  },
+  {
+   "fieldname": "commercial_name",
+   "fieldtype": "Data",
+   "label": "Pedido",
+   "read_only": 1
+  },
+  {
+   "fieldname": "pick_list",
+   "fieldtype": "Link",
+   "label": "Pick List",
+   "read_only": 1,
+   "options": "Pick List"
+  },
+  {
+   "fieldname": "invoice_issuer",
+   "fieldtype": "Data",
+   "label": "Emisor",
+   "read_only": 1
+  },
+  {
+   "fieldname": "invoice_payment_method",
+   "fieldtype": "Data",
+   "label": "Forma de pago de la factura",
+   "read_only": 1
+  },
+  {
+   "fieldname": "currency",
+   "fieldtype": "Link",
+   "label": "Moneda",
+   "read_only": 1,
+   "options": "Currency"
+  },
+  {
+   "fieldname": "amount",
+   "fieldtype": "Currency",
+   "label": "Valor del pago reportado",
+   "read_only": 1,
+   "options": "currency"
+  },
+  {
+   "fieldname": "outstanding_before",
+   "fieldtype": "Currency",
+   "label": "Saldo antes",
+   "read_only": 1,
+   "options": "currency"
+  },
+  {
+   "fieldname": "outstanding_after",
+   "fieldtype": "Currency",
+   "label": "Saldo después",
+   "read_only": 1,
+   "options": "currency"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-11-26 12:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Fabrigray ERP",
+ "name": "Cartera Lote Linea",
+ "naming_rule": "Expression",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "role": "System Manager",
+   "read": 1,
+   "report": 1,
+   "export": 1,
+   "print": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "cartera_obligacion",
+ "track_changes": 1
+}

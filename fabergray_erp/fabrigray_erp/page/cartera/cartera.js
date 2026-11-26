@@ -194,7 +194,7 @@ fabergray_erp.Cartera = class Cartera {
 			<div class="fg-cartera-kpis-slot">${this.render_kpis_html()}</div>
 			<div class="fg-section-head">
 				<div class="fg-section-title">${__("Obligaciones")}</div>
-				${this.render_sync_button_html()}
+				<div class="fg-cm-head-actions">${this.render_bulk_button_html()}${this.render_sync_button_html()}</div>
 			</div>
 			${render_search_bar_html(this.list_search)}
 			<div class="fg-cartera-chips">${this.render_chips_html()}</div>
@@ -380,6 +380,7 @@ fabergray_erp.Cartera = class Cartera {
 		});
 
 		$b.find(".fg-cartera-sync-btn").on("click", () => this.sync());
+		$b.find(".fg-cm-open-btn").on("click", () => this.open_bulk_dialog());
 	}
 
 	reload_kpis() {
@@ -410,6 +411,684 @@ fabergray_erp.Cartera = class Cartera {
 				this.syncing = false;
 				this.$body.find(".fg-cartera-sync-btn").prop("disabled", false);
 			});
+	}
+
+	// =====================================================================
+	// Cartera masiva -- "Autorizar cobros y pagos" (System Manager),
+	// api/cartera_masiva.py. Fase A: autoriza (CONFIRMAR PAGO) los pagos
+	// que el conductor ya registró con comprobante; nunca crea un pago ni
+	// cambia un valor. "Registrar pagos" queda deshabilitado (Próximamente).
+	// Toda regla vive en el servidor (elegibilidad, filtros, permisos,
+	// revalidación bajo bloqueo, idempotencia); aquí solo se recogen los
+	// filtros, se muestra la vista previa del servidor y se sigue el
+	// progreso del lote. Los totales de la selección se suman en CENTAVOS
+	// enteros (índice exacto del servidor), nunca con decimales flotantes.
+	// =====================================================================
+	render_bulk_button_html() {
+		if (!frappe.user.has_role("System Manager")) return "";
+		return `
+			<button type="button" class="fg-btn fg-cm-open-btn" title="${__("Autoriza en bloque los cobros ya registrados por el conductor")}">
+				${icon("check-check", "fg-icon-sm")} ${__("Autorizar cobros y pagos")}
+			</button>
+		`;
+	}
+
+	cm_call(method, args) {
+		return new Promise((resolve, reject) => {
+			frappe.call({
+				method: "fabergray_erp.api.cartera_masiva." + method,
+				args: args || {},
+				callback: (r) => resolve(r.message),
+				error: (r) => reject(r),
+			});
+		});
+	}
+
+	open_bulk_dialog() {
+		const today = frappe.datetime.get_today();
+		this.cm = {
+			screen: "authorize", // "authorize" | "history"
+			options: null,
+			date_type: "facturacion",
+			date_from: today.slice(0, 8) + "01",
+			date_to: today,
+			customers: new Map(), // customer -> label
+			customer_query: "",
+			customer_results: [],
+			issuer: "",
+			method: "",
+			status: "todos",
+			search: "",
+			view: "eligible",
+			preview: null,
+			index: new Map(), // obligation -> [customer, cents]
+			select_all: true,
+			excluded: new Set(),
+			selected: new Set(),
+			reason: "",
+			review: false,
+			request_id: null,
+			batch: null,
+			history: null,
+			busy: false,
+		};
+		const dialog = new frappe.ui.Dialog({
+			title: `<span class="fg-cm-title">${icon("check-check")}${__("Autorizar cobros y pagos")}</span>`,
+			size: "extra-large",
+			fields: [{ fieldtype: "HTML", fieldname: "cm_html" }],
+		});
+		dialog.$wrapper.addClass("fg-cm-dialog");
+		dialog.onhide = () => {
+			clearTimeout(this._cm_poll);
+			clearTimeout(this._cm_customer_debounce);
+			if (this.cm && this.cm.batch) this.load_all();
+		};
+		this.cm_dialog = dialog;
+		this.$cm = dialog.fields_dict.cm_html.$wrapper;
+		this.bind_bulk_events();
+		dialog.show();
+		this.$cm.html(`<div class="fg-cm"><div class="fg-cm-muted">${__("Cargando...")}</div></div>`);
+		this.cm_call("get_bulk_authorization_options")
+			.then((options) => {
+				this.cm.options = options;
+				this.cm.date_type = options.default_date_type || "facturacion";
+				if (options.active_batch) this.show_bulk_progress(options.active_batch.name);
+				else this.render_bulk();
+			})
+			.catch(() => this.cm_dialog.hide());
+	}
+
+	// -- Selection (exact, in integer cents) ------------------------------
+	cm_selected_entries() {
+		const e = this.cm;
+		if (!e.preview) return [];
+		const out = [];
+		e.index.forEach((value, name) => {
+			const chosen = e.select_all ? !e.excluded.has(name) : e.selected.has(name);
+			if (chosen) out.push([name, value[0], value[1]]);
+		});
+		return out;
+	}
+
+	cm_selection_totals() {
+		const by = new Map();
+		let cents = 0;
+		const entries = this.cm_selected_entries();
+		for (const [, customer, c] of entries) {
+			cents += c;
+			const row = by.get(customer) || { count: 0, cents: 0 };
+			row.count += 1;
+			row.cents += c;
+			by.set(customer, row);
+		}
+		return { count: entries.length, cents, by };
+	}
+
+	cm_can_confirm() {
+		const e = this.cm;
+		const t = this.cm_selection_totals();
+		const limits = (e.options && e.options.limits) || {};
+		return (
+			!e.busy &&
+			e.preview &&
+			e.preview.index_complete &&
+			t.count > 0 &&
+			t.count <= (limits.max_lines || 2000) &&
+			e.reason.trim().length >= (limits.reason_min_length || 10) &&
+			e.review
+		);
+	}
+
+	// -- Render -----------------------------------------------------------
+	render_bulk() {
+		const e = this.cm;
+		if (e.batch) return this.render_bulk_progress();
+		const modes = ((e.options && e.options.modes) || [])
+			.map(
+				(m) => `<button type="button" class="fg-cm-mode-btn ${m.enabled && e.screen === "authorize" ? "is-active" : ""}" data-screen="authorize" ${
+					m.enabled ? "" : "disabled"
+				}>${m.enabled ? icon("check-check", "fg-icon-sm") : icon("wallet", "fg-icon-sm")} ${esc(m.label)}${
+					m.enabled ? "" : ` <span class="fg-cm-soon">${esc(m.note || __("Próximamente"))}</span>`
+				}</button>`
+			)
+			.join("");
+		const tabs = `<div class="fg-cm-modes">${modes}
+			<button type="button" class="fg-cm-mode-btn ${e.screen === "history" ? "is-active" : ""}" data-screen="history">${icon("history", "fg-icon-sm")} ${__("Historial de lotes")}</button>
+		</div>`;
+		if (e.screen === "history") {
+			this.$cm.html(`<div class="fg-cm">${tabs}<div class="fg-cm-history">${this.render_history_html()}</div></div>`);
+			return;
+		}
+		this.$cm.html(`
+			<div class="fg-cm">
+				${tabs}
+				<div class="fg-cm-criteria">
+					${icon("info", "fg-icon-sm")}
+					<span>${__(
+						"Autoriza los cobros que el conductor ya registró con comprobante (POR CONFIRMAR). No crea pagos ni cambia valores, saldos o vencimientos: solo deja la confirmación auditada de cada cobro."
+					)}</span>
+				</div>
+				<div class="fg-cm-filters">${this.render_filters_html()}</div>
+				<button type="button" class="fg-btn fg-cm-search-btn" ${e.busy ? "disabled" : ""}>${icon("search", "fg-icon-sm")} ${__("Buscar cobros")}</button>
+				<div class="fg-cm-results">${e.preview ? this.render_bulk_results_html() : ""}</div>
+			</div>
+		`);
+	}
+
+	render_filters_html() {
+		const e = this.cm;
+		const o = e.options || {};
+		const today = frappe.datetime.get_today();
+		const opt = (value, label, current) => `<option value="${esc(value)}" ${value === current ? "selected" : ""}>${esc(label)}</option>`;
+		const chips = Array.from(e.customers.entries())
+			.map(([name, label]) => `<span class="fg-cm-chip">${esc(label)}<button type="button" class="fg-cm-chip-remove" data-customer="${esc(name)}" title="${__("Quitar")}">×</button></span>`)
+			.join("");
+		const suggestions = e.customer_results.length
+			? `<div class="fg-cm-suggestions">${e.customer_results
+					.map(
+						(c) =>
+							`<button type="button" class="fg-cm-suggestion" data-customer="${esc(c.customer)}" data-label="${esc(
+								c.customer_commercial_name || c.customer_name || c.customer
+							)}"><span>${esc(c.customer_commercial_name || c.customer_name || c.customer)}${
+								c.customer_commercial_name && c.customer_name ? ` <span class="fg-cm-muted">${esc(c.customer_name)}</span>` : ""
+							}</span><span class="fg-cm-muted">${cint(c.count)}</span></button>`
+					)
+					.join("")}</div>`
+			: "";
+		return `
+			<label class="fg-cm-field"><span>${__("Tipo de fecha")}</span>
+				<select class="fg-cm-date-type">${(o.date_types || []).map((d) => opt(d.key, d.label, e.date_type)).join("")}</select></label>
+			<label class="fg-cm-field"><span>${__("Fecha inicial")}</span><input type="date" class="fg-cm-date-from" value="${esc(e.date_from)}"></label>
+			<label class="fg-cm-field"><span>${__("Fecha final")}</span><input type="date" class="fg-cm-date-to" value="${esc(e.date_to)}"></label>
+			<div class="fg-cm-field fg-cm-field--wide fg-cm-customers"><span>${__("Clientes")} <span class="fg-cm-muted">${
+				e.customers.size ? __("{0} seleccionados", [e.customers.size]) : __("Todos los clientes")
+			}</span></span>
+				${chips ? `<div class="fg-cm-chips">${chips}</div>` : ""}
+				<input type="search" class="fg-cm-customer-input" placeholder="${__("Buscar y agregar clientes (vacío = todos)")}" value="${esc(e.customer_query)}" autocomplete="off">
+				${suggestions}
+			</div>
+			<label class="fg-cm-field"><span>${__("Emisor")}</span>
+				<select class="fg-cm-issuer">${opt("", __("Todos los emisores"), e.issuer)}${(o.issuers || []).map((i) => opt(i, i, e.issuer)).join("")}</select></label>
+			<label class="fg-cm-field"><span>${__("Forma de pago de la factura")}</span>
+				<select class="fg-cm-method">${opt("", __("Todas"), e.method)}${(o.invoice_payment_methods || []).map((m) => opt(m.key, m.label, e.method)).join("")}</select></label>
+			<label class="fg-cm-field"><span>${__("Estado")}</span>
+				<select class="fg-cm-status">${(o.statuses || []).map((s) => opt(s.key, s.label, e.status)).join("")}</select></label>
+			<label class="fg-cm-field fg-cm-field--wide"><span>${__("Buscar")}</span>
+				<input type="search" class="fg-cm-search-input" maxlength="140" placeholder="${__("Cliente, pedido, pick list, recorrido o referencia del pago")}" value="${esc(e.search)}"></label>
+			<div class="fg-cm-muted fg-cm-field--wide">${__("Rango inclusivo según la hora del sitio (hoy: {0}). Las obligaciones sin la fecha elegida no se incluyen: nunca se inventa una fecha.", [format_date(today)])}</div>
+		`;
+	}
+
+	render_bulk_results_html() {
+		const e = this.cm;
+		const p = e.preview;
+		const s = p.summary;
+		const t = this.cm_selection_totals();
+		const limits = (e.options && e.options.limits) || {};
+		const currency = (p.rows[0] && p.rows[0].currency) || "COP";
+		const excluded_html = s.excluded_by_reason.length
+			? `<ul class="fg-cm-reasons">${s.excluded_by_reason
+					.map(
+						(r) =>
+							`<li class="${r.needs_review ? "is-review" : ""}"><strong>${cint(r.count)}</strong> ${esc(r.label)}${
+								r.needs_review ? ` <span class="fg-cm-tag fg-cm-tag--review">${__("REVISAR")}</span>` : ""
+							}</li>`
+					)
+					.join("")}</ul>`
+			: `<div class="fg-cm-muted">${__("Ningún cobro excluido.")}</div>`;
+		const names = new Map((s.by_customer || []).map((c) => [c.customer, c.customer_commercial_name || c.customer_name || c.customer]));
+		const customer_rows = Array.from(t.by.entries())
+			.sort((a, b) => b[1].cents - a[1].cents)
+			.map(
+				([customer, row]) =>
+					`<tr><td>${esc(names.get(customer) || customer)}</td><td class="fg-cm-num">${row.count}</td><td class="fg-cm-num">${format_money(row.cents / 100, currency)}</td></tr>`
+			)
+			.join("");
+		const over_limit = t.count > (limits.max_lines || 2000);
+		return `
+			<div class="fg-cm-kpis">
+				<div class="fg-cm-kpi"><span>${__("Cobros encontrados")}</span><strong>${cint(s.found)}</strong></div>
+				<div class="fg-cm-kpi fg-cm-kpi--ok"><span>${__("Por confirmar")}</span><strong>${cint(s.eligible)}</strong></div>
+				<div class="fg-cm-kpi fg-cm-kpi--muted"><span>${__("Excluidos")}</span><strong>${cint(s.excluded)}</strong></div>
+				<div class="fg-cm-kpi"><span>${__("Valor por confirmar")}</span><strong>${format_money(s.total_amount, currency)}</strong></div>
+			</div>
+			${
+				cint(s.missing_date)
+					? `<div class="fg-cm-warning">${icon("triangle-alert", "fg-icon-sm")} ${__("{0} cobros reportados no tienen «{1}» y no se incluyen en el rango.", [
+							cint(s.missing_date),
+							esc(p.date_type_label),
+					  ])}</div>`
+					: ""
+			}
+			<div class="fg-cm-tabs">
+				<button type="button" class="fg-cm-tab ${e.view === "eligible" ? "is-active" : ""}" data-view="eligible">${__("Por confirmar")} (${cint(s.eligible)})</button>
+				<button type="button" class="fg-cm-tab ${e.view === "excluded" ? "is-active" : ""}" data-view="excluded">${__("Excluidos")} (${cint(s.excluded)})</button>
+			</div>
+			${e.view === "eligible" ? this.render_bulk_table_html() : `<div class="fg-cm-excluded-summary">${excluded_html}</div>${this.render_bulk_table_html()}`}
+			<div class="fg-cm-by-customer">
+				<div class="fg-cm-label">${__("Total por cliente")} <span class="fg-cm-muted">(${__("selección actual, todas las páginas")})</span></div>
+				<div class="fg-cm-table-wrap"><table class="fg-cm-table"><thead><tr><th>${__("Cliente")}</th><th class="fg-cm-num">${__("Cobros")}</th><th class="fg-cm-num">${__("Valor")}</th></tr></thead><tbody>
+					${customer_rows || `<tr><td colspan="3" class="fg-cm-empty">${__("Sin cobros seleccionados.")}</td></tr>`}
+					<tr class="fg-cm-total-row"><td>${__("Total general")}</td><td class="fg-cm-num">${t.count}</td><td class="fg-cm-num">${format_money(t.cents / 100, currency)}</td></tr>
+				</tbody></table></div>
+			</div>
+			<div class="fg-cm-confirm-box">
+				<div class="fg-cm-selection">${__("Seleccionados")}: <strong>${t.count}</strong> ${__("cobros")} · ${__("Valor seleccionado")}: <strong>${format_money(
+			t.cents / 100,
+			currency
+		)}</strong></div>
+				${over_limit ? `<div class="fg-cm-warning">${icon("triangle-alert", "fg-icon-sm")} ${__("Un lote admite como máximo {0} cobros; reduce el rango o los filtros.", [limits.max_lines || 2000])}</div>` : ""}
+				<label class="fg-cm-field fg-cm-reason"><span>${__("Motivo de la autorización (obligatorio)")}</span><textarea class="fg-cm-reason-input" rows="2" maxlength="500" placeholder="${__(
+					"Ej.: comprobantes del conductor revisados contra el extracto bancario de noviembre"
+				)}">${esc(e.reason)}</textarea></label>
+				<label class="fg-cm-check"><input type="checkbox" class="fg-cm-review" ${e.review ? "checked" : ""}> ${__("Confirmo que revisé estos cobros y sus comprobantes.")}</label>
+				<div class="fg-cm-irreversible">${icon("lock", "fg-icon-sm")} ${__(
+					"Esta operación no se puede deshacer desde la interfaz. Cada cobro quedará CONFIRMADO a tu nombre y con el número de lote; no se crea ningún pago nuevo ni cambia ningún valor."
+				)}</div>
+				<button type="button" class="fg-btn fg-cm-confirm-btn" ${this.cm_can_confirm() ? "" : "disabled"}>${icon("check-check", "fg-icon-sm")} ${__("Confirmar autorización")}</button>
+			</div>
+		`;
+	}
+
+	render_bulk_table_html() {
+		const e = this.cm;
+		const p = e.preview;
+		const rows = p.rows || [];
+		const eligible = e.view === "eligible";
+		const pages = Math.max(Math.ceil(p.total_in_view / p.page_length), 1);
+		const is_checked = (r) => (e.select_all ? !e.excluded.has(r.obligation) : e.selected.has(r.obligation));
+		const body = rows.length
+			? rows
+					.map(
+						(r) => `<tr>
+							${eligible ? `<td><input type="checkbox" class="fg-cm-row-check" data-ob="${esc(r.obligation)}" ${is_checked(r) ? "checked" : ""}></td>` : ""}
+							<td><strong>${esc(r.commercial_name || "—")}</strong><div class="fg-cm-muted">${esc(r.obligation)} · ${esc(r.pick_list || "")}</div></td>
+							<td>${esc(r.customer_commercial_name || r.customer_name || "—")}${r.customer_commercial_name ? `<div class="fg-cm-muted">${esc(r.customer_name || "")}</div>` : ""}</td>
+							<td>${esc(r.invoice_issuer || "—")}<div class="fg-cm-muted">${esc(r.invoice_payment_method || __("Sin forma de pago"))}</div></td>
+							<td>${format_date(r.invoice_date)}<div class="fg-cm-muted">${__("Entrega")} ${format_date(r.delivery_date)}</div></td>
+							${
+								eligible
+									? `<td>${format_date(r.payment_date)}<div class="fg-cm-muted">${esc(r.driver_payment || "")}</div></td>
+									   <td class="fg-cm-num">${format_money(r.amount, r.currency)}</td>`
+									: `<td>${esc(r.reason || "")}${r.reason_detail ? `<div class="fg-cm-muted">${esc(r.reason_detail)}</div>` : ""}${
+											r.needs_review ? ` <span class="fg-cm-tag fg-cm-tag--review">${__("REVISAR")}</span>` : ""
+									  }</td>`
+							}
+						</tr>`
+					)
+					.join("")
+			: `<tr><td colspan="7" class="fg-cm-empty">${__("Sin cobros en esta vista.")}</td></tr>`;
+		const head = eligible
+			? `<th><input type="checkbox" class="fg-cm-select-all" ${e.select_all && !e.excluded.size ? "checked" : ""} title="${__(
+					"Seleccionar todos los resultados (todas las páginas)"
+			  )}"></th><th>${__("Pedido")}</th><th>${__("Cliente")}</th><th>${__("Emisor / forma de pago")}</th><th>${__("Facturado")}</th><th>${__("Pago reportado")}</th><th class="fg-cm-num">${__("Valor")}</th>`
+			: `<th>${__("Pedido")}</th><th>${__("Cliente")}</th><th>${__("Emisor / forma de pago")}</th><th>${__("Facturado")}</th><th>${__("Motivo")}</th>`;
+		return `
+			${eligible ? `<div class="fg-cm-select-all-row">${__("Casilla del encabezado: selecciona los {0} cobros de todas las páginas.", [cint(p.summary.eligible)])}</div>` : ""}
+			<div class="fg-cm-table-wrap"><table class="fg-cm-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>
+			<div class="fg-cm-pager">
+				<button type="button" class="fg-btn fg-cm-page" data-page="${p.page - 1}" ${p.page <= 1 ? "disabled" : ""}>${icon("chevron-left", "fg-icon-sm")}</button>
+				<span>${__("Página {0} de {1}", [p.page, pages])}</span>
+				<button type="button" class="fg-btn fg-cm-page" data-page="${p.page + 1}" ${p.has_more ? "" : "disabled"}>${icon("chevron-right", "fg-icon-sm")}</button>
+			</div>
+		`;
+	}
+
+	render_history_html() {
+		const h = this.cm.history;
+		if (!h) return `<div class="fg-cm-muted">${__("Cargando...")}</div>`;
+		const rows = (h.items || [])
+			.map(
+				(b) => `<tr class="fg-cm-history-row" data-batch="${esc(b.name)}">
+					<td><strong>${esc(b.name)}</strong><div class="fg-cm-muted">${esc(b.mode)}</div></td>
+					<td>${format_datetime(b.queued_on)}<div class="fg-cm-muted">${esc(b.requested_by_name || b.requested_by || "")}</div></td>
+					<td>${esc(b.date_type || "")}<div class="fg-cm-muted">${format_date(b.date_from)} – ${format_date(b.date_to)}</div></td>
+					<td><span class="fg-cm-tag ${cint(b.failed_count) ? "fg-cm-tag--fail" : ""}">${esc(b.status)}</span></td>
+					<td class="fg-cm-num">${cint(b.authorized_count)} / ${cint(b.total_selected)}<div class="fg-cm-muted">${cint(b.skipped_count)} ${__("omitidos")} · ${cint(
+					b.failed_count
+				)} ${__("fallidos")}</div></td>
+					<td class="fg-cm-num">${format_money(b.authorized_amount, b.currency)}</td>
+				</tr>`
+			)
+			.join("");
+		const pages = Math.max(Math.ceil(cint(h.total) / cint(h.page_length || 20)), 1);
+		return `
+			<div class="fg-cm-table-wrap"><table class="fg-cm-table"><thead><tr><th>${__("Lote")}</th><th>${__("Solicitado")}</th><th>${__("Filtro de fechas")}</th><th>${__(
+			"Estado"
+		)}</th><th class="fg-cm-num">${__("Autorizados")}</th><th class="fg-cm-num">${__("Valor autorizado")}</th></tr></thead><tbody>
+				${rows || `<tr><td colspan="6" class="fg-cm-empty">${__("Todavía no hay lotes.")}</td></tr>`}
+			</tbody></table></div>
+			<div class="fg-cm-pager">
+				<button type="button" class="fg-btn fg-cm-history-page" data-page="${cint(h.page) - 1}" ${cint(h.page) <= 1 ? "disabled" : ""}>${icon("chevron-left", "fg-icon-sm")}</button>
+				<span>${__("Página {0} de {1}", [cint(h.page), pages])}</span>
+				<button type="button" class="fg-btn fg-cm-history-page" data-page="${cint(h.page) + 1}" ${h.has_more ? "" : "disabled"}>${icon("chevron-right", "fg-icon-sm")}</button>
+			</div>
+		`;
+	}
+
+	// -- Events -----------------------------------------------------------
+	bind_bulk_events() {
+		const $w = this.$cm;
+		const e = () => this.cm;
+		const reset_preview = () => {
+			e().preview = null;
+			e().index = new Map();
+			e().request_id = null;
+		};
+		const on_filter = (selector, key) =>
+			$w.on("change", selector, (ev) => {
+				e()[key] = ev.target.value;
+				reset_preview();
+				this.refresh_bulk_results();
+			});
+		on_filter(".fg-cm-date-type", "date_type");
+		on_filter(".fg-cm-date-from", "date_from");
+		on_filter(".fg-cm-date-to", "date_to");
+		on_filter(".fg-cm-issuer", "issuer");
+		on_filter(".fg-cm-method", "method");
+		on_filter(".fg-cm-status", "status");
+		$w.on("input", ".fg-cm-search-input", (ev) => {
+			e().search = ev.target.value;
+			reset_preview();
+			this.refresh_bulk_results();
+		});
+		$w.on("input", ".fg-cm-customer-input", (ev) => {
+			e().customer_query = ev.target.value;
+			clearTimeout(this._cm_customer_debounce);
+			this._cm_customer_debounce = setTimeout(() => this.search_customers(), SEARCH_DEBOUNCE_MS);
+		});
+		$w.on("click", ".fg-cm-suggestion", (ev) => {
+			const $b = $(ev.currentTarget);
+			e().customers.set(String($b.attr("data-customer")), String($b.attr("data-label")));
+			e().customer_query = "";
+			e().customer_results = [];
+			reset_preview();
+			this.render_bulk();
+		});
+		$w.on("click", ".fg-cm-chip-remove", (ev) => {
+			e().customers.delete(String($(ev.currentTarget).attr("data-customer")));
+			reset_preview();
+			this.render_bulk();
+		});
+		$w.on("click", ".fg-cm-mode-btn", (ev) => {
+			const screen = $(ev.currentTarget).data("screen");
+			if ($(ev.currentTarget).prop("disabled") || screen === e().screen) return;
+			e().screen = screen;
+			if (screen === "history") this.load_history(1);
+			this.render_bulk();
+		});
+		$w.on("click", ".fg-cm-history-page", (ev) => this.load_history(cint($(ev.currentTarget).data("page"))));
+		$w.on("click", ".fg-cm-history-row", (ev) => this.show_bulk_progress(String($(ev.currentTarget).attr("data-batch"))));
+		$w.on("click", ".fg-cm-search-btn", () => this.load_bulk_preview(1, true));
+		$w.on("click", ".fg-cm-tab", (ev) => {
+			e().view = $(ev.currentTarget).data("view");
+			this.load_bulk_preview(1, false);
+		});
+		$w.on("click", ".fg-cm-page", (ev) => this.load_bulk_preview(cint($(ev.currentTarget).data("page")), false));
+		$w.on("change", ".fg-cm-row-check", (ev) => {
+			const ob = String($(ev.currentTarget).attr("data-ob"));
+			const target = e().select_all ? e().excluded : e().selected;
+			const wants = e().select_all ? !ev.target.checked : ev.target.checked;
+			if (wants) target.add(ob);
+			else target.delete(ob);
+			this.refresh_bulk_results();
+		});
+		$w.on("change", ".fg-cm-select-all", (ev) => {
+			e().select_all = ev.target.checked;
+			e().excluded = new Set();
+			e().selected = new Set();
+			this.refresh_bulk_results();
+		});
+		$w.on("input", ".fg-cm-reason-input", (ev) => {
+			e().reason = ev.target.value;
+			this.refresh_bulk_confirm();
+		});
+		$w.on("change", ".fg-cm-review", (ev) => {
+			e().review = ev.target.checked;
+			this.refresh_bulk_confirm();
+		});
+		$w.on("click", ".fg-cm-confirm-btn:not(.fg-cm-done-btn)", () => this.confirm_bulk());
+		$w.on("click", ".fg-cm-resume-btn", () => this.cm_recovery("resume_bulk_authorization"));
+		$w.on("click", ".fg-cm-close-batch-btn", () => this.cm_recovery("close_bulk_authorization"));
+		$w.on("click", ".fg-cm-back-btn", () => {
+			clearTimeout(this._cm_poll);
+			e().batch = null;
+			if (e().screen === "history") this.load_history(1);
+			this.render_bulk();
+		});
+		$w.on("click", ".fg-cm-done-btn", () => this.cm_dialog.hide());
+	}
+
+	refresh_bulk_results() {
+		this.$cm.find(".fg-cm-results").html(this.cm.preview ? this.render_bulk_results_html() : "");
+	}
+
+	refresh_bulk_confirm() {
+		this.$cm.find(".fg-cm-confirm-btn:not(.fg-cm-done-btn)").prop("disabled", !this.cm_can_confirm());
+	}
+
+	cm_filters() {
+		const e = this.cm;
+		return {
+			date_type: e.date_type,
+			date_from: e.date_from,
+			date_to: e.date_to,
+			customers: e.customers.size ? JSON.stringify(Array.from(e.customers.keys())) : null,
+			issuer: e.issuer || null,
+			invoice_payment_method: e.method || null,
+			status: e.status,
+			search: (e.search || "").trim() || null,
+		};
+	}
+
+	search_customers() {
+		const e = this.cm;
+		const query = (e.customer_query || "").trim();
+		const seq = (this._cm_customer_seq = (this._cm_customer_seq || 0) + 1);
+		if (!query) {
+			e.customer_results = [];
+			this.render_bulk();
+			return;
+		}
+		this.cm_call("search_bulk_customers", { search: query, limit: 20 })
+			.then((rows) => {
+				if (seq !== this._cm_customer_seq) return;
+				const fresh = [];
+				for (const r of rows || []) if (!e.customers.has(r.customer)) fresh.push(r);
+				e.customer_results = fresh;
+				this.render_bulk();
+				const $input = this.$cm.find(".fg-cm-customer-input");
+				$input.trigger("focus");
+				const el = $input.get(0);
+				if (el && el.setSelectionRange) el.setSelectionRange(el.value.length, el.value.length);
+			})
+			.catch(() => {});
+	}
+
+	load_bulk_preview(page, refresh) {
+		const e = this.cm;
+		if (e.busy) return;
+		e.busy = true;
+		this.$cm.find(".fg-cm-search-btn").prop("disabled", true).html(`${icon("loader-circle", "fg-icon-sm fg-spin")} ${__("Buscando...")}`);
+		if (refresh) {
+			e.select_all = true;
+			e.excluded = new Set();
+			e.selected = new Set();
+			e.view = "eligible";
+			e.request_id = null;
+		}
+		this.cm_call("get_bulk_authorization_preview", Object.assign(this.cm_filters(), { view: e.view, page: page, refresh: refresh ? 1 : 0 }))
+			.then((p) => {
+				e.preview = p;
+				e.index = new Map((p.eligible_index || []).map((r) => [r[0], [r[1], cint(r[2])]]));
+			})
+			.catch(() => {})
+			.finally(() => {
+				e.busy = false;
+				this.render_bulk();
+			});
+	}
+
+	confirm_bulk() {
+		const e = this.cm;
+		if (!this.cm_can_confirm()) return;
+		const t = this.cm_selection_totals();
+		const currency = (e.preview.rows[0] && e.preview.rows[0].currency) || "COP";
+		frappe.confirm(
+			__("Se autorizarán {0} cobros por {1} ({2} clientes). No se crea ningún pago nuevo. Esta operación no se puede deshacer. ¿Continuar?", [
+				t.count,
+				format_money(t.cents / 100, currency),
+				t.by.size,
+			]),
+			() => {
+				e.busy = true;
+				e.request_id = e.request_id || frappe.utils.get_random(32);
+				this.refresh_bulk_confirm();
+				this.cm_call("confirm_bulk_authorization",
+					Object.assign(this.cm_filters(), {
+						reason: e.reason.trim(),
+						review_confirmed: 1,
+						select_all: e.select_all ? 1 : 0,
+						obligations: e.select_all ? null : JSON.stringify(Array.from(e.selected)),
+						excluded_obligations: e.select_all ? JSON.stringify(Array.from(e.excluded)) : null,
+						client_request_id: e.request_id,
+					})
+				)
+					.then((status) => {
+						if (status.not_eligible && status.not_eligible.length) {
+							frappe.show_alert({ message: __("{0} cobros ya no se podían autorizar y se omitieron.", [status.not_eligible.length]), indicator: "orange" }, 7);
+						}
+						this.show_bulk_progress(status.name, status);
+					})
+					.catch(() => {
+						e.busy = false;
+						this.refresh_bulk_confirm();
+					});
+			}
+		);
+	}
+
+	load_history(page) {
+		this.cm_call("get_bulk_authorization_history", { page: page })
+			.then((h) => {
+				this.cm.history = h;
+				if (this.cm.screen === "history" && !this.cm.batch) this.$cm.find(".fg-cm-history").html(this.render_history_html());
+			})
+			.catch(() => {});
+	}
+
+	// -- Progress / summary -----------------------------------------------
+	show_bulk_progress(batch_name, status) {
+		this.cm.batch = { name: batch_name, status: status || null };
+		this.render_bulk_progress();
+		this.poll_bulk_status();
+	}
+
+	poll_bulk_status() {
+		clearTimeout(this._cm_poll);
+		const batch = this.cm && this.cm.batch;
+		if (!batch) return;
+		this.cm_call("get_bulk_authorization_status", { batch_name: batch.name })
+			.then((st) => {
+				if (this.cm.batch !== batch) return;
+				batch.status = st;
+				this.render_bulk_progress();
+				if (!st.finished && !st.can_resume && this.cm_dialog.display) {
+					this._cm_poll = setTimeout(() => this.poll_bulk_status(), 1500);
+				}
+			})
+			.catch(() => {});
+	}
+
+	cm_recovery(method) {
+		const batch = this.cm.batch;
+		const label =
+			method === "resume_bulk_authorization"
+				? __("¿Reanudar el lote desde los cobros pendientes? Los ya autorizados no se repiten.")
+				: __("¿Cerrar el lote sin procesar los cobros pendientes?");
+		frappe.confirm(label, () => {
+			this.cm_call(method, { batch_name: batch.name }).then((st) => {
+				batch.status = st;
+				this.render_bulk_progress();
+				this.poll_bulk_status();
+			});
+		});
+	}
+
+	render_bulk_progress() {
+		const st = this.cm.batch.status;
+		if (!st) {
+			this.$cm.html(`<div class="fg-cm fg-cm-progress"><div class="fg-cm-muted">${__("Cargando...")}</div></div>`);
+			return;
+		}
+		const pct = Math.min(Math.max(Number(st.progress_percent) || 0, 0), 100);
+		const issues = (st.issues || [])
+			.map(
+				(i) =>
+					`<tr><td><strong>${esc(i.commercial_name || i.cartera_obligacion)}</strong><div class="fg-cm-muted">${esc(i.cartera_obligacion)}</div></td><td>${esc(
+						i.customer_name || "—"
+					)}</td><td class="fg-cm-num">${format_money(i.amount, st.currency)}</td><td><span class="fg-cm-tag ${i.result === "Fallido" ? "fg-cm-tag--fail" : ""}">${esc(
+						i.result
+					)}</span></td><td>${esc(i.message || "")}</td></tr>`
+			)
+			.join("");
+		const customers = (st.by_customer || [])
+			.map((c) => `<tr><td>${esc(c.customer_name || c.customer)}</td><td class="fg-cm-num">${cint(c.count)}</td><td class="fg-cm-num">${format_money(c.amount, st.currency)}</td></tr>`)
+			.join("");
+		const head = st.finished
+			? `<div class="fg-cm-done ${st.failed ? "has-errors" : ""}">${icon(st.failed ? "triangle-alert" : "circle-check")} ${
+					st.status === "Cerrado" ? __("Lote cerrado") : st.failed ? __("Autorización finalizada con errores") : __("Autorización finalizada")
+			  } · ${esc(st.name)}</div>`
+			: st.can_resume
+			? `<div class="fg-cm-done has-errors">${icon("triangle-alert")} ${__(
+					"El proceso se interrumpió o no avanza. Puedes reanudarlo (no repite cobros ya autorizados) o cerrar el lote."
+			  )}</div>`
+			: `<div class="fg-cm-running">${icon("loader-circle", "fg-spin")} ${__("Procesando en segundo plano… puedes cerrar esta ventana; el proceso continúa.")}</div>`;
+		this.$cm.html(`
+			<div class="fg-cm fg-cm-progress">
+				${head}
+				<div class="fg-cm-bar-track"><div class="fg-cm-bar-fill" style="width:${pct}%"></div><span>${pct}%</span></div>
+				<div class="fg-cm-kpis">
+					<div class="fg-cm-kpi"><span>${__("Seleccionados")}</span><strong>${cint(st.total_selected)}</strong></div>
+					<div class="fg-cm-kpi fg-cm-kpi--ok"><span>${__("Autorizados")}</span><strong>${cint(st.authorized)}</strong></div>
+					<div class="fg-cm-kpi fg-cm-kpi--muted"><span>${__("Omitidos")}</span><strong>${cint(st.skipped)}</strong></div>
+					<div class="fg-cm-kpi fg-cm-kpi--fail"><span>${__("Fallidos")}</span><strong>${cint(st.failed)}</strong></div>
+				</div>
+				<div class="fg-cm-meta">
+					${__("Valor seleccionado")}: <strong>${format_money(st.total_amount, st.currency)}</strong> ·
+					${__("Valor autorizado")}: <strong>${format_money(st.authorized_amount, st.currency)}</strong> ·
+					${esc(st.date_type || "")}: <strong>${format_date(st.date_from)} – ${format_date(st.date_to)}</strong>
+				</div>
+				<div class="fg-cm-meta">${__("Solicitado por")} <strong>${esc(st.requested_by_name || st.requested_by || "—")}</strong> · ${__("Inicio")} ${format_datetime(
+			st.started_on || st.queued_on
+		)}${st.finished_on ? ` · ${__("Fin")} ${format_datetime(st.finished_on)}` : ""} · ${__("Motivo")}: ${esc(st.reason || "")}</div>
+				${
+					customers
+						? `<div class="fg-cm-by-customer"><div class="fg-cm-label">${__("Total por cliente")} <span class="fg-cm-muted">(${__("autorizados")})</span></div>
+							<div class="fg-cm-table-wrap"><table class="fg-cm-table"><thead><tr><th>${__("Cliente")}</th><th class="fg-cm-num">${__("Cobros")}</th><th class="fg-cm-num">${__(
+								"Valor"
+						  )}</th></tr></thead><tbody>${customers}</tbody></table></div></div>`
+						: ""
+				}
+				${
+					issues
+						? `<div class="fg-cm-table-wrap"><table class="fg-cm-table"><thead><tr><th>${__("Pedido")}</th><th>${__("Cliente")}</th><th class="fg-cm-num">${__("Valor")}</th><th>${__(
+								"Resultado"
+						  )}</th><th>${__("Detalle")}</th></tr></thead><tbody>${issues}</tbody></table></div>`
+						: ""
+				}
+				<div class="fg-cm-actions">
+					${
+						st.can_resume
+							? `<button type="button" class="fg-btn fg-cm-resume-btn">${icon("rotate-ccw", "fg-icon-sm")} ${__("Reanudar")}</button>
+							   <button type="button" class="fg-btn fg-cm-close-batch-btn">${icon("circle-x", "fg-icon-sm")} ${__("Cerrar lote")}</button>`
+							: ""
+					}
+					${st.finished ? `<button type="button" class="fg-btn fg-cm-back-btn">${icon("chevron-left", "fg-icon-sm")} ${__("Volver")}</button>` : ""}
+					${st.finished ? `<button type="button" class="fg-btn fg-cm-confirm-btn fg-cm-done-btn">${__("Listo")}</button>` : ""}
+				</div>
+			</div>
+		`);
 	}
 
 	// =====================================================================
@@ -1240,6 +1919,7 @@ function render_verification_html(d) {
 		return `<div class="fg-cartera-detail-section fg-cartera-verified fg-cartera-verified--ok">
 			<div class="fg-cartera-section-title">✓ ${__("PAGO DEL CONDUCTOR CONFIRMADO")}</div>
 			<div class="fg-cartera-muted">${__("Por {0} · {1}", [esc(d.payment_verified_by_name || d.payment_verified_by) || "—", format_datetime(d.payment_verified_on)])}</div>
+			${d.payment_verified_batch ? `<div class="fg-cartera-muted">${__("Autorización masiva · lote {0}", [esc(d.payment_verified_batch)])}</div>` : ""}
 		</div>`;
 	}
 	if (d.payment_verification === "Rechazado") {

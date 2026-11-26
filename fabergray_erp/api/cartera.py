@@ -486,6 +486,9 @@ def _detail_payload(doc):
 			"payment_verified_by_name": get_fullname(doc.payment_verified_by) if doc.payment_verified_by else None,
 			"payment_verified_on": _datetime_str(doc.payment_verified_on),
 			"payment_rejection_reason": doc.payment_rejection_reason or None,
+			# Cartera masiva: the authorization batch that confirmed it (None
+			# for individual confirmations and historical records).
+			"payment_verified_batch": doc.get("payment_verified_batch") or None,
 			# Action availability, decided HERE (the UI only shows/hides;
 			# every endpoint re-checks under lock).
 			"can_register_payment": cartera_service.collectable_error(doc) is None,
