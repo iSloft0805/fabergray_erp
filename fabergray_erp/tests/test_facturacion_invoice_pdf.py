@@ -337,8 +337,9 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 		self.assertIn(f"No. {number}", html)
 		self.assertNotIn(f"No. {so.name}", html)
 		self.assertIn(f"Ref. interna: {pl_name}", html)
-		# sin datos reales del emisor -> marcado como borrador
-		self.assertIn("NO VÁLIDO COMO FACTURA", html)
+		# sin resolución DIAN -> documento comercial (aviso al pie, nunca BORRADOR rojo)
+		self.assertIn("Documento comercial — No válido como factura fiscal", html)
+		self.assertNotIn("BORRADOR", html)
 
 	def test_11b_partial_pick_list_totals_use_picked_qty(self):
 		so, pl_name = self._with_issuer(qty_a=2, rate_a=5750, qty_b=3, rate_b=1200)
@@ -502,8 +503,9 @@ class TestFacturacionInvoicePdfIssuerData(TestFacturacionInvoicePdf):
 		self.assertNotIn("INTEGRANDO MAS BGA", html)
 
 	def test_17_both_numbered_but_still_marked_draft(self):
-		# Numeradas con su serie interna, pero BORRADOR mientras no exista
-		# resolución de facturación DIAN (se mantiene en esta fase).
+		# Numeradas con su serie interna, pero documento COMERCIAL mientras no
+		# exista resolución de facturación DIAN: aviso gris al pie, sin el
+		# antiguo recuadro rojo BORRADOR ni su lista de motivos.
 		for issuer in ("integrandoMAS", "ecoluminar"):
 			pl_name, html = self._issuer_html(issuer)
 			number = frappe.db.get_value("Pick List", pl_name, "fg_invoice_number")
@@ -511,9 +513,9 @@ class TestFacturacionInvoicePdfIssuerData(TestFacturacionInvoicePdf):
 			self.assertIn(f"No. {number}", html)
 			self.assertNotIn("SIN NUMERAR", html)
 			self.assertIn(f"Ref. interna: {pl_name}", html)
-			self.assertIn("BORRADOR — NO VÁLIDO COMO FACTURA DE VENTA", html)
-			self.assertIn("numeración interna, sin resolución de facturación DIAN", html)
-			self.assertNotIn("sin numeración de factura autorizada", html)
+			self.assertIn("Documento comercial — No válido como factura fiscal", html)
+			self.assertNotIn("BORRADOR", html)
+			self.assertNotIn("fg-inv-draft", html)
 
 	def test_18_numbered_issuer_cannot_be_switched_and_pdf_never_changes_it(self):
 		_, pl_name = self._with_issuer("integrandoMAS")
@@ -576,7 +578,10 @@ class TestFacturacionInvoicePdfIssuerData(TestFacturacionInvoicePdf):
 				_, html = self._issuer_html(issuer)
 			self.assertIn('<div class="fg-inv-logo-placeholder">', html)
 			self.assertNotIn('class="fg-inv-logo"', html)
-			self.assertIn("faltan datos del emisor: logo", html)
+			# Nuevo diseño: sin recuadro rojo de motivos; el faltante se ve en el
+			# placeholder y el documento sigue identificado como comercial.
+			self.assertNotIn("BORRADOR", html)
+			self.assertIn("Documento comercial — No válido como factura fiscal", html)
 
 	def test_23_existing_logo_file_is_used_without_touching_the_print_format(self):
 		"""Simula que el PNG ya fue copiado (sin crear ningún archivo)."""
@@ -591,8 +596,8 @@ class TestFacturacionInvoicePdfIssuerData(TestFacturacionInvoicePdf):
 			self.assertIn(f'src="{frappe.utils.get_url(own_url)}"', html)
 			self.assertNotIn(other_url, html)
 			self.assertNotIn('<div class="fg-inv-logo-placeholder">', html)
-			# el logo no hace válida la factura: sigue siendo borrador (sin DIAN)
-			self.assertIn("BORRADOR — NO VÁLIDO COMO FACTURA DE VENTA", html)
+			# el logo no hace válida la factura: sigue siendo comercial (sin DIAN)
+			self.assertIn("Documento comercial — No válido como factura fiscal", html)
 			self.assertNotIn("SIN NUMERAR", html)
 			self.assertNotIn("faltan datos del emisor", html)
 
@@ -614,7 +619,8 @@ class TestFacturacionInvoicePdfIssuerData(TestFacturacionInvoicePdf):
 				html.index(self.PRINTER_LINE),
 			]
 			self.assertEqual(positions, sorted(positions), issuer)
-			self.assertIn("BORRADOR — NO VÁLIDO COMO FACTURA DE VENTA", html)
+			# el aviso fiscal cierra el documento, después de la imprenta
+			self.assertGreater(html.index("Documento comercial — No válido como factura fiscal"), html.index(self.PRINTER_LINE), issuer)
 			self.assertIn(f"No. {frappe.db.get_value('Pick List', pl_name, 'fg_invoice_number')}", html)
 			self.assertIn(f"Ref. interna: {pl_name}", html)
 

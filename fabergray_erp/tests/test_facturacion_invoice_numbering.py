@@ -151,7 +151,9 @@ class TestFacturacionInvoiceNumbering(IntegrationTestCase):
 		self._download(pl_name)
 		self.assertIn(f"No. {number}", html)
 		self.assertNotIn("SIN NUMERAR", html)
-		self.assertIn("BORRADOR — NO VÁLIDO COMO FACTURA DE VENTA", html)
+		# Sin resolución DIAN: documento comercial (aviso gris al pie, sin recuadro rojo).
+		self.assertIn("Documento comercial — No válido como factura fiscal", html)
+		self.assertNotIn("BORRADOR", html)
 		self.assertEqual(self._number(pl_name), number)
 		self.assertEqual(self._series_current("integrandoMAS"), current)
 		# re-saving the same issuer is a no-op
