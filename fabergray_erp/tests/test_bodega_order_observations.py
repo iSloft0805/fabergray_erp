@@ -303,6 +303,8 @@ class TestGetPickListObservations(_ObservationsBodegaWorld):
 				# Global Bodega policy (fulfillment.bodega_settings).
 				"force_complete_without_stock",
 				"rows",
+				# HOTFIX cantidades divididas: commercial lines over `rows`.
+				"groups",
 			},
 		)
 
@@ -377,6 +379,9 @@ class TestReadOnlyAndPickingUnchanged(_ObservationsBodegaWorld):
 					"finish_picking",
 					"get_shortages",
 					"get_inventory",
+					# HOTFIX cantidades divididas: commercial-line actions.
+					"set_group_picked_qty",
+					"report_group_shortage",
 				]
 			),
 		)

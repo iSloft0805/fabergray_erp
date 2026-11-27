@@ -279,8 +279,15 @@ doc_events = {
 			"fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
 			"fabergray_erp.api.facturacion.guard_invoice_number_fields",
 			"fabergray_erp.api.facturacion.guard_invoice_payment_fields",
+			"fabergray_erp.api.facturacion.guard_invoice_snapshot_fields",
 			"fabergray_erp.fulfillment.shortage_invoice.guard_shortage_invoice_pick_list",
 		],
+		# HOTFIX cantidades divididas -- filas/cantidades del pedido inmutables
+		# fuera de los servicios + conservación vs. el pedido. En before_save
+		# (no en validate): corre DESPUÉS del before_save nativo, que en un
+		# Pick List sin pick_manually re-asigna filas -- se valida el
+		# documento que realmente se va a escribir.
+		"before_save": "fabergray_erp.fulfillment.pick_list_guard.guard_pick_list_structure",
 		# INVENTARIO-OUT-01 -- un Pick List de entrega solo se somete con
 		# COMPLETAR PEDIDO (api.bodega.finish_picking()), que crea su Material
 		# Issue. Bodega necesita el permiso submit para ese flujo, así que el
@@ -294,9 +301,14 @@ doc_events = {
 			"fabergray_erp.api.facturacion.guard_invoice_pricing_fields",
 			"fabergray_erp.api.facturacion.guard_invoice_number_fields",
 			"fabergray_erp.api.facturacion.guard_invoice_payment_fields",
+			"fabergray_erp.api.facturacion.guard_invoice_snapshot_fields",
 			"fabergray_erp.fulfillment.shortage_invoice.guard_shortage_invoice_pick_list",
+			"fabergray_erp.fulfillment.pick_list_guard.guard_pick_list_structure",
 		],
-		"on_trash": "fabergray_erp.fulfillment.shortage_invoice.guard_invoiced_pick_list_delete",
+		"on_trash": [
+			"fabergray_erp.fulfillment.shortage_invoice.guard_invoiced_pick_list_delete",
+			"fabergray_erp.fulfillment.pick_list_guard.guard_pick_list_delete",
+		],
 	},
 	# INVENTARIO-OUT-01 -- un Material Issue vinculado a un Pick List nunca
 	# descuenta más de lo pendiente por Pick List Item (alistado - entregado

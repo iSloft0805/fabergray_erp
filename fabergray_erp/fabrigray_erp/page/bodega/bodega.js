@@ -1555,7 +1555,9 @@ fabergray_erp.Bodega = class Bodega {
 		if (!detail) return "";
 
 		const is_open = detail.docstatus === 0;
-		const rows = detail.rows || [];
+		// HOTFIX cantidades divididas: one card per COMMERCIAL line (Sales
+		// Order line); its internal rows are shown on demand inside the card.
+		const rows = commercial_rows(detail);
 		const picked_lines = rows.filter((r) => flt(r.qty_alistada) >= flt(r.qty_solicitada)).length;
 		const pct = rows.length ? Math.round((picked_lines / rows.length) * 100) : 0;
 		const pedido_label = detail.commercial_name || detail.sales_order || detail.name;
@@ -1712,9 +1714,11 @@ fabergray_erp.Bodega = class Bodega {
 						<div class="fg-item-name">${frappe.utils.escape_html(row.item_name || row.item_code)}</div>
 						<div class="fg-item-code">${frappe.utils.escape_html(row.item_code)}</div>
 						${uom ? `<span class="fg-item-uom">${frappe.utils.escape_html(uom)}</span>` : ""}
+						${render_commercial_hint(row)}
 					</div>
 				</div>
 				${qty_cols}
+				${render_assignments_html(row)}
 				${control_html}
 				<div class="fg-item-status">${status_html}</div>
 			</div>
@@ -1780,7 +1784,9 @@ fabergray_erp.Bodega = class Bodega {
 		this.inflight_rows.add(row_name);
 		$card.addClass("fg-row-syncing");
 
-		this.call("set_picked_qty", { name: this.state.pick_list, row_name: row_name, qty: sent_qty })
+		// HOTFIX: a commercial line's total -- the backend distributes it over
+		// the line's internal rows (set_group_picked_qty).
+		this.call("set_group_picked_qty", { name: this.state.pick_list, group: row_name, qty: sent_qty })
 			.then(() => {
 				this.inflight_rows.delete(row_name);
 				const latest_desired = this.desired_qty.get(row_name);
@@ -1826,13 +1832,13 @@ fabergray_erp.Bodega = class Bodega {
 		$card.find(".fg-stepper-input").val(qty);
 		$card.find(".fg-stepper-minus").prop("disabled", qty <= 0);
 
-		const row = ((this.state.detail && this.state.detail.rows) || []).find((r) => r.row_name === row_name);
+		const row = commercial_rows(this.state.detail).find((r) => r.row_name === row_name);
 		const solicitada = row ? flt(row.qty_solicitada) : 0;
 		$card.find(".fg-stepper-plus").prop("disabled", solicitada > 0 && qty >= solicitada);
 	}
 
 	open_report_shortage_dialog(row_name, $card) {
-		const row = (this.state.detail.rows || []).find((r) => r.row_name === row_name);
+		const row = commercial_rows(this.state.detail).find((r) => r.row_name === row_name);
 		if (!row) return;
 
 		frappe.model.with_doctype("Reporte de Faltante", () => {
@@ -1877,16 +1883,17 @@ fabergray_erp.Bodega = class Bodega {
 					// (report_shortage() itself, api/bodega.py), this is only the
 					// first, cheapest line of defense.
 					dialog.disable_primary_action();
-					this.call("report_shortage", {
-						pick_list: this.state.pick_list,
-						row_name: row_name,
+					this.call("report_group_shortage", {
+						name: this.state.pick_list,
+						group: row_name,
 						qty_disponible: values.qty_disponible,
 						shortage_reason: values.shortage_reason,
 						resolution_note: values.resolution_note,
 					})
 						.then((result) => {
 							dialog.hide();
-							if (result && result.already_exists) {
+							const reports = (result && result.reports) || [];
+							if (reports.length && reports.every((r) => r.already_exists)) {
 								frappe.show_alert({
 									message:
 										"ℹ " +
@@ -2104,4 +2111,46 @@ function flt(v) {
 function format_qty(v) {
 	const n = flt(v);
 	return Number.isInteger(n) ? String(n) : n.toFixed(2);
+}
+
+// ---------------------------------------------------------------------------
+// HOTFIX cantidades divididas -- commercial grouping helpers
+// ---------------------------------------------------------------------------
+
+// The commercial lines of a Pick List detail (backend `groups`); a server
+// without groups (older build) falls back to its rows.
+function commercial_rows(detail) {
+	if (!detail) return [];
+	return detail.groups && detail.groups.length ? detail.groups : detail.rows || [];
+}
+
+// "Pedido: 2 Box (× 6)" when the line is sold in a unit other than the
+// physical one counted here.
+function render_commercial_hint(row) {
+	if (!row || !row.commercial_uom || flt(row.commercial_factor) === 1 || row.commercial_uom === row.uom) return "";
+	return `<div class="fg-item-commercial">${__("Pedido")}: ${format_qty(row.commercial_qty)} ${frappe.utils.escape_html(
+		row.commercial_uom
+	)} (× ${format_qty(row.commercial_factor)} ${frappe.utils.escape_html(row.uom || "")})</div>`;
+}
+
+// Internal assignments of a commercial line (warehouse rows of the Pick
+// List), read-only: picking and shortages are always done on the line and
+// distributed by the backend.
+function render_assignments_html(row) {
+	const parts = (row && row.assignments) || [];
+	if (parts.length < 2) return "";
+	const items = parts
+		.map(
+			(a, i) => `<li>
+				<span>${__("Asignación {0}", [i + 1])} · ${frappe.utils.escape_html(a.warehouse || "—")}</span>
+				<span>${__("Solicitado")} ${format_qty(a.qty_solicitada)} · ${__("Alistado")} ${format_qty(a.qty_alistada)}${
+				a.has_shortage_report ? ` · <b>${__("faltante reportado")}</b>` : ""
+			}</span>
+			</li>`
+		)
+		.join("");
+	return `<details class="fg-item-assignments">
+		<summary>${__("Ver asignaciones internas ({0})", [parts.length])}</summary>
+		<ul>${items}</ul>
+	</details>`;
 }

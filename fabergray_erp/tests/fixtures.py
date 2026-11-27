@@ -43,7 +43,7 @@ from contextlib import contextmanager
 from datetime import timedelta
 
 import frappe
-from frappe.utils import add_days, get_datetime, now_datetime, nowdate
+from frappe.utils import add_days, flt, get_datetime, now_datetime, nowdate
 
 COMPANY = "fabrigraysas"
 UOM = "Nos"
@@ -589,14 +589,36 @@ class TestWorld:
 		):
 			self.track_existing("Material Request", name)
 
-	def pick_list_for(self, sales_order, warehouse):
+	def pick_list_for(self, sales_order, warehouse, sales_order_items=None, full_lines=False):
 		"""Pick List via ERPNext's own Sales Order -> Pick List mapping
 		(create_pick_list), the same server method behind the standard
-		"Create Pick List" button -- not a hand-built Pick List doc."""
+		"Create Pick List" button -- not a hand-built Pick List doc.
+		`sales_order_items` keeps only those lines (HOTFIX cantidades
+		divididas: two Pick Lists may no longer claim the same line twice)."""
 		from erpnext.selling.doctype.sales_order.sales_order import create_pick_list
 
 		doc = create_pick_list(sales_order.name)
 		doc.parent_warehouse = warehouse
+		if sales_order_items is not None:
+			doc.set("locations", [r for r in doc.locations if r.sales_order_item in set(sales_order_items)])
+		if full_lines:
+			# HOTFIX cantidades divididas: one row per line with the line's FULL
+			# pending quantity (what the app's own full-demand builder puts on a
+			# Pick List), instead of ERPNext's silent cap to the stock on hand --
+			# a capped row hides the shortfall from the Pick List and from the
+			# shortage report.
+			lines = {i.name: i for i in sales_order.items}
+			kept, seen = [], set()
+			for r in doc.locations:
+				line = lines.get(r.sales_order_item)
+				if not line or r.sales_order_item in seen:
+					continue
+				seen.add(r.sales_order_item)
+				r.stock_qty = flt(line.stock_qty) - flt(line.picked_qty)
+				r.qty = flt(r.stock_qty / (flt(r.conversion_factor) or 1), 6)
+				kept.append(r)
+			doc.set("locations", kept)
+			doc.pick_manually = 1
 		doc.insert()
 		return self._track(doc)
 

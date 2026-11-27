@@ -223,8 +223,10 @@ class TestReportShortageIdempotency(IntegrationTestCase):
                 {"item_code": self.item.name, "warehouse": self.wh_b.name, "qty": 5, "rate": 100},
             ],
         )
-        pl_a = self.world.pick_list_for(so, self.wh.name)
-        pl_b = self.world.pick_list_for(so, self.wh_b.name)
+        # One Pick List per line (HOTFIX cantidades divididas: the same line
+        # can no longer be claimed by two Pick Lists).
+        pl_a = self.world.pick_list_for(so, self.wh.name, [so.items[0].name])
+        pl_b = self.world.pick_list_for(so, self.wh_b.name, [so.items[1].name])
         # create_pick_list(so) maps EVERY Sales Order line into each Pick List
         # (parent_warehouse does not filter rows), and since Fase 28.4A each
         # line is located only in its own warehouse -- so rows[0] is line A in

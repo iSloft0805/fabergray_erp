@@ -181,7 +181,9 @@ class TestPickListReservation(IntegrationTestCase):
 				{"item_code": item2.name, "warehouse": wh.name, "qty": 10, "rate": 100},
 			],
 		)
-		pl = self.world.pick_list_for(so, wh.name)
+		# HOTFIX cantidades divididas: full-quantity rows, so item2's report
+		# discloses its 4 missing (a capped row would hide them -- refused now).
+		pl = self.world.pick_list_for(so, wh.name, full_lines=True)
 
 		with fx.as_user(self.bodega_user):
 			queue = bodega.get_queue()
@@ -333,13 +335,19 @@ class TestPickListReservation(IntegrationTestCase):
 		self.assertEqual(sre_list[0].reserved_qty, 6.0)  # reserves exactly what was picked
 
 		# finish_picking() is blocked while reserved (Caso 2/6 finding) --
-		# release first, then it completes normally with the disclosed
-		# partial pick.
+		# release first. HOTFIX cantidades divididas: the finding documented
+		# above (the 4 missing invisible on the Pick List and on the report)
+		# is exactly the incident class -- completing it is now REFUSED with
+		# an administrative error, nothing is submitted or issued.
 		pl.reload()
 		pl.cancel_stock_reservation_entries()
-		with fx.as_user(self.bodega_user):
-			result = bodega.finish_picking(pl.name)
-		self.assertEqual(result["docstatus"], 1)
+		from fabergray_erp.fulfillment.pick_list_guard import PickListQuantityError
+
+		with fx.as_user(self.bodega_user), self.assertRaises(PickListQuantityError) as ctx:
+			bodega.finish_picking(pl.name)
+		self.assertIn("diferencia sin evidencia suficiente", str(ctx.exception))
+		self.assertEqual(frappe.db.get_value("Pick List", pl.name, "docstatus"), 0)
+		self.assertFalse(frappe.db.exists("Stock Entry", {"pick_list": pl.name, "docstatus": 1}))
 
 	# -- Caso 5: cancelación -------------------------------------------------
 

@@ -642,6 +642,11 @@ class TestFacturacionInvoicePricing(IntegrationTestCase):
 		pl.locations[0].fg_invoice_rate = 90000
 		with facturacion._invoice_pricing_write():
 			pl.save()
+		# HOTFIX cantidades divididas: issued with the hotfix -> the snapshot
+		# is reprinted unchanged. The defence applies to historical invoices
+		# (no snapshot, legacy calculation -- test setup at db level).
+		self._pdf_html(pl_name)
+		frappe.db.set_value("Pick List", pl_name, {"fg_invoice_calc_version": 0, "fg_invoice_snapshot": None}, update_modified=False)
 		with self.assertRaises(facturacion.InvoicePdfNotEligibleError):
 			self._pdf_html(pl_name)
 

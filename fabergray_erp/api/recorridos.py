@@ -429,16 +429,22 @@ def _resolve_pick_list_snapshot(pl):
 	logistics, not accounting."""
 	sales_order = _sales_order_of(pl)
 
-	item_count = 0
+	# HOTFIX cantidades divididas: item_count = COMMERCIAL products (one per
+	# Sales Order line) -- an internal 3 + 1 split is one product, not two;
+	# total_qty = the units really picked (stock units), unchanged.
+	from fabergray_erp.commercial_lines import group_key
+
+	commercial_products = set()
 	total_qty = 0.0
 	for row in frappe.get_list(
 		"Pick List Item",
 		filters={"parent": pl.name},
-		fields=["picked_qty"],
+		fields=["name", "item_code", "sales_order_item", "picked_qty"],
 		parent_doctype="Pick List",
 	):
-		item_count += 1
+		commercial_products.add(group_key(row))
 		total_qty += flt(row.picked_qty)
+	item_count = len(commercial_products)
 
 	customer_address = None
 	address_display = None
@@ -635,13 +641,16 @@ def get_available_orders(txt=None, start=0, page_length=20):
 	names = [r.name for r in page_rows]
 	item_counts, total_qtys, sales_order_by_pl = {}, {}, {}
 	if names:
+		from fabergray_erp.commercial_lines import group_key
+
 		for row in frappe.get_list(
 			"Pick List Item",
 			filters={"parent": ["in", names]},
-			fields=["parent", "sales_order", "picked_qty"],
+			fields=["name", "parent", "item_code", "sales_order", "sales_order_item", "picked_qty"],
 			parent_doctype="Pick List",
 		):
-			item_counts[row.parent] = item_counts.get(row.parent, 0) + 1
+			# HOTFIX cantidades divididas: commercial products, not internal rows.
+			item_counts.setdefault(row.parent, set()).add(group_key(row))
 			total_qtys[row.parent] = total_qtys.get(row.parent, 0.0) + flt(row.picked_qty)
 			if row.sales_order and row.parent not in sales_order_by_pl:
 				sales_order_by_pl[row.parent] = row.sales_order
@@ -662,7 +671,7 @@ def get_available_orders(txt=None, start=0, page_length=20):
 				"customer_name": pl.customer_name,
 				"customer_address": customer_address,
 				"address_display": address_display,
-				"item_count": item_counts.get(pl.name, 0),
+				"item_count": len(item_counts.get(pl.name, ())),
 				"total_qty": total_qtys.get(pl.name, 0.0),
 			}
 		)

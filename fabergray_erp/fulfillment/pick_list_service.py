@@ -21,6 +21,7 @@ from frappe.utils import flt
 from erpnext.stock.doctype.packed_item.packed_item import is_product_bundle
 from erpnext.stock.get_item_details import get_bin_details
 
+from fabergray_erp.fulfillment import pick_list_guard
 from fabergray_erp.fulfillment.analyzer import OPEN_PICK_LIST_STATUSES_EXCLUDED, analyze_sales_order
 
 
@@ -342,6 +343,7 @@ def create_pick_list_for_available_stock(sales_order):
     # and the ERPNext core precedent). frappe.session.user is never
     # touched, so the resulting Pick List's `owner` still correctly
     # reflects whoever actually submitted the Sales Order.
+    pick_list_guard.authorize(pick_list)
     pick_list.insert(ignore_permissions=True)
 
     if not pick_list.get("locations"):
@@ -350,7 +352,8 @@ def create_pick_list_for_available_stock(sales_order):
         # concurrent process claimed it via another open Pick List in the
         # meantime. Fail closed: remove the now-useless empty draft rather
         # than leaving it behind.
-        pick_list.delete(ignore_permissions=True)
+        with pick_list_guard.allow_delete(pick_list.name):
+            pick_list.delete(ignore_permissions=True)
         return None
 
     return pick_list
@@ -441,21 +444,7 @@ def create_pick_list_for_full_demand(sales_order):
         shortfall = qty_needed - existing
         if shortfall <= 0:
             continue
-        stock_uom = frappe.get_cached_value("Item", line["item_code"], "stock_uom")
-        pick_list.append(
-            "locations",
-            {
-                "item_code": line["item_code"],
-                "warehouse": line["warehouse"],
-                "sales_order": so_name,
-                "sales_order_item": sales_order_item,
-                "qty": shortfall,
-                "stock_qty": shortfall,
-                "conversion_factor": 1,
-                "uom": stock_uom,
-                "picked_qty": 0,
-            },
-        )
+        pick_list.append("locations", _top_up_row(so_name, sales_order_item, line, shortfall))
 
     if not pick_list.get("locations"):
         return None
@@ -465,9 +454,46 @@ def create_pick_list_for_full_demand(sales_order):
     # submitted the Sales Order (a Vendedora, granted zero Pick List
     # permission of her own by design), as a consequence of her own
     # already-authorized submit -- frappe.session.user is never touched.
+    pick_list_guard.authorize(pick_list)
     pick_list.insert(ignore_permissions=True)
 
     return pick_list
+
+
+def _top_up_row(so_name, sales_order_item, line, shortfall_stock_qty):
+    """HOTFIX cantidades divididas -- the row that carries the part of a
+    Sales Order line the native allocation could not place. It keeps the
+    line's COMMERCIAL unit and factor (the unit its price is quoted in) and
+    the item's stock unit, so the line stays ONE commercial line in every
+    unit: `stock_qty` (stock units) = `qty` (line unit) x factor.
+    Before this hotfix it was written in the stock unit with factor 1 and
+    no stock_uom: a line sold in boxes got a row in units (mixed units in
+    one line) and the Material Issue fell back to the default UOM.
+
+    A shortfall that is not a whole number of an indivisible line unit is
+    refused, never rounded (the native allocation only places whole units
+    of such a unit, so this cannot happen for a consistent order)."""
+    from fabergray_erp.commercial_lines import to_commercial_qty
+
+    so_item = frappe.db.get_value(
+        "Sales Order Item", sales_order_item, ["uom", "conversion_factor", "stock_uom"], as_dict=True
+    )
+    stock_uom = (so_item and so_item.stock_uom) or frappe.get_cached_value("Item", line["item_code"], "stock_uom")
+    uom = (so_item and so_item.uom) or stock_uom
+    factor = flt(so_item.conversion_factor) if so_item and flt(so_item.conversion_factor) > 0 else 1
+    qty = to_commercial_qty(shortfall_stock_qty, factor, uom, label=line["item_code"])
+    return {
+        "item_code": line["item_code"],
+        "warehouse": line["warehouse"],
+        "sales_order": so_name,
+        "sales_order_item": sales_order_item,
+        "qty": qty,
+        "stock_qty": shortfall_stock_qty,
+        "conversion_factor": factor,
+        "uom": uom,
+        "stock_uom": stock_uom,
+        "picked_qty": 0,
+    }
 
 
 def create_pick_list_for_remaining_demand(sales_order, sales_order_items):
@@ -521,24 +547,11 @@ def create_pick_list_for_remaining_demand(sales_order, sales_order_items):
         shortfall = qty_needed - existing
         if shortfall <= 0:
             continue
-        stock_uom = frappe.get_cached_value("Item", line["item_code"], "stock_uom")
-        pick_list.append(
-            "locations",
-            {
-                "item_code": line["item_code"],
-                "warehouse": line["warehouse"],
-                "sales_order": so_name,
-                "sales_order_item": sales_order_item,
-                "qty": shortfall,
-                "stock_qty": shortfall,
-                "conversion_factor": 1,
-                "uom": stock_uom,
-                "picked_qty": 0,
-            },
-        )
+        pick_list.append("locations", _top_up_row(so_name, sales_order_item, line, shortfall))
     if not pick_list.get("locations"):
         return None
     for idx, row in enumerate(pick_list.get("locations"), start=1):
         row.idx = idx
+    pick_list_guard.authorize(pick_list)
     pick_list.insert(ignore_permissions=True)  # system action, same reasoning as the full-demand builder
     return pick_list

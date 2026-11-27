@@ -273,7 +273,13 @@ class TestSalesOrderLogisticsStatus(IntegrationTestCase):
 			so_result = cotizaciones.create_sales_order_from_quotation(qtn_name)
 		self.world.track_existing("Sales Order", so_result["sales_order"])
 
-		pl = self.world.pick_list_for(frappe.get_doc("Sales Order", so_result["sales_order"]), self.wh.name)
+		# The Pick List the engine already created on submit (HOTFIX cantidades
+		# divididas: a second native one would claim the line twice).
+		self.world.track_existing_pick_lists_and_reports_for(so_result["sales_order"])
+		pl = frappe.get_doc(
+			"Pick List",
+			frappe.get_all("Pick List Item", filters={"sales_order": so_result["sales_order"]}, pluck="parent")[0],
+		)
 		with fx.as_user(self.bodega_user):
 			bodega.start_picking(pl.name)
 			for row in bodega.get_pick_list(pl.name)["rows"]:

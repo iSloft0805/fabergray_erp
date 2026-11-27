@@ -217,7 +217,10 @@ def cleanup_fulfillment_for_cancelled_sales_order(sales_order):
         # Order cancel. Same native pattern as shortage_service.py (see
         # its module docstring for the full writeup and the ERPNext core
         # precedent) -- frappe.session.user is never touched.
-        frappe.delete_doc("Pick List", name, ignore_permissions=True)
+        from fabergray_erp.fulfillment.pick_list_guard import allow_delete
+
+        with allow_delete(name):  # HOTFIX: the system's own cleanup of a cancelled order
+            frappe.delete_doc("Pick List", name, ignore_permissions=True)
         removed_pick_lists.append(name)
 
     resolved_reports = []

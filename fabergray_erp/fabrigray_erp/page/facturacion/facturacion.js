@@ -776,7 +776,9 @@ fabergray_erp.Facturacion = class Facturacion {
 				</div>`
 			: "";
 
-		const items_html = (d.items || []).length
+		// HOTFIX cantidades divididas: one review line per COMMERCIAL line.
+		this._review_lines = review_lines(d);
+		const items_html = this._review_lines.length
 			? `${shortage_html}<div class="fg-fact-review-table">
 					<div class="fg-fact-review-table-head">
 						<span class="fg-fact-review-col-idx">#</span>
@@ -789,7 +791,7 @@ fabergray_erp.Facturacion = class Facturacion {
 						<span class="fg-fact-review-col-total">${__("Total")}</span>
 						<span class="fg-fact-review-col-status">${__("Estado")}</span>
 					</div>
-					<div class="fg-fact-review-table-body">${d.items
+					<div class="fg-fact-review-table-body">${this._review_lines
 						.map((item, idx) => this.render_review_item_row(item, idx + 1, is_facturado))
 						.join("")}</div>
 				</div>`
@@ -895,7 +897,16 @@ fabergray_erp.Facturacion = class Facturacion {
 	// =====================================================================
 	review_pricing_line(row_name) {
 		const p = this._review_pricing;
-		return p ? (p.lines || []).find((l) => l.row_name === row_name) : null;
+		const line = p ? (p.lines || []).find((l) => l.row_name === row_name) : null;
+		const group = (this._review_lines || []).find((l) => l.row_name === row_name && (l.row_names || []).length > 1);
+		if (!line || !group) return line;
+		// HOTFIX: the commercial line's total = sum of its internal rows.
+		const members = (p.lines || []).filter((l) => group.row_names.includes(l.row_name));
+		const amounts = members.map((l) => l.amount);
+		const total = amounts.some((a) => a === null || a === undefined)
+			? null
+			: Math.round(amounts.reduce((acc, a) => acc + Math.round(flt(a) * 100), 0)) / 100;
+		return Object.assign({}, line, { amount: total });
 	}
 
 	render_review_pricing_section_html() {
@@ -1120,7 +1131,9 @@ fabergray_erp.Facturacion = class Facturacion {
 				</span>`
 			: "";
 		return `
-			<div class="fg-fact-review-row ${checked ? "is-checked" : ""}" data-row="${frappe.utils.escape_html(item.row_name)}">
+			<div class="fg-fact-review-row ${checked ? "is-checked" : ""}" data-row="${frappe.utils.escape_html(item.row_name)}"${
+				item.group ? ` data-group="${frappe.utils.escape_html(item.group)}"` : ""
+			}>
 				<span class="fg-fact-review-col-idx">${idx}</span>
 				<span class="fg-fact-review-col-product">
 					<label class="fg-fact-review-checkbox-wrap">
@@ -1386,15 +1399,16 @@ fabergray_erp.Facturacion = class Facturacion {
 		$row.find(".fg-fact-review-checkbox").prop("disabled", true);
 		$row.find(".fg-fact-review-item-feedback").html(icon("loader-circle", "fg-icon-sm fg-spin"));
 
-		this.call("set_invoicing_item_checked", {
-			pick_list: pick_list_name,
-			pick_list_item: row_name,
-			checked: checked ? 1 : 0,
-		})
+		const line = (this._review_lines || []).find((i) => i.row_name === row_name);
+		const request = line && line.group
+			? this.call("set_invoicing_group_checked", { pick_list: pick_list_name, group: line.group, checked: checked ? 1 : 0 })
+			: this.call("set_invoicing_item_checked", { pick_list: pick_list_name, pick_list_item: row_name, checked: checked ? 1 : 0 });
+		request
 			.then((result) => {
 				if (this._review_pick_list !== pick_list_name || !this._review_detail) return;
-				const item = this._review_detail.items.find((i) => i.row_name === row_name);
-				if (item) item.checked = result.checked;
+				const names = result.row_names || [row_name];
+				for (const i of this._review_detail.items || []) if (names.includes(i.row_name)) i.checked = result.checked;
+				if (line) line.checked = result.checked;
 				this._review_detail.checked_items = result.checked_items;
 				this._review_detail.total_items = result.total_items;
 
@@ -1423,7 +1437,7 @@ fabergray_erp.Facturacion = class Facturacion {
 				// The server already showed the real error via frappe.call()'s
 				// own default error dialog -- revert the checkbox to its last
 				// known-good state rather than trusting the failed click.
-				const item = this._review_detail && this._review_detail.items.find((i) => i.row_name === row_name);
+				const item = (this._review_lines || []).find((i) => i.row_name === row_name);
 				$row
 					.find(".fg-fact-review-checkbox")
 					.prop("checked", !!(item && item.checked))
@@ -2386,4 +2400,13 @@ function format_qty(v) {
 // recomputed from anything else.
 function review_progress_pct(d) {
 	return d && d.total_items ? (d.checked_items / d.total_items) * 100 : 0;
+}
+
+// HOTFIX cantidades divididas -- the review's COMMERCIAL lines (backend
+// `groups`): one per Sales Order line, quantities in the line's unit; each
+// keeps its internal row names (price cells and checks act on all of them).
+// A server without groups (older build) falls back to the rows.
+function review_lines(d) {
+	if (!d || !(d.groups || []).length) return (d && d.items) || [];
+	return d.groups.map((g) => Object.assign({}, g, { row_name: (g.row_names || [])[0] || g.group }));
 }

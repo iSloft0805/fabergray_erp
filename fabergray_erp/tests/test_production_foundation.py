@@ -483,7 +483,7 @@ class TestPartialPickListRemainder(IntegrationTestCase):
 			bodega.set_picked_qty(pl1, rows[0]["row_name"], 6)
 			report = bodega.report_shortage(pl1, rows[1]["row_name"], 0, "Stock insuficiente")
 			self.world.track_existing("Reporte de Faltante", report["name"])
-			with self.assertRaisesRegex(frappe.ValidationError, "quedaron en 0"):
+			with self.assertRaisesRegex(frappe.ValidationError, "faltante reportado sin unidades alistadas"):
 				bodega.finish_picking(pl1)
 		self.assertEqual(self._bucket(pl1), "con_faltantes")
 

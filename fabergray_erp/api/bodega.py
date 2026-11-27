@@ -15,7 +15,8 @@ from frappe.utils import flt, now_datetime
 
 from erpnext.stock.doctype.pick_list.pick_list import get_actual_qty
 
-from fabergray_erp.fulfillment import bodega_settings, shortage_invoice
+from fabergray_erp import commercial_lines
+from fabergray_erp.fulfillment import bodega_settings, pick_list_guard, shortage_invoice
 from fabergray_erp.fulfillment.stock_issue_service import (
 	IncompleteStockIssueError,
 	controlled_pick_list_submit,
@@ -300,9 +301,13 @@ def get_queue():
 	warehouses_by_pick_list = {}
 	if names:
 		for row in frappe.get_all(
-			"Pick List Item", filters={"parent": ["in", names]}, fields=["parent", "sales_order", "warehouse"]
+			"Pick List Item",
+			filters={"parent": ["in", names]},
+			fields=["name", "parent", "sales_order", "sales_order_item", "item_code", "warehouse"],
 		):
-			line_counts[row.parent] = line_counts.get(row.parent, 0) + 1
+			# HOTFIX cantidades divididas: one COMMERCIAL line per Sales Order
+			# line -- an internal split (3 + 1) is not a second product.
+			line_counts.setdefault(row.parent, set()).add(commercial_lines.group_key(row))
 			if row.sales_order and row.parent not in sales_order_by_pick_list:
 				sales_order_by_pick_list[row.parent] = row.sales_order
 			if row.warehouse:
@@ -343,7 +348,7 @@ def get_queue():
 			"creation": pl.creation,
 			"fg_started_by": pl.fg_started_by,
 			"fg_started_on": pl.fg_started_on,
-			"item_count": line_counts.get(pl.name, 0),
+			"item_count": len(line_counts.get(pl.name, ())),
 			"sales_order": sales_order,
 			"commercial_name": _commercial_name(sales_order),
 		}
@@ -471,6 +476,7 @@ def get_pick_list(name):
 
 	sales_order = next((row.sales_order for row in pl.get("locations") if row.sales_order), None)
 	invoiced_with_shortage = shortage_invoice.is_invoiced_with_shortage(pl)
+	groups = _commercial_groups(pl, rows)
 
 	return {
 		"name": pl.name,
@@ -494,7 +500,145 @@ def get_pick_list(name):
 			_(shortage_invoice.MSG_INVOICED_WITH_SHORTAGE) if invoiced_with_shortage else None
 		),
 		"rows": rows,
+		# HOTFIX cantidades divididas -- what Bodega SEES: one commercial line
+		# per Sales Order line (rows above stay for compatibility/detail).
+		"groups": groups,
 	}
+
+
+def _commercial_groups(pl, rows):
+	"""One entry per commercial line (Sales Order line + item), in physical
+	STOCK units -- what Bodega counts on the shelf -- with the line's
+	commercial unit alongside. Availability is read ONCE per item+warehouse
+	(two rows of the same product in the same warehouse never double the
+	available stock). The internal rows travel in `assignments`."""
+	by_row = {r["row_name"]: r for r in rows}
+	out = []
+	available_seen = {}
+	for key, members in commercial_lines.group_rows(pl.get("locations") or []):
+		first = members[0]
+		so_item = (
+			frappe.db.get_value("Sales Order Item", first.sales_order_item, ["uom", "conversion_factor", "qty"], as_dict=True)
+			if first.sales_order_item
+			else None
+		)
+		requested = sum(flt(m.stock_qty) for m in members)
+		picked = sum(flt(m.picked_qty) for m in members)
+		available = 0.0
+		for wh in sorted({m.warehouse for m in members if m.warehouse}):
+			if (first.item_code, wh) not in available_seen:
+				available_seen[(first.item_code, wh)] = by_row.get(
+					next(m.name for m in members if m.warehouse == wh), {}
+				).get("qty_disponible", 0.0)
+			available += flt(available_seen[(first.item_code, wh)])
+		stock_uom = first.get("stock_uom") or frappe.get_cached_value("Item", first.item_code, "stock_uom")
+		out.append(
+			{
+				"group": commercial_lines.group_id(key),
+				"row_name": commercial_lines.group_id(key),  # identity used by the page's stepper
+				"item_code": first.item_code,
+				"item_name": first.item_name,
+				"uom": stock_uom,
+				"commercial_uom": so_item.uom if so_item else first.uom,
+				"commercial_factor": flt(so_item.conversion_factor) if so_item else flt(first.conversion_factor) or 1,
+				"commercial_qty": flt(so_item.qty) if so_item else None,
+				"warehouse": ", ".join(sorted({m.warehouse for m in members if m.warehouse})),
+				"qty_solicitada": requested,
+				"qty_alistada": picked,
+				"qty_disponible": available,
+				"qty_faltante": max(flt(requested - min(available, requested), 6), 0.0),
+				"has_shortage_report": any(by_row.get(m.name, {}).get("has_shortage_report") for m in members),
+				"assignments": [
+					{
+						"row_name": m.name,
+						"warehouse": m.warehouse,
+						"qty_solicitada": flt(m.stock_qty),
+						"qty_alistada": flt(m.picked_qty),
+						"has_shortage_report": by_row.get(m.name, {}).get("has_shortage_report", False),
+					}
+					for m in members
+				],
+			}
+		)
+	return out
+
+
+def _group_members(pl, group):
+	members = commercial_lines.find_group(pl.get("locations") or [], group)
+	if not members:
+		frappe.throw(_("El producto indicado no pertenece a este Pick List."))
+	return members
+
+
+def _distribute(members, total):
+	"""Spread `total` stock units over the group's rows in their order, each
+	up to its own requested quantity -- the backend, never the page, decides
+	which internal row receives what."""
+	remaining = flt(total, 6)
+	out = []
+	for m in members:
+		take = min(flt(m.stock_qty), max(remaining, 0.0))
+		out.append((m, flt(take, 6)))
+		remaining = flt(remaining - take, 6)
+	return out
+
+
+@frappe.whitelist()
+def set_group_picked_qty(name, group, qty):
+	"""HOTFIX cantidades divididas -- ALISTADO of a commercial line: the total
+	units picked for the line, distributed over its internal rows. Same
+	rules as set_picked_qty() (0 <= qty <= requested, draft only), one save."""
+	_require_login()
+	pl = frappe.get_doc("Pick List", name)
+	pl.check_permission("write")
+	if pl.docstatus != 0:
+		frappe.throw(_("No se puede modificar un Pick List que ya fue finalizado o cancelado."))
+	members = _group_members(pl, group)
+	qty = flt(qty)
+	requested = sum(flt(m.stock_qty) for m in members)
+	if qty < 0:
+		frappe.throw(_("La cantidad alistada no puede ser negativa."))
+	precision = members[0].precision("picked_qty") or 6
+	if flt(qty, precision) > flt(requested, precision):
+		frappe.throw(
+			_("La cantidad alistada ({0}) no puede superar la cantidad solicitada ({1}) de {2}.").format(
+				qty, requested, members[0].item_name or members[0].item_code
+			)
+		)
+	for m, take in _distribute(members, qty):
+		m.picked_qty = take
+	_lock_manual_picking(pl)
+	try:
+		pl.save()
+	except frappe.exceptions.TimestampMismatchError:
+		frappe.throw(
+			_("Otro usuario modificó este Pick List al mismo tiempo. Actualiza y vuelve a intentar."),
+			exc=frappe.exceptions.TimestampMismatchError,
+		)
+	return {"group": group, "picked_qty": sum(flt(m.picked_qty) for m in members)}
+
+
+@frappe.whitelist()
+def report_group_shortage(name, group, qty_disponible, shortage_reason, resolution_note=None):
+	"""HOTFIX cantidades divididas -- REPORTAR FALTANTE of a commercial line:
+	`qty_disponible` is what Bodega really found for the WHOLE line; it is
+	distributed over the internal rows and every row left short gets its own
+	Reporte de Faltante through report_shortage() (same rules, idempotent)."""
+	_require_login()
+	pl = frappe.get_doc("Pick List", name)
+	pl.check_permission("write")
+	members = _group_members(pl, group)
+	available = flt(qty_disponible)
+	if available < 0:
+		frappe.throw(_("La cantidad disponible no puede ser negativa."))
+	requested = sum(flt(m.stock_qty) for m in members)
+	if available >= requested:
+		frappe.throw(_("La cantidad disponible cubre lo solicitado: no hay faltante que reportar."))
+	reports = []
+	for m, take in _distribute(members, available):
+		if take < flt(m.stock_qty):
+			reports.append(report_shortage(name, m.name, take, shortage_reason, resolution_note))
+	return {"group": group, "reports": reports, "qty_faltante": flt(requested - available, 6)}
 
 
 @frappe.whitelist()
@@ -869,7 +1013,7 @@ def _complete_pick_list(name, prepare=None, system_action=False, honor_force_pol
 		if row.name not in reported_rows:
 			undisclosed_rows.append(row.idx)
 		elif flt(row.picked_qty) == 0:
-			zero_qty_rows.append(row.idx)
+			zero_qty_rows.append(row)
 
 	if undisclosed_rows:
 		frappe.throw(
@@ -881,14 +1025,27 @@ def _complete_pick_list(name, prepare=None, system_action=False, honor_force_pol
 		)
 
 	if zero_qty_rows:
+		# HOTFIX cantidades divididas: never suggest removing products or
+		# changing the order's quantities -- only the authorized options.
+		products = ", ".join(
+			sorted({f"{row.item_name or row.item_code} ({flt(row.stock_qty) - flt(row.picked_qty):g})" for row in zero_qty_rows})
+		)
 		frappe.throw(
 			_(
-				"La(s) fila(s) {0} quedaron en 0 unidades alistadas. Un Pick List no puede "
-				"finalizarse así: al enviarlo, ERPNext asumiría automáticamente que se alistó "
-				"toda la cantidad solicitada, lo cual falsearía el registro. Ajusta el Pick List "
-				"o espera a resolver el faltante antes de finalizar esa fila."
-			).format(", ".join(str(idx) for idx in zero_qty_rows))
+				"No se puede completar todavía: {0} tiene(n) un faltante reportado sin unidades alistadas. "
+				"Opciones autorizadas: 1) cuando llegue el inventario, Jefe de Bodega lo completa con "
+				"«Validar pedidos con faltantes resueltos»; 2) Jefe de Bodega puede autorizar «Facturación "
+				"con faltantes»; 3) si la política «Completar pedidos sin importar inventario» está activa, "
+				"alista las unidades que físicamente tienes y completa el pedido. No elimines productos ni "
+				"cambies las cantidades del pedido."
+			).format(products),
+			title=_("Faltante pendiente"),
 		)
+
+	# HOTFIX cantidades divididas -- quantity conservation against the Sales
+	# Order line (independent of the document's previous version): nothing
+	# duplicated, nothing lost (deleted rows / orphan shortage reports).
+	pick_list_guard.assert_quantities_conserved(pl, _("completarse"))
 
 	# "Completar pedidos sin importar inventario" (fulfillment.bodega_settings):
 	# only Bodega's own COMPLETAR PEDIDO honors it (honor_force_policy), read

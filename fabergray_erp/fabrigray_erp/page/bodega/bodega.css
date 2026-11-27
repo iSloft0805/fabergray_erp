@@ -2888,3 +2888,37 @@
 	font-weight: 600;
 	color: var(--red-700, #b91c1c);
 }
+
+/* HOTFIX cantidades divididas -- commercial line + internal assignments */
+.fg-item-commercial {
+	margin-top: 4px;
+	font-size: 0.78rem;
+	color: var(--fg-text-muted, #667085);
+}
+
+.fg-item-assignments {
+	grid-column: 1 / -1;
+	font-size: 0.82rem;
+	color: #475467;
+}
+
+.fg-item-assignments summary {
+	cursor: pointer;
+	font-weight: 600;
+	color: var(--fg-primary-dark, #1e63c4);
+}
+
+.fg-item-assignments ul {
+	margin: 6px 0 0;
+	padding-left: 18px;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.fg-item-assignments li {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: space-between;
+	gap: 8px;
+}

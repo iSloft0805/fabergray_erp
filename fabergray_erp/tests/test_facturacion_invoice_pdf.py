@@ -347,6 +347,12 @@ class TestFacturacionInvoicePdf(IntegrationTestCase):
 			"Pick List Item", filters={"parent": pl_name, "item_code": self.item_b.name}, pluck="name"
 		)[0]
 		frappe.db.set_value("Pick List Item", row, "picked_qty", 1)
+		# HOTFIX cantidades divididas: an invoice issued with the hotfix keeps
+		# its snapshot -- a later change never alters the reprint.
+		self.assertIn("$ 15.100", self._html(pl_name))
+		# A historical invoice (no snapshot, legacy calculation -- test setup
+		# at db level) still bills the picked quantity.
+		frappe.db.set_value("Pick List", pl_name, {"fg_invoice_calc_version": 0, "fg_invoice_snapshot": None}, update_modified=False)
 		html = self._html(pl_name)
 		self.assertIn("$ 12.700", html)  # 2 x 5.750 + 1 x 1.200
 		self.assertNotIn("$ 15.100", html)

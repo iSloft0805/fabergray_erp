@@ -106,6 +106,7 @@ verbatim, never grouped.
 
 import functools
 from contextlib import contextmanager
+import json
 from decimal import Decimal, InvalidOperation
 
 import frappe
@@ -121,7 +122,8 @@ from fabergray_erp.api.cotizaciones import (
 	_resolve_pdf_advisor_name,
 	_resolve_pdf_contact,
 )
-from fabergray_erp.fulfillment import shortage_invoice
+from fabergray_erp import commercial_lines
+from fabergray_erp.fulfillment import pick_list_guard, shortage_invoice
 from fabergray_erp.fulfillment.stock_issue_service import get_stock_issue
 from fabergray_erp.invoice_issuers import (
 	DEFAULT_INVOICE_PRINT_FORMAT,
@@ -702,9 +704,13 @@ def _checklist_counts(pl):
 	callers that already have the doc (mark_as_invoiced(),
 	get_invoicing_detail(), set_invoicing_item_checked()) get a result
 	consistent with whatever they just changed, before any reload."""
-	rows = pl.get("locations") or []
-	total_items = len(rows)
-	checked_items = sum(1 for r in rows if cint(r.fg_invoicing_checked))
+	# HOTFIX cantidades divididas: counted in COMMERCIAL lines (a line is
+	# reviewed when every internal row is) -- the same gate as before (all
+	# rows checked <=> all lines checked), without showing a 3 + 1 split as
+	# two products.
+	groups = commercial_lines.group_rows(pl.get("locations") or [])
+	total_items = len(groups)
+	checked_items = sum(1 for _key, members in groups if all(cint(r.fg_invoicing_checked) for r in members))
 	progress_percent = round((checked_items / total_items) * 100, 2) if total_items else 0.0
 	return total_items, checked_items, progress_percent
 
@@ -865,17 +871,18 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 
 	names = [r.name for r in page_rows]
 	pl_by_name = {r.name: r for r in page_rows}
-	item_counts, checked_counts, total_qtys, sales_order_by_pl = {}, {}, {}, {}
+	item_counts, total_qtys, sales_order_by_pl = {}, {}, {}
 	if names:
 		for row in frappe.get_list(
 			"Pick List Item",
 			filters={"parent": ["in", names]},
-			fields=["parent", "sales_order", "picked_qty", "stock_qty", "fg_invoicing_checked"],
+			fields=["name", "parent", "item_code", "sales_order", "sales_order_item", "picked_qty", "stock_qty", "fg_invoicing_checked"],
 			parent_doctype="Pick List",
 		):
-			item_counts[row.parent] = item_counts.get(row.parent, 0) + 1
-			if cint(row.fg_invoicing_checked):
-				checked_counts[row.parent] = checked_counts.get(row.parent, 0) + 1
+			# HOTFIX cantidades divididas: commercial lines, not internal rows.
+			key = commercial_lines.group_key(row)
+			line_state = item_counts.setdefault(row.parent, {})
+			line_state[key] = line_state.get(key, True) and bool(cint(row.fg_invoicing_checked))
 			total_qtys[row.parent] = total_qtys.get(row.parent, 0.0) + invoice_qty(pl_by_name[row.parent], row)
 			if row.sales_order and row.parent not in sales_order_by_pl:
 				sales_order_by_pl[row.parent] = row.sales_order
@@ -896,8 +903,9 @@ def get_invoicing_queue(status=None, txt=None, start=0, page_length=20):
 	results = []
 	for pl in page_rows:
 		sales_order = sales_order_by_pl.get(pl.name)
-		total_items = item_counts.get(pl.name, 0)
-		checked_items = checked_counts.get(pl.name, 0)
+		line_state = item_counts.get(pl.name, {})
+		total_items = len(line_state)
+		checked_items = sum(1 for done in line_state.values() if done)
 		progress_percent = round((checked_items / total_items) * 100, 2) if total_items else 0.0
 		results.append(
 			{
@@ -974,6 +982,8 @@ def get_invoicing_detail(pick_list):
 		for r in (pl.get("locations") or [])
 	]
 
+	groups = _invoicing_groups(pl, items)
+
 	return {
 		"pick_list": pl.name,
 		"sales_order": sales_order,
@@ -981,6 +991,9 @@ def get_invoicing_detail(pick_list):
 		"customer": pl.customer,
 		"customer_name": pl.customer_name,
 		"fg_customer_company_type": _customer_company_type(pl.customer),
+		# HOTFIX cantidades divididas -- what Facturación REVIEWS: one line
+		# per commercial line (items above stay for compatibility).
+		"groups": groups,
 		"fg_invoicing_status": pl.fg_invoicing_status or FG_INVOICING_PENDIENTE,
 		"fg_invoice_issuer": pl.fg_invoice_issuer or None,
 		"fg_invoice_number": cint(pl.fg_invoice_number) or None,
@@ -999,6 +1012,82 @@ def get_invoicing_detail(pick_list):
 		"checked_items": checked_items,
 		"progress_percent": progress_percent,
 		"items": items,
+	}
+
+
+def _invoicing_groups(pl, items):
+	"""One review line per commercial line (Sales Order line + item), with
+	quantities in the line's commercial unit (stock units / line factor).
+	An invoice issued before the hotfix keeps showing its historical units."""
+	by_row = {i["row_name"]: i for i in items}
+	legacy = uses_legacy_invoice_calc(pl)
+	out = []
+	for key, members in commercial_lines.group_rows(pl.get("locations") or []):
+		first = members[0]
+		so_item = (
+			frappe.db.get_value("Sales Order Item", first.sales_order_item, ["uom", "conversion_factor"], as_dict=True)
+			if first.sales_order_item
+			else None
+		)
+		factor = 1 if legacy or not so_item else (flt(so_item.conversion_factor) or 1)
+		uom = (so_item.uom if so_item and not legacy else first.uom) or first.uom
+		rows = [by_row[m.name] for m in members if m.name in by_row]
+
+		def commercial(field):
+			return flt(sum(flt(r[field]) for r in rows) / factor, commercial_lines.QTY_PRECISION)
+
+		out.append(
+			{
+				"group": commercial_lines.group_id(key),
+				"item_code": first.item_code,
+				"item_name": first.item_name,
+				"uom": uom,
+				"conversion_factor": factor,
+				"qty": commercial("qty"),
+				"ordered_qty": commercial("ordered_qty"),
+				"picked_qty": commercial("picked_qty"),
+				"pending_qty": commercial("pending_qty"),
+				"stock_qty": sum(flt(r["qty"]) for r in rows),
+				"checked": int(bool(rows) and all(cint(r["checked"]) for r in rows)),
+				"row_names": [r["row_name"] for r in rows],
+				"rows": len(rows),
+			}
+		)
+	return out
+
+
+@frappe.whitelist()
+def set_invoicing_group_checked(pick_list, group, checked):
+	"""HOTFIX cantidades divididas -- checks (or unchecks) EVERY internal row
+	of one commercial line in one save; same rules as
+	set_invoicing_item_checked() (write permission, invoiceable, read-only
+	once Facturado)."""
+	_require_login()
+	frappe.has_permission("Pick List", "write", throw=True)
+	pl = frappe.get_doc("Pick List", pick_list)
+	pl.check_permission("write")
+	members = commercial_lines.find_group(pl.get("locations") or [], group)
+	if not members:
+		frappe.throw(_("El producto indicado no pertenece al Pick List {0}.").format(pick_list), frappe.DoesNotExistError)
+	_assert_invoiceable(pl, _("Este Pick List todavía no está disponible para Facturación."))
+	if pl.fg_invoicing_status == FG_INVOICING_FACTURADO:
+		frappe.throw(_("Este pedido ya fue facturado; el checklist es de solo lectura."), ChecklistReadOnlyError)
+	checked = cint(checked)
+	now = frappe.utils.now_datetime()
+	for row in members:
+		row.fg_invoicing_checked = checked
+		row.fg_invoicing_checked_on = now if checked else None
+		row.fg_invoicing_checked_by = frappe.session.user if checked else None
+	pl.save()  # real permission, no ignore_permissions
+	total_items, checked_items, progress_percent = _checklist_counts(pl)
+	return {
+		"pick_list": pl.name,
+		"group": group,
+		"checked": checked,
+		"row_names": [row.name for row in members],
+		"total_items": total_items,
+		"checked_items": checked_items,
+		"progress_percent": progress_percent,
 	}
 
 
@@ -1210,12 +1299,17 @@ def mark_as_invoiced(pick_list_name, issuer=None, payment_method=None, due_date=
 	# pasar a Facturado. Valida todas las líneas primero y lanza sin tocar
 	# nada si alguna no tiene precio válido; luego estado + precios viajan
 	# en este MISMO y único .save() -- nunca un estado parcial.
-	_freeze_invoice_prices(pl, _invoice_pricing_sales_orders(pl))
+	# HOTFIX cantidades divididas: quantities conserved against the Sales
+	# Order lines before invoicing (deleted rows / duplicates are refused).
+	pick_list_guard.assert_quantities_conserved(pl, _("facturarse"))
+	sales_orders = _invoice_pricing_sales_orders(pl)
+	_freeze_invoice_prices(pl, sales_orders)
 
 	pl.fg_invoicing_status = FG_INVOICING_FACTURADO
 	pl.fg_invoiced_on = invoiced_on
 	pl.fg_invoiced_by = frappe.session.user
-	with _invoice_pricing_write(), _invoice_numbering_write(), _invoice_payment_write():
+	_set_invoice_snapshot(pl, sales_orders)
+	with _invoice_pricing_write(), _invoice_numbering_write(), _invoice_payment_write(), _invoice_snapshot_write():
 		pl.fg_invoice_issuer = issuer
 		pl.fg_invoice_payment_method = payment_method
 		pl.fg_invoice_due_date = due_date
@@ -1420,6 +1514,48 @@ def _resolve_invoice_number(pl):
 	return cint(pl.get("fg_invoice_number")) or None
 
 
+#: HOTFIX cantidades divididas -- versión del cálculo comercial y snapshot
+#: inmutable de lo facturado. Solo los escribe mark_as_invoiced(), una vez.
+INVOICE_SNAPSHOT_FIELDS = ("fg_invoice_calc_version", "fg_invoice_snapshot")
+_INVOICE_SNAPSHOT_FLAG = "fg_invoice_snapshot_write"
+
+
+def uses_legacy_invoice_calc(pl):
+	"""Facturado before this hotfix: no snapshot and no calc version."""
+	return (
+		pl.get("fg_invoicing_status") == FG_INVOICING_FACTURADO
+		and not pl.get("fg_invoice_snapshot")
+		and cint(pl.get("fg_invoice_calc_version")) < commercial_lines.CALC_VERSION_COMMERCIAL
+	)
+
+
+@contextmanager
+def _invoice_snapshot_write():
+	previous = frappe.flags.get(_INVOICE_SNAPSHOT_FLAG)
+	frappe.flags[_INVOICE_SNAPSHOT_FLAG] = True
+	try:
+		yield
+	finally:
+		frappe.flags[_INVOICE_SNAPSHOT_FLAG] = previous
+
+
+def guard_invoice_snapshot_fields(doc, method=None):
+	"""Pick List `validate` + `before_update_after_submit`: the calculation
+	version and the snapshot of an invoice are written ONCE, by
+	mark_as_invoiced(), and never change afterwards (not even inside it)."""
+	before = doc.get_doc_before_save()
+	for fieldname in INVOICE_SNAPSHOT_FIELDS:
+		old_value = (before.get(fieldname) if before else None) or None
+		new_value = doc.get(fieldname) or None
+		if new_value == old_value:
+			continue
+		if old_value is not None or not frappe.flags.get(_INVOICE_SNAPSHOT_FLAG):
+			frappe.throw(
+				_("El registro comercial de una factura solo lo crea Facturación al facturar y no se modifica."),
+				frappe.PermissionError,
+			)
+
+
 @contextmanager
 def _invoice_numbering_write():
 	"""Misma bandera interna que _invoice_pricing_write(): nunca viene del
@@ -1573,8 +1709,163 @@ def _resolve_invoice_customer(so):
 	}
 
 
-def _build_invoice_lines_and_totals(pl, so):
-	"""Líneas + totales desde los documentos reales (ver cabecera de esta
+def _build_invoice_lines_and_totals(pl, so, doc=None):
+	"""HOTFIX cantidades divididas -- LA función comercial de la factura
+	(PDF de los tres emisores, Cartera.compute_invoice_amount, snapshot de
+	MARCAR COMO FACTURADO). Elige el cálculo POR DOCUMENTO, nunca por fecha:
+
+	- Facturado con snapshot inmutable (fg_invoice_snapshot) -> exactamente
+	  lo emitido;
+	- Facturado sin versión (emitido antes del hotfix) -> el cálculo
+	  histórico intacto (_build_invoice_lines_and_totals_legacy): su
+	  reimpresión y una obligación de Cartera creada después conservan el
+	  importe de esa factura;
+	- todo lo demás -> el cálculo comercial (_build_commercial_invoice_lines).
+
+	`doc`: el Pick List ya cargado (en memoria) -- MARCAR COMO FACTURADO lo
+	usa con los precios recién congelados; si no se da, se lee una copia
+	fresca (el before_print nativo puede haber agrupado `locations`)."""
+	fresh = doc or frappe.get_doc("Pick List", pl.name)
+	if fresh.get("fg_invoicing_status") == FG_INVOICING_FACTURADO:
+		snapshot = _invoice_snapshot(fresh)
+		if snapshot:
+			return snapshot["lines"], snapshot["totals"]
+		if cint(fresh.get("fg_invoice_calc_version")) < commercial_lines.CALC_VERSION_COMMERCIAL:
+			return _build_invoice_lines_and_totals_legacy(pl, so, fresh=fresh)
+	return _build_commercial_invoice_lines(fresh, so)
+
+
+def _invoice_snapshot(pl):
+	raw = pl.get("fg_invoice_snapshot")
+	if not raw:
+		return None
+	try:
+		data = json.loads(raw)
+	except (TypeError, ValueError):
+		frappe.throw(_("La factura {0} tiene un registro comercial ilegible.").format(pl.name), InvoicePdfNotEligibleError)
+	return data if isinstance(data, dict) and data.get("lines") is not None else None
+
+
+def _build_commercial_invoice_lines(fresh, so):
+	"""Cálculo comercial (versión 2): UNA línea por línea comercial -- misma
+	línea del pedido y mismo precio final -- sumando sus filas internas (la
+	división 3 + 1 de Bodega no es un segundo producto). La cantidad se
+	expresa en la unidad del precio: unidades de inventario facturables /
+	factor de la línea del pedido (2 cajas de 6 a $600 = $1.200, no 12 x
+	$600). Una fracción de una unidad indivisible se rechaza, no se redondea."""
+	so_items = {row.name: row for row in so.items}
+	precision = 2
+
+	def final_rate(row):
+		so_item = so_items.get(row.sales_order_item)
+		frozen_rate = flt(row.fg_invoice_rate, precision)
+		return frozen_rate if frozen_rate > 0 else flt(so_item.rate if so_item else 0)
+
+	lines = []
+	billed_stock_by_so_item = {}
+	prices_adjusted = False
+	for _key, members in commercial_lines.group_rows(fresh.get("locations") or [], extra_of_row=lambda r: (flt(final_rate(r), precision),)):
+		first = members[0]
+		stock_qty = flt(sum(invoice_qty(fresh, row) for row in members), 6)
+		if stock_qty <= 0:
+			continue
+		so_item = so_items.get(first.sales_order_item)
+		if not so_item:
+			frappe.throw(
+				_("La línea {0} ({1}) no está vinculada a una línea de la Orden de Venta.").format(first.idx, first.item_code),
+				InvoicePdfNotEligibleError,
+			)
+		factor = flt(so_item.conversion_factor) or 1
+		qty = commercial_lines.to_commercial_qty(stock_qty, factor, so_item.uom, label=so_item.item_name or first.item_code)
+		billed_stock_by_so_item[so_item.name] = billed_stock_by_so_item.get(so_item.name, 0) + stock_qty
+		rate = final_rate(first)
+		if flt(rate, precision) != flt(so_item.rate, precision):
+			prices_adjusted = True
+		amount = flt(qty * rate, precision)
+		list_rate = flt(first.get("fg_invoice_public_rate"), precision) or flt(so_item.price_list_rate, precision)
+		discount_pct = flt((1 - rate / list_rate) * 100, 2) if list_rate > rate > 0 else 0
+		lines.append(
+			{
+				"qty": qty,
+				"qty_display": f"{qty:g}",
+				"uom": so_item.uom or first.get("uom") or "",
+				"description": so_item.item_name or first.item_name or first.item_code,
+				"item_code": first.item_code,
+				"rate": rate,
+				"rate_display": _format_money_co(rate),
+				"amount": amount,
+				"amount_display": _format_money_co(amount),
+				"list_rate_display": _format_money_co(list_rate) if discount_pct else "",
+				"discount_display": f"{discount_pct:g}%" if discount_pct else "",
+				# trazabilidad (no la imprime ningún formato)
+				"stock_qty": stock_qty,
+				"conversion_factor": factor,
+				"sales_order_item": so_item.name,
+				"pick_list_items": [row.name for row in members],
+			}
+		)
+
+	if not lines:
+		frappe.throw(_("Este Pick List no tiene productos alistados para facturar."), InvoicePdfNotEligibleError)
+
+	covers_whole_order = all(
+		abs(billed_stock_by_so_item.get(item.name, 0) - flt(item.stock_qty)) < 1e-6 for item in so.items
+	)
+	return lines, _invoice_totals(so, lines, covers_whole_order, prices_adjusted)
+
+
+def _invoice_totals(so, lines, covers_whole_order, prices_adjusted):
+	"""Totales (mismas reglas fiscales de siempre, una sola implementación
+	para el cálculo comercial)."""
+	precision = 2
+	has_order_adjustments = bool(flt(so.total_taxes_and_charges) or flt(so.discount_amount))
+	breakdown = []
+	detail = []
+	if prices_adjusted and has_order_adjustments:
+		frappe.throw(
+			_(
+				"Los precios de esta factura difieren de los de la Orden de Venta {0}, que tiene impuestos "
+				"o descuento global; la factura comercial no puede recalcularlos sin una regla fiscal definida."
+			).format(so.name),
+			InvoicePdfNotEligibleError,
+		)
+	if covers_whole_order and not prices_adjusted:
+		total = flt(so.rounded_total) or flt(so.grand_total)
+		detail = _order_totals_detail(so)
+		if has_order_adjustments:
+			breakdown.append({"label": "Subtotal", "amount_display": _format_money_co(so.total)})
+			if flt(so.discount_amount):
+				breakdown.append({"label": "Descuento", "amount_display": _format_money_co(-flt(so.discount_amount))})
+			if flt(so.total_taxes_and_charges):
+				breakdown.append({"label": "Impuestos", "amount_display": _format_money_co(so.total_taxes_and_charges)})
+	elif has_order_adjustments:
+		frappe.throw(
+			_(
+				"Esta factura es parcial y la Orden de Venta {0} tiene impuestos o descuento global; "
+				"la factura comercial todavía no puede prorratearlos."
+			).format(so.name),
+			InvoicePdfNotEligibleError,
+		)
+	else:
+		total = flt(sum(line["amount"] for line in lines), precision)
+		detail = [{"label": "Subtotal", "amount_display": _format_money_co(total)}]
+	return {
+		"total": total,
+		"total_display": _format_money_co(total),
+		"total_in_words": _amount_in_words_es(total),
+		"breakdown": breakdown,
+		"detail": detail,
+		"has_line_discounts": any(line["discount_display"] for line in lines),
+	}
+
+
+def _build_invoice_lines_and_totals_legacy(pl, so, fresh=None):
+	"""HOTFIX cantidades divididas -- cálculo HISTÓRICO, conservado tal cual
+	solo para reimprimir facturas emitidas antes del hotfix (Pick List
+	Facturado sin fg_invoice_calc_version): una línea por fila y la
+	cantidad en unidades de inventario por el precio del pedido.
+
+	Líneas + totales desde los documentos reales (ver cabecera de esta
 	sección). Lee las filas de una copia FRESCA del Pick List: el
 	before_print nativo de ERPNext (PickList.group_similar_items(), si
 	group_same_items está activo) muta `locations` en memoria antes de que
@@ -1592,7 +1883,7 @@ def _build_invoice_lines_and_totals(pl, so):
 	lines = []
 	picked_by_so_item = {}
 	prices_adjusted = False
-	fresh = frappe.get_doc("Pick List", pl.name)
+	fresh = fresh or frappe.get_doc("Pick List", pl.name)
 	for row in fresh.get("locations") or []:
 		qty = invoice_qty(fresh, row)
 		if qty <= 0:
@@ -2252,13 +2543,46 @@ def _live_public_rates(pl, sales_orders):
 		so = sales_orders.get(row.sales_order)
 		if so and so.selling_price_list:
 			rows_by_price_list.setdefault(so.selling_price_list, []).append(row)
+	so_items = {item.name: item for so in sales_orders.values() for item in so.items}
 	result = {}
 	for price_list, rows in rows_by_price_list.items():
-		rates = reference_selling_rates({row.item_code for row in rows}, price_list)
+		item_codes = {row.item_code for row in rows}
+		rates = reference_selling_rates(item_codes, price_list)
+		price_uoms = _item_price_uoms(item_codes, price_list)
 		for row in rows:
-			if flt(rates.get(row.item_code)) > 0:
-				result[row.name] = flt(rates[row.item_code])
+			rate = flt(rates.get(row.item_code))
+			if rate <= 0:
+				continue
+			rate = _public_rate_in_line_uom(rate, price_uoms.get(row.item_code), so_items.get(row.sales_order_item))
+			if rate:
+				result[row.name] = rate
 	return result
+
+
+def _item_price_uoms(item_codes, price_list):
+	"""UOM of the Item Price that reference_selling_rates() read (same
+	filters, the session's own permissions)."""
+	return {
+		r.item_code: r.uom
+		for r in frappe.get_list(
+			"Item Price", filters={"price_list": price_list, "item_code": ["in", list(item_codes)]}, fields=["item_code", "uom"]
+		)
+	}
+
+
+def _public_rate_in_line_uom(rate, price_uom, so_item):
+	"""HOTFIX cantidades divididas: the invoice line is priced per unit of
+	its Sales Order line (2 Caja x $600), so the public price must be in that
+	same unit. Item Price is per stock unit (pricing.reference_selling_rates'
+	documented assumption) -> x the line's conversion factor, once. A price
+	in any other unit is not guessed: no public price ("SIN PRECIO")."""
+	if not so_item:
+		return flt(rate)
+	if price_uom and price_uom == so_item.uom:
+		return flt(rate)
+	if not price_uom or price_uom == so_item.stock_uom:
+		return flt(flt(rate) * (flt(so_item.conversion_factor) or 1), 2)
+	return None
 
 
 def _detect_price_mode(final_rate, public_rate, precision):
@@ -2277,6 +2601,7 @@ def _resolve_invoice_lines(pl, sales_orders, public_by_row=None):
 	persistido; si no hay, el rate del Sales Order. Precio público = el
 	congelado si el Pick List ya está Facturado, si no el vigente."""
 	frozen = pl.fg_invoicing_status == FG_INVOICING_FACTURADO
+	legacy = uses_legacy_invoice_calc(pl)
 	if public_by_row is None:
 		public_by_row = {} if frozen else _live_public_rates(pl, sales_orders)
 	so_items = {item.name: item for so in sales_orders.values() for item in so.items}
@@ -2298,13 +2623,20 @@ def _resolve_invoice_lines(pl, sales_orders, public_by_row=None):
 		else:
 			price_mode = _detect_price_mode(final_rate, public_rate, precision)
 		qty = invoice_qty(pl, row)
+		uom = row.uom
+		if not legacy and so_item:
+			# HOTFIX cantidades divididas: amounts in the unit of the price
+			# (stock units / the Sales Order line's factor). Legacy invoices
+			# keep their historical quantities.
+			qty = flt(qty / (flt(so_item.conversion_factor) or 1), commercial_lines.QTY_PRECISION)
+			uom = so_item.uom or row.uom
 		lines.append(
 			frappe._dict(
 				row_name=row.name,
 				item_code=row.item_code,
 				item_name=row.item_name,
 				qty=qty,
-				uom=row.uom,
+				uom=uom,
 				public_rate=public_rate,
 				order_rate=order_rate,
 				final_rate=final_rate,
@@ -2396,6 +2728,31 @@ def _parse_invoice_price(raw, precision):
 			_("El precio admite como máximo {0} decimales.").format(cint(precision)), InvalidInvoicePriceError
 		)
 	return flt(value, precision)
+
+
+def _set_invoice_snapshot(pl, sales_orders):
+	"""HOTFIX cantidades divididas -- persists, in the same save that marks
+	the Pick List Facturado, the calculation version and the exact
+	commercial lines + totals of THIS invoice (immutable). Reprints and a
+	later Cartera obligation always use them. An order the PDF itself cannot
+	render (several Sales Orders, partial with taxes...) keeps the version
+	only: its PDF keeps refusing exactly as before."""
+	pl.fg_invoice_calc_version = commercial_lines.CALC_VERSION_COMMERCIAL
+	so_names = list(sales_orders)
+	if len(so_names) != 1:
+		return
+	messages = len(frappe.local.message_log or [])
+	try:
+		lines, totals = _build_commercial_invoice_lines(pl, sales_orders[so_names[0]])
+	except InvoicePdfNotEligibleError:
+		del (frappe.local.message_log or [])[messages:]
+		return
+	pl.fg_invoice_snapshot = json.dumps(
+		{"version": commercial_lines.CALC_VERSION_COMMERCIAL, "lines": lines, "totals": totals},
+		ensure_ascii=False,
+		sort_keys=True,
+		default=str,
+	)
 
 
 def _freeze_invoice_prices(pl, sales_orders):
@@ -2513,14 +2870,21 @@ def set_invoice_line_price(pick_list_name, pick_list_item, rate):
 
 	precision = row.precision("fg_invoice_rate")
 	new_rate = _parse_invoice_price(rate, precision)
-	public_rate = flt(_live_public_rates(pl, sales_orders).get(row.name), precision)
-
-	current = (flt(row.fg_invoice_rate, precision), row.fg_invoice_price_mode, flt(row.fg_invoice_public_rate, precision))
-	changed = current != (new_rate, INVOICE_PRICE_MODE_SPECIAL, public_rate)
+	public_rates = _live_public_rates(pl, sales_orders)
+	# HOTFIX cantidades divididas: the price belongs to the COMMERCIAL line --
+	# every internal row of the same Sales Order line gets it, so one line
+	# can never end up with two prices (and two invoice lines).
+	members = commercial_lines.find_group(pl.get("locations") or [], commercial_lines.group_id(commercial_lines.group_key(row))) or [row]
+	changed = False
+	for member in members:
+		public_rate = flt(public_rates.get(member.name), precision)
+		current = (flt(member.fg_invoice_rate, precision), member.fg_invoice_price_mode, flt(member.fg_invoice_public_rate, precision))
+		if current != (new_rate, INVOICE_PRICE_MODE_SPECIAL, public_rate):
+			member.fg_invoice_rate = new_rate
+			member.fg_invoice_price_mode = INVOICE_PRICE_MODE_SPECIAL
+			member.fg_invoice_public_rate = public_rate
+			changed = True
 	if changed:
-		row.fg_invoice_rate = new_rate
-		row.fg_invoice_price_mode = INVOICE_PRICE_MODE_SPECIAL
-		row.fg_invoice_public_rate = public_rate
 		_save_invoice_pricing(pl)
 
 	return {"changed": changed, "row_name": row.name, "pricing": _pricing_payload(pl, sales_orders)}

@@ -228,11 +228,14 @@ class TestFulfillmentAnalyzer(IntegrationTestCase):
 		picking is still in progress on a draft."""
 		wh, item, customer = self._new_world("Picked", stock_qty=6, default_material_request_type="Purchase")
 		so = self.world.submitted_sales_order(item.name, wh.name, 10, customer.name)
-		pl = self.world.pick_list_for(so, wh.name)
+		# HOTFIX cantidades divididas: the row carries the order's 10 (the
+		# capped native row of 6 would hide the 4 missing -- now refused).
+		pl = self.world.pick_list_for(so, wh.name, full_lines=True)
 
 		with fx.as_user(self.bodega_user):
 			bodega.start_picking(pl.name)
 			row = bodega.get_pick_list(pl.name)["rows"][0]
+			self.assertEqual(row["qty_solicitada"], 10.0)
 			bodega.set_picked_qty(pl.name, row["row_name"], 6)
 			report = bodega.report_shortage(
 				pick_list=pl.name,
@@ -241,6 +244,7 @@ class TestFulfillmentAnalyzer(IntegrationTestCase):
 				shortage_reason="Stock insuficiente",
 			)
 			self.world.track_existing("Reporte de Faltante", report["name"])
+			self.assertEqual(frappe.db.get_value("Reporte de Faltante", report["name"], "qty_faltante"), 4.0)  # disclosed
 			bodega.finish_picking(pl.name)  # submits -> Sales Order Item.picked_qty updates
 
 		so.reload()
